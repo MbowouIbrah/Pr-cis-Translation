@@ -218,7 +218,7 @@ class TranslatorAI:
     }
 
     def translate_json(self, json_path, target_lang="en", progress_callback=None, limit=None,
-                       model=None, max_tokens=8192):
+                       model=None, max_tokens=8192, repair_alignment=True):
         target_lang = self._LANG_NAMES.get(target_lang.lower(), target_lang)
         if not os.path.exists(json_path):
             return False, "Fichier JSON introuvable."
@@ -328,6 +328,19 @@ class TranslatorAI:
 
         if failed_batch[0] is not None:
             return False, f"Échec lors de la traduction du lot {failed_batch[0]}."
+
+        # Réparation déterministe de l'alignement id<->texte (post-traitement).
+        # Ne touche ni au prompt ni au rendu : ré-ancre les nombres/symboles et
+        # réaligne la prose par segment (barrières = ancres), comble par des cases
+        # vides au lieu de glisser. Corrige le décalage en cascade du mode rapide ;
+        # quasi-neutre sur une sortie déjà alignée (mode raisonnement).
+        if "pages" in data and repair_alignment:
+            from align_repair import repair_blocks
+            for page in data["pages"]:
+                ordered = [b for b in page.get("text_blocks", [])
+                           if (b.get("text") or "").strip()]
+                if ordered:
+                    repair_blocks(ordered)
 
         output_path = json_path.replace(".json", "_translated.json")
         with open(output_path, "w", encoding="utf-8") as f:
