@@ -78,8 +78,11 @@ if __name__ == "__main__":
 
     proc = subprocess.Popen(
         uvicorn_args,
-        # Pas de création de nouvelle console : l'enfant hérite de la nôtre
-        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        # Hériter des flux stdout/stderr du parent — évite les pipes
+        # et les erreurs d'encodage cp1252/utf-8 sur Windows.
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        stdin=subprocess.DEVNULL,
     )
     CHILD_PIDS.add(proc.pid)
 
