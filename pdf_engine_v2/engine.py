@@ -1240,6 +1240,62 @@ class PDFObjectEngine:
                     frame = (box[0], box[2])
                     frame_dur = True
             if frame is None:
+                # OBJET D'ANCRAGE — une LÉGENDE n'est ni dans une cellule ni dans
+                # une boîte : l'objet qu'elle légende est AU-DESSUS d'elle (ou en
+                # dessous), pas autour. Sans ce barreau, son cadre retombe sur la
+                # « colonne », polluée jusqu'à la largeur de page par le moindre
+                # bandeau ou titre pleine largeur — et une légende parfaitement
+                # centrée sous SON image paraît ferrée à gauche (démo : les trois
+                # légendes de photo ; seule celle du milieu s'en tirait, par
+                # ACCIDENT, son image étant centrée sur l'axe de la page).
+                # Ancre = objet vertically ADJACENT dont l'empan CONTIENT p ; le
+                # plus petit gagne. Les fonds quasi pleine page sont ignorés.
+                # Une ancre doit avoir de la SURFACE. `expand_obstacles` contient
+                # les dessins décomposés en items : sans cette exigence, un simple
+                # FILET d'un demi-point posé au-dessus d'un paragraphe lui servirait
+                # de cadre (mesuré : mv21 p12, un paragraphe de corps basculait de
+                # `left` à `justify` parce qu'un filet élargissait sa « colonne »).
+                # C'est la distinction déjà tranchée en P12 : un filet SÉPARE, il ne
+                # CONTIENT pas. Une légende s'adosse à une photo, un panneau — un
+                # objet haut d'au moins une ligne de texte.
+                gap_max = max(6.0, 1.5 * size)
+                h_min = max(8.0, 1.5 * size)
+                anc, anc_area = None, None
+                for ob in obstacles:
+                    if not (ob[0] <= pleft + 2.0 and ob[2] >= pright - 2.0):
+                        continue
+                    if ob[3] - ob[1] < h_min:
+                        continue                        # filet, pas un contenant
+                    above = 0.0 <= ptop - ob[3] <= gap_max
+                    below = 0.0 <= ob[1] - pbottom <= gap_max
+                    if not (above or below):
+                        continue
+                    area = (max(0.0, ob[2] - ob[0]) * max(0.0, ob[3] - ob[1]))
+                    if area >= 0.6 * page_area:
+                        continue
+                    if anc_area is None or area < anc_area:
+                        anc, anc_area = ob, area
+                # UNE ANCRE NE PEUT QUE RESSERRER LE CADRE, JAMAIS L'ÉLARGIR.
+                # C'est la loi de la hiérarchie elle-même (du plus serré au plus
+                # lâche) : un barreau qui DÉBORDE la colonne n'est pas un cadre
+                # plus fin, c'est un objet qui passe par là. Sans elle, un grand
+                # aplat de fond qui s'arrête juste au-dessus d'un paragraphe de
+                # corps lui servait de cadre : sa « colonne » passait de 175 à
+                # 361 pt, le seuil de justification suivait, et un paragraphe en
+                # drapeau était étiré au fer (mesuré : mv21 p12).
+                # AUCUNE EXCEPTION, même sans voisin de colonne : un cadre doit
+                # être PROUVÉ plus serré. Sans colonne, la preuve n'existe pas,
+                # donc on ne touche à rien. Limite assumée : une légende sans le
+                # moindre voisin de colonne (figure seule sur sa page) reste
+                # ferrée à gauche — on préfère la manquer plutôt que d'étirer un
+                # paragraphe de corps sous un aplat large.
+                if (anc is not None
+                        and (anc[2] - anc[0]) > (col_right - col_left) - 1.0):
+                    anc = None
+                if anc is not None:
+                    frame = (anc[0], anc[2])
+                    frame_dur = True
+            if frame is None:
                 frame = (col_left, col_right)
             f_left, f_right = frame
             if f_right - f_left < 1.0:                  # cadre dégénéré
@@ -1435,6 +1491,18 @@ class PDFObjectEngine:
             # source, ce qui est fidèle.
             if not self._para_is_horizontal(p):
                 centered = justified = ferre_droite = False
+
+            # Le CADRE BORNE AUSSI LE CONTENEUR — mais seulement quand
+            # l'alignement s'y adosse. Diagnostiquer « centré » sans borner
+            # l'expansion ne sert à rien : la légende serait recentrée dans un
+            # conteneur qui déborde son image (démo : « Shoppers return… »
+            # recentrée dans [87 ; 352] au lieu de [32 ; 288] — axe faux de 60 pt).
+            # Restreint à centré/ferré à droite pour NE RIEN AMPUTER : un corps de
+            # texte ferré à gauche sous une image large garde sa colonne entière.
+            # No-op pour les cellules et les boîtes (déjà bornées plus haut) : ce
+            # verrou ne mord que sur le nouveau barreau d'ANCRAGE.
+            if frame_dur and (centered or ferre_droite):
+                ref_right = max(min(ref_right, f_right), pright)
 
             # Bord GAUCHE du conteneur. Il ne bouge que si l'alignement l'exige :
             #   centré  → s'étend des DEUX côtés (espace disponible réel) ;

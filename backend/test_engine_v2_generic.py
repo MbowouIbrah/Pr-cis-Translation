@@ -148,6 +148,63 @@ def build(path):
         pg.insert_text((x, 646), lab, fontname=FONT, fontsize=9, color=NOIR,
                        rotate=90)
 
+    # ═════════════════════════════════════════════════════════════════════════
+    # PAGE 2 — P14-bis : LÉGENDES centrées sous des photos HORS AXE.
+    # Le piège : un titre PLEINE LARGEUR pollue la « colonne » des légendes
+    # jusqu'aux bords de la page. Leur cadre réel est LA PHOTO au-dessus d'elles
+    # — ni une cellule, ni une boîte les contenant. Les deux photos sont
+    # volontairement DÉCENTRÉES : une légende qui ne serait « centrée » que par
+    # coïncidence avec l'axe de la PAGE échouerait ici.
+    # ═════════════════════════════════════════════════════════════════════════
+    p2 = doc.new_page(width=W, height=H)
+    bandeau = ("Northern Corridor Traffic Climbs For A Fourth Consecutive "
+               "Quarter As New Depots Open")
+    p2.insert_text((45, 60), bandeau, fontname=FONT, fontsize=14,
+                   color=ENCRE_TITRE)                      # pollue la colonne
+
+    for x0, x1, cap in ((45, 245, "Freight volumes at the northern depot"),
+                        (330, 567, "Transit hub during the evening peak")):
+        p2.draw_rect(fitz.Rect(x0, 95, x1, 205), color=None, fill=(0.86, 0.86, 0.88))
+        cx = (x0 + x1) / 2
+        p2.insert_text((cx - _w(cap, 8) / 2, 217), cap, fontname=FONT,
+                       fontsize=8, color=NOIR)
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # PAGE 3 — P14-bis (LEURRE) : un grand APLAT large s'arrête juste au-dessus
+    # d'un paragraphe de corps EN DRAPEAU, dans une colonne étroite. L'aplat
+    # n'est PAS son cadre : il ne fait que passer. S'il était pris pour tel, la
+    # « colonne » du paragraphe passerait de ~170 à ~425 pt, le seuil de
+    # justification suivrait, et le drapeau serait étiré au fer.
+    # ═════════════════════════════════════════════════════════════════════════
+    p3 = doc.new_page(width=W, height=H)
+    p3.draw_rect(fitz.Rect(45, 80, 470, 260), color=None, fill=(0.90, 0.90, 0.92))
+
+    def _ligne(pg_, x0, x1, y, mots, size):
+        """Pose `mots` entre x0 et x1 EXACTEMENT (bord droit imposé)."""
+        larg = [_w(m, size) for m in mots]
+        gap = ((x1 - x0 - sum(larg)) / (len(mots) - 1)) if len(mots) > 1 else 0
+        x = x0
+        for m, lw in zip(mots, larg):
+            pg_.insert_text((x, y), m, fontname=FONT, fontsize=size, color=NOIR)
+            x += lw + gap
+
+    # Bords droits des lignes INTÉRIEURES : 460 et 468 -> écart = 8 pt.
+    #   • cadre = colonne (170 pt) -> seuil = max(4.5 ; 5.1) = 5.1  -> 8 > 5.1
+    #     -> DRAPEAU (correct)
+    #   • cadre = aplat  (425 pt) -> seuil = max(4.5 ; 12.8) = 12.8 -> 8 <= 12.8
+    #     -> justifié (le bug)
+    # Le piège est donc ARMÉ : les deux cadres donnent des verdicts opposés.
+    _ligne(p3, 300, 460, 280, ["Depot", "throughput", "held", "firm"], 9)
+    _ligne(p3, 300, 468, 293, ["across", "the", "northern", "network"], 9)
+    _ligne(p3, 300, 395, 306, ["through", "the", "winter."], 9)
+    _ligne(p3, 300, 465, 334, ["Managers", "expect", "the", "trend"], 9)
+    _ligne(p3, 300, 430, 347, ["to", "hold", "next", "year."], 9)
+    for i, l in enumerate(["Traffic on the corridor rose",
+                           "steadily through the period",
+                           "as the new depots opened."]):
+        p3.insert_text((45, 280 + i * 13), l, fontname=FONT, fontsize=9,
+                       color=NOIR)
+
     doc.save(path)
     doc.close()
     return path
