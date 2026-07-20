@@ -2137,6 +2137,13 @@ footer {
     overflow: hidden;
     scroll-snap-align: start;
     scroll-snap-stop: always;
+    /* La navbar fixe est déjà compensée par ce padding-top : le sommet de la
+       section doit s'aligner PILE avec le haut du viewport (scroll-margin-top:0).
+       Avec le scroll-margin-top:72px hérité de la règle `section` générale, le
+       point d'ancrage se décale de 72px vers le bas — la section (toujours haute
+       de 100vh) déborde alors de 72px sous le viewport, et c'est ce morceau,
+       jamais atteignable en scroll-snap, qui contient le pied de page. */
+    scroll-margin-top: 0;
     padding-top: 72px !important;
     padding-bottom: 24px !important;
   }
