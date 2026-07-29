@@ -177,6 +177,181 @@ class XLSXTranslatorEngine(TranslationEngine):
                     complet = Path(racine) / nom
                     z.write(complet, complet.relative_to(dossier).as_posix())
 
+    # ── Feuilles, et classeur PARTIEL (aperçu progressif) ─────────────────
+    def feuilles(self, chemin_xlsx: str | None = None) -> list[dict]:
+        """Les feuilles du classeur, dans l'ordre où Excel les affiche.
+
+        Rend `[{"index", "nom", "sheet_id", "r_id", "cible"}]`. L'ORDRE est
+        celui de `<sheets>` dans `workbook.xml`, et c'est le seul qui vaille :
+        le numéro du fichier `sheet3.xml` ne dit RIEN de sa position — un
+        classeur dont on a déplacé les onglets garde les noms de fichiers
+        d'origine. Se fier à `sheetN.xml` afficherait les feuilles dans le
+        désordre, ce que l'utilisateur verrait immédiatement.
+
+        La CIBLE (le fichier réel) se lit dans `xl/_rels/workbook.xml.rels`.
+        Beaucoup de classeurs minimalistes n'ont pas ce fichier : on retombe
+        alors sur `sheet{sheetId}.xml`, faute de mieux, plutôt que de refuser
+        le classeur.
+        """
+        dossier = self._ouvrir(chemin_xlsx) if chemin_xlsx else self._dossier()
+
+        cibles: dict[str, str] = {}
+        rels = dossier / "xl" / "_rels" / "workbook.xml.rels"
+        if rels.exists():
+            arbre = etree.parse(str(rels))
+            for rel in arbre.getroot():
+                rid = rel.get("Id")
+                cible = (rel.get("Target") or "").lstrip("/")
+                if rid and cible:
+                    # Les cibles sont relatives à `xl/`. Une cible absolue
+                    # (« /xl/worksheets/sheet1.xml ») existe aussi : le
+                    # `lstrip` ci-dessus l'a déjà ramenée à la même forme.
+                    cibles[rid] = (cible if cible.startswith("xl/")
+                                   else f"xl/{cible}")
+
+        wb = dossier / "xl" / "workbook.xml"
+        if not wb.exists():
+            return []
+        arbre = etree.parse(str(wb))
+        out = []
+        for i, sh in enumerate(arbre.getroot().xpath(".//s:sheet",
+                                                     namespaces=NS)):
+            rid = sh.get(f"{{{NS['r']}}}id") or ""
+            sid = sh.get("sheetId") or str(i + 1)
+            out.append({
+                "index": i,
+                "nom": sh.get("name") or f"Feuille{i + 1}",
+                "sheet_id": sid,
+                "r_id": rid,
+                "cible": cibles.get(rid, f"xl/worksheets/sheet{sid}.xml"),
+            })
+        return out
+
+    def build_partial_xlsx(self, output_path: str,
+                           only_sheets: set[int] | None = None) -> None:
+        """Écrit un classeur ne contenant QUE les feuilles demandées.
+
+        `only_sheets` : les INDEX (0-basés) des feuilles à garder, au sens de
+        l'ordre d'affichage rendu par `feuilles()`. `None` = tout garder.
+
+        C'est le pendant XLSX de `build_partial_pptx`, et il en reprend les
+        deux règles durement acquises :
+
+        NON DESTRUCTIF. Le dossier temporaire n'est JAMAIS modifié : les
+        fichiers de contrôle amputés sont calculés EN MÉMOIRE et écrits
+        directement dans le zip. La méthode est appelée une fois par feuille
+        pendant l'aperçu, puis une dernière fois pour le fichier final ; une
+        version qui retirerait les feuilles du dossier laisserait le classeur
+        final amputé de tout sauf la première.
+
+        ÉCRITURE ATOMIQUE (fichier temporaire + remplacement) : le convertisseur
+        d'aperçu lit ce fichier pendant qu'on l'écrit, et ne doit jamais tomber
+        sur un zip à moitié rempli.
+
+        CE QU'ON N'ENLÈVE PAS, ET POURQUOI
+        ----------------------------------
+        Seuls les `worksheets/sheetN.xml` non retenus sont exclus, plus leurs
+        rels. Tout le reste est copié tel quel — styles, magasin partagé,
+        thème, images. On pourrait élaguer davantage ; ce serait une erreur :
+
+          · `sharedStrings.xml` est indexé par POSITION. En retirer les entrées
+            d'une feuille écartée décalerait tous les index suivants, et les
+            cellules des feuilles GARDÉES afficheraient le mauvais texte.
+          · `styles.xml` est indexé pareil. Un style retiré, et toute la mise
+            en forme glisse d'un cran.
+
+        Le gain d'un tel élagage serait quelques kilo-octets ; le risque est un
+        aperçu qui montre autre chose que le document. Mesuré côté PPTX :
+        élaguer les médias d'une diapositive isolée ne gagne RIEN, LibreOffice
+        ne lisant pas ce que rien ne référence. La même logique vaut ici.
+        """
+        dossier = self._dossier()
+        toutes = self.feuilles()
+        garder = ({s["index"] for s in toutes} if only_sheets is None
+                  else {i for i in only_sheets})
+        # Au moins UNE feuille : un classeur vide n'est pas ouvrable, et
+        # LibreOffice rendrait une page blanche au lieu de signaler l'erreur.
+        if not garder & {s["index"] for s in toutes}:
+            garder = {toutes[0]["index"]} if toutes else set()
+
+        gardees = [s for s in toutes if s["index"] in garder]
+        cibles_gardees = {s["cible"] for s in gardees}
+        cibles_toutes = {s["cible"] for s in toutes}
+        exclues = cibles_toutes - cibles_gardees
+
+        # Les rels des feuilles écartées (xl/worksheets/_rels/sheetN.xml.rels).
+        exclues_rels = set()
+        for cible in exclues:
+            nom = cible.rsplit("/", 1)[-1]
+            exclues_rels.add(f"xl/worksheets/_rels/{nom}.rels")
+
+        wb_ampute = self._workbook_ampute(dossier, gardees)
+        rels_ampute = self._workbook_rels_ampute(dossier, gardees)
+
+        tmp = f"{output_path}.tmp"
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            for racine, _, fichiers in os.walk(dossier):
+                for nom in fichiers:
+                    complet = Path(racine) / nom
+                    rel = complet.relative_to(dossier).as_posix()
+                    if rel in exclues or rel in exclues_rels:
+                        continue
+                    if rel == "xl/workbook.xml" and wb_ampute is not None:
+                        z.writestr(rel, wb_ampute)
+                        continue
+                    if (rel == "xl/_rels/workbook.xml.rels"
+                            and rels_ampute is not None):
+                        z.writestr(rel, rels_ampute)
+                        continue
+                    z.write(complet, rel)
+        os.replace(tmp, output_path)
+
+    @staticmethod
+    def _workbook_ampute(dossier: Path, gardees: list[dict]) -> bytes | None:
+        """`workbook.xml` où ne restent que les `<sheet>` gardés."""
+        wb = dossier / "xl" / "workbook.xml"
+        if not wb.exists():
+            return None
+        arbre = etree.parse(str(wb))
+        rids = {s["r_id"] for s in gardees}
+        for sh in arbre.getroot().xpath(".//s:sheet", namespaces=NS):
+            if (sh.get(f"{{{NS['r']}}}id") or "") not in rids:
+                sh.getparent().remove(sh)
+        # `definedNames` peut citer une feuille disparue (« =Feuil2!A1 ») :
+        # Excel signale alors une référence brisée à l'ouverture. On retire les
+        # noms qui citent une feuille écartée — l'aperçu n'en a aucun besoin.
+        noms_gardes = {s["nom"] for s in gardees}
+        for dn in arbre.getroot().xpath(".//s:definedName", namespaces=NS):
+            texte = (dn.text or "")
+            cite = texte.split("!")[0].strip("='$ ")
+            if cite and cite not in noms_gardes and "!" in texte:
+                dn.getparent().remove(dn)
+        return etree.tostring(arbre, xml_declaration=True,
+                              encoding="UTF-8", standalone=True)
+
+    @staticmethod
+    def _workbook_rels_ampute(dossier: Path,
+                              gardees: list[dict]) -> bytes | None:
+        """`workbook.xml.rels` privé des relations vers les feuilles écartées.
+
+        Les AUTRES relations (styles, magasin partagé, thème) sont conservées :
+        `workbook.xml` les cite toujours, et une relation manquante rend le
+        classeur illisible.
+        """
+        chemin = dossier / "xl" / "_rels" / "workbook.xml.rels"
+        if not chemin.exists():
+            return None
+        arbre = etree.parse(str(chemin))
+        rids = {s["r_id"] for s in gardees}
+        for rel in list(arbre.getroot()):
+            type_ = rel.get("Type") or ""
+            if not type_.endswith("/worksheet"):
+                continue
+            if (rel.get("Id") or "") not in rids:
+                arbre.getroot().remove(rel)
+        return etree.tostring(arbre, xml_declaration=True,
+                              encoding="UTF-8", standalone=True)
+
     # ── Extraction ────────────────────────────────────────────────────────
     def extract_text(self, input_path: str, output_json: str = "extraction_xlsx.json",
                      filters: dict | None = None, progress_callback=None):
