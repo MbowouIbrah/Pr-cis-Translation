@@ -69,8 +69,13 @@ _PARTIES: dict[str, tuple[bool, str]] = {
                "morts. Un nom qu'Excel refuserait, ou qui entrerait en "
                "collision, n'est pas appliqué — l'onglet garde le sien."),
     "xl/charts/chart*.xml":
-        (False, "Titres, légendes et étiquettes d'axes. Le PPTX les traite "
-                "déjà : la logique est à reprendre, pas à inventer."),
+        (True, "Titres, noms d'axes, étiquettes. La logique du PPTX ne se "
+               "recopie PAS telle quelle : dans un classeur, un `<c:v>` sous "
+               "un cache est le reflet d'une cellule DÉJÀ traduite via "
+               "sharedStrings. Le traduire à nouveau donnerait deux "
+               "formulations pour la même donnée, et Excel réécrit ce cache "
+               "au premier rafraîchissement. On traduit le texte riche "
+               "(`<a:t>`) et les `<c:v>` SANS cache — le texte en dur."),
     "xl/drawings/drawing*.xml":
         (False, "Zones de texte et formes posées sur la feuille."),
     "xl/comments*.xml / xl/threadedComments/*":
@@ -388,6 +393,7 @@ class XLSXTranslatorEngine(TranslationEngine):
         self._injecter_noms_onglets(dossier, traductions)
         self._injecter_chaines_partagees(dossier, traductions)
         self._injecter_chaines_en_ligne(dossier, traductions)
+        self._injecter_graphiques(dossier, traductions)
 
     def build_partial_xlsx(self, output_path: str,
                            only_sheets: set[int] | None = None) -> None:
@@ -533,6 +539,7 @@ class XLSXTranslatorEngine(TranslationEngine):
         self._relever_noms_onglets(dossier, elements, types)
         self._relever_chaines_partagees(dossier, elements, types)
         self._relever_chaines_en_ligne(dossier, elements, types)
+        self._relever_graphiques(dossier, elements, types)
 
         extraction = {
             "workbook": {
@@ -604,6 +611,106 @@ class XLSXTranslatorEngine(TranslationEngine):
             })
             types["workbook"].add("Chaîne partagée")
 
+    @staticmethod
+    def _textes_de_graphique(racine):
+        """Les nœuds de texte TRADUISIBLES d'un `chart*.xml`, dans l'ordre.
+
+        DEUX FAMILLES, ET UNE SEULE RÈGLE POUR LES SÉPARER
+        ---------------------------------------------------
+        `<a:t>` — le texte RICHE du graphique : titre, noms d'axes, étiquettes
+        saisies à la main. Il n'existe que là, il n'est le reflet de rien. On
+        le traduit.
+
+        `<c:v>` — une valeur. Presque toujours sous un `<c:strCache>` ou un
+        `<c:numCache>`, c'est-à-dire le CACHE d'une cellule de la feuille :
+        Excel y recopie ce qu'affiche `Ventes!$B$1` pour dessiner sans relire
+        le classeur.
+
+        CE CACHE NE DOIT PAS ÊTRE TRADUIT ICI, et c'est LA différence avec le
+        moteur PPTX — où le graphique porte ses propres données et où traduire
+        `<c:v>` est juste. Dans un classeur, la cellule d'origine est déjà
+        traduite via `sharedStrings` : traduire aussi son cache, c'est
+        soumettre deux fois le même texte au modèle, qui peut rendre deux
+        formulations différentes. Le graphique afficherait alors autre chose
+        que sa feuille — et au premier rafraîchissement, Excel réécrit le cache
+        depuis la cellule et le travail est perdu.
+
+        MESURÉ sur un graphique réel (titre + 2 axes + série + catégories) :
+        les 7 `<c:v>` sont TOUS sous un cache, et les 3 vrais textes du
+        graphique sont TOUS des `<a:t>`.
+
+        Reste le cas d'un `<c:v>` SANS cache au-dessus : un texte saisi en dur,
+        sans référence à une cellule. Celui-là n'est le reflet de rien, et on
+        le traduit — c'est le sens du test d'ancêtres.
+        """
+        noeuds = []
+        for t in racine.xpath(".//a:t", namespaces=NS):
+            if (t.text or "").strip():
+                noeuds.append(t)
+        for v in racine.xpath(".//c:v", namespaces=NS):
+            texte = (v.text or "").strip()
+            if not texte or est_numerique(texte):
+                continue
+            # Sous un cache = reflet d'une cellule déjà traduite.
+            if any(a.tag.split("}")[-1] in ("strCache", "numCache")
+                   for a in v.iterancestors()):
+                continue
+            noeuds.append(v)
+        return noeuds
+
+    def _relever_graphiques(self, dossier: Path, elements, types) -> None:
+        """`xl/charts/chart*.xml` — titres, noms d'axes, étiquettes.
+
+        Un graphique est ce qu'on regarde en premier dans un classeur : son
+        titre et ses axes non traduits sautent aux yeux, même quand tout le
+        reste est juste.
+        """
+        dossier_charts = dossier / "xl" / "charts"
+        if not dossier_charts.is_dir():
+            return
+        for chart in sorted(dossier_charts.glob("chart*.xml")):
+            arbre = etree.parse(str(chart))
+            for i, noeud in enumerate(self._textes_de_graphique(
+                    arbre.getroot())):
+                elements.append({
+                    "id": f"chart_{chart.stem}_{i}",
+                    "text": f"[[0]]{noeud.text}[[/0]]",
+                    "context": {"part": "chart", "chart": chart.stem,
+                                "index": i},
+                })
+                types["workbook"].add("Graphique")
+
+    def _injecter_graphiques(self, dossier: Path, traductions: dict) -> None:
+        """Réinjecte dans les graphiques, par POSITION.
+
+        L'appariement se fait sur l'ordre des nœuds, exactement comme au
+        relevé : `_textes_de_graphique` est la SEULE source des deux côtés, si
+        bien qu'aucune divergence n'est possible. Se fier au texte pour
+        retrouver un nœud échouerait dès que deux axes portent le même libellé.
+        """
+        from engines import runtags
+
+        dossier_charts = dossier / "xl" / "charts"
+        if not dossier_charts.is_dir():
+            return
+        for chart in sorted(dossier_charts.glob("chart*.xml")):
+            arbre = etree.parse(str(chart))
+            touche = False
+            for i, noeud in enumerate(self._textes_de_graphique(
+                    arbre.getroot())):
+                traduit = traductions.get(f"chart_{chart.stem}_{i}")
+                if traduit is None:
+                    continue
+                # Un seul nœud, donc une seule balise : `sans_balises` suffit,
+                # là où les cellules passent par `_repartir` (plusieurs `<t>`).
+                propre = runtags.sans_balises(traduit).strip()
+                if propre and propre != noeud.text:
+                    noeud.text = propre
+                    touche = True
+            if touche:
+                arbre.write(str(chart), xml_declaration=True,
+                            encoding="UTF-8", standalone=True)
+
     def _relever_chaines_en_ligne(self, dossier: Path, elements, types) -> None:
         """Cellules `t="inlineStr"` — la chaîne est écrite DANS la feuille.
 
@@ -666,6 +773,7 @@ class XLSXTranslatorEngine(TranslationEngine):
             self._injecter_noms_onglets(dossier, traductions)
             self._injecter_chaines_partagees(dossier, traductions)
             self._injecter_chaines_en_ligne(dossier, traductions)
+            self._injecter_graphiques(dossier, traductions)
 
             self._refermer(output_path)
             return True, "Classeur traduit."

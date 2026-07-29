@@ -111,6 +111,60 @@ FEUILLES = [
     ("Synthese", "xl/worksheets/sheet2.xml"),
 ]
 
+# ── Graphique ───────────────────────────────────────────────────────────────
+# Reproduit la structure d'un `chart1.xml` réel, relevée sur un graphique
+# produit par Excel. Deux familles de texte s'y côtoient, et TOUT l'enjeu est
+# de ne pas les confondre :
+#
+#   `<a:t>`  le texte RICHE — titre, noms d'axes. Il n'existe QUE là.
+#   `<c:v>`  une valeur. Sous un `<c:strCache>`, c'est le CACHE d'une cellule
+#            de la feuille, déjà traduite via `sharedStrings` : le traduire
+#            ici la soumettrait DEUX FOIS au modèle, qui peut rendre deux
+#            formulations. Le graphique afficherait alors autre chose que sa
+#            feuille — et Excel réécrit ce cache au premier rafraîchissement.
+#
+# Le dernier `<c:v>` est délibérément SANS cache : un texte saisi en dur, qui
+# n'est le reflet de rien. Celui-là se traduit.
+_CHART = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<c:chart>
+<c:title><c:tx><c:rich><a:p><a:r><a:t>Evolution des ventes</a:t></a:r></a:p></c:rich></c:tx></c:title>
+<c:plotArea>
+<c:barChart>
+<c:ser>
+<c:tx><c:strRef><c:f>Ventes!$B$1</c:f>
+<c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Marge brute</c:v></c:pt></c:strCache>
+</c:strRef></c:tx>
+<c:cat><c:strRef><c:f>Ventes!$A$2</c:f>
+<c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Janvier</c:v></c:pt></c:strCache>
+</c:strRef></c:cat>
+<c:val><c:numRef><c:f>Ventes!$B$2</c:f>
+<c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>1200</c:v></c:pt></c:numCache>
+</c:numRef></c:val>
+</c:ser>
+</c:barChart>
+<c:catAx><c:title><c:tx><c:rich><a:p><a:r><a:t>Periode</a:t></a:r></a:p></c:rich></c:tx></c:title></c:catAx>
+<c:valAx><c:title><c:tx><c:rich><a:p><a:r><a:t>Euros</a:t></a:r></a:p></c:rich></c:tx></c:title></c:valAx>
+</c:plotArea>
+<c:legend><c:tx><c:v>Legende en dur</c:v></c:tx></c:legend>
+</c:chart>
+</c:chartSpace>"""
+
+#: Ce que le moteur DOIT relever dans le graphique, dans l'ordre.
+CHART_TRADUISIBLES = ["Evolution des ventes", "Periode", "Euros",
+                      "Legende en dur"]
+#: Ce qu'il ne doit PAS toucher : les caches de cellules et les nombres.
+CHART_INTOUCHABLES = ["Marge brute", "Janvier", "1200"]
+
+
+def construire_avec_graphique(chemin: str) -> str:
+    """Le classeur multi-feuilles, plus un `xl/charts/chart1.xml`."""
+    construire_multi(chemin)
+    with zipfile.ZipFile(chemin, "a", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("xl/charts/chart1.xml", _CHART)
+    return chemin
+
 
 def construire_multi(chemin: str) -> str:
     """Un classeur de TROIS feuilles dont la numérotation trompe l'ordre."""

@@ -69,6 +69,24 @@ que là. C'est précisément pourquoi la preuve se fait sur du synthétique.
 | `xl/sharedStrings.xml` | ✅ le gros du texte — Excel y déduplique les chaînes |
 | Cellules `t="inlineStr"` | ✅ chaîne écrite dans la feuille, sans magasin partagé |
 | `xl/workbook.xml` — noms d'onglets | ✅ renommage **et** réécriture des références, d'un seul geste |
+| `xl/charts/chart*.xml` | ✅ titres, noms d'axes, étiquettes en dur — **jamais** les caches |
+
+### Les graphiques : là où la logique du PPTX ne se recopie pas
+
+Le moteur PPTX traduit les `<c:v>` d'un graphique, et il a raison : là-bas, le
+graphique porte ses **propres** données.
+
+Dans un classeur, c'est faux. Un `<c:v>` sous un `<c:strCache>` est le **cache**
+d'une cellule de la feuille — déjà traduite via `sharedStrings`. Le traduire à
+nouveau, c'est soumettre deux fois le même texte au modèle (qui peut rendre deux
+formulations : le graphique afficherait alors autre chose que sa feuille), et
+pour rien — Excel réécrit ce cache au premier rafraîchissement.
+
+Mesuré sur un graphique produit par Excel : les **7 `<c:v>` sont tous sous un
+cache**, et les **3 vrais textes sont tous des `<a:t>`**.
+
+La règle : on traduit le texte riche (`<a:t>`) et les `<c:v>` **sans** cache
+au-dessus — du texte saisi en dur, qui n'est le reflet de rien.
 
 ### Les noms d'onglets : deux gestes qui n'en font qu'un
 
