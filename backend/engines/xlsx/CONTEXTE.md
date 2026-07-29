@@ -9,7 +9,7 @@ Version **0.1.0** · `engines/xlsx/` · inscrit au registre sous `xlsx`
 > réassemblé. Un `.xlsx` entre et ressort ouvrable par Excel.
 >
 > La **couverture du format** ne l'est pas. Excel range du texte à une dizaine
-> d'endroits ; deux sont traités. Les autres sont recensés plus bas — pas
+> d'endroits ; **six** sont traités. Les autres sont recensés plus bas — pas
 > oubliés, pas masqués.
 >
 > D'où le **0.1.0** et non 1.0.0 : une version majeure dit « le contrat est
@@ -73,6 +73,12 @@ que là. C'est précisément pourquoi la preuve se fait sur du synthétique.
 | `xl/drawings/drawing*.xml` | ✅ zones de texte et formes — **jamais** le `name=` |
 | `comments*.xml` + `threadedComments/*` | ✅ les **deux** formats — **jamais** les `<author>` |
 
+La seconde n'est pas un détail : beaucoup d'exports automatiques n'utilisent
+**que** cette forme et ne produisent aucun `sharedStrings.xml`. Ne lire que le
+magasin partagé rendrait ces classeurs **inchangés sans lever d'erreur** — le
+pire des échecs, celui qui se croit réussi.
+
+
 ### Annotations : on traduit ce qui s'affiche, jamais ce qui identifie
 
 Deux formats de commentaires **coexistent** : `comments*.xml` (historique,
@@ -125,11 +131,6 @@ pas de `: \ / ? * [ ]`, pas d'apostrophe, pas de doublon) : une traduction qui
 les viole n'est pas appliquée et l'onglet garde son nom. Un onglet non traduit
 se voit ; un fichier qu'Excel refuse d'ouvrir ne se rattrape pas.
 
-La seconde n'est pas un détail : beaucoup d'exports automatiques n'utilisent
-**que** cette forme et ne produisent aucun `sharedStrings.xml`. Ne lire que le
-magasin partagé rendrait ces classeurs **inchangés sans lever d'erreur** — le
-pire des échecs, celui qui se croit réussi.
-
 ## Ce qui n'est pas encore fait
 
 Recensé dans `_PARTIES` (`engine.py`), avec le motif de chacun. C'est le **plan
@@ -137,10 +138,6 @@ de travail**, ordonné par importance et non par ordre alphabétique.
 
 | Partie | Pourquoi ça compte |
 |---|---|
-| `xl/workbook.xml` — noms d'onglets | Visibles, **et cités par les formules** (`=Feuil1!A1`). Les traduire impose de réécrire les formules qui les citent : à faire d'un seul geste, sinon le classeur casse. |
-| `xl/charts/chart*.xml` | Titres, légendes, étiquettes d'axes. Le moteur PPTX les traite déjà — logique à **reprendre**, pas à inventer. |
-| `xl/drawings/drawing*.xml` | Zones de texte et formes posées sur la feuille. |
-| `comments*.xml` / `threadedComments` | Deux formats coexistent, l'ancien et le moderne. |
 | `xl/tables/table*.xml` | En-têtes de tableaux structurés — visibles, et cités en références structurées. |
 | `pivotCache` / `pivotTables` | Les libellés sont **dupliqués** entre le cache et la table. N'en traduire qu'un des deux désaligne le croisé au premier rafraîchissement. |
 | `xl/styles.xml` — formats personnalisés | Un format peut contenir du texte littéral (`#\ ##0\ "F CFA"`). C'est du visible, et la syntaxe doit rester intacte autour du mot. |
