@@ -68,6 +68,28 @@ que là. C'est précisément pourquoi la preuve se fait sur du synthétique.
 |---|---|
 | `xl/sharedStrings.xml` | ✅ le gros du texte — Excel y déduplique les chaînes |
 | Cellules `t="inlineStr"` | ✅ chaîne écrite dans la feuille, sans magasin partagé |
+| `xl/workbook.xml` — noms d'onglets | ✅ renommage **et** réécriture des références, d'un seul geste |
+
+### Les noms d'onglets : deux gestes qui n'en font qu'un
+
+Un nom d'onglet est cité à **trois** endroits — `<sheet name>`, les
+`<definedName>`, et les `<f>` de chaque feuille. Renommer sans réécrire produit
+`#REF!` partout : un classeur ouvrable, d'apparence traduite, dont tous les
+calculs sont morts.
+
+La réécriture n'est pas un `str.replace`, et quatre cas l'imposent :
+
+| Cas | Piège |
+|---|---|
+| `="Ventes du mois"` | chaîne **littérale** qui contient le nom |
+| `Ventes` / `Ventes2` | un nom en **préfixe** d'un autre |
+| `[1]Ventes!A1` | classeur **externe**, qu'on ne traduit pas |
+| `'Chiffre d''affaires'!A1` | apostrophes **doublées** |
+
+**Un nom refusé n'est pas une erreur.** Excel impose ses règles (31 caractères,
+pas de `: \ / ? * [ ]`, pas d'apostrophe, pas de doublon) : une traduction qui
+les viole n'est pas appliquée et l'onglet garde son nom. Un onglet non traduit
+se voit ; un fichier qu'Excel refuse d'ouvrir ne se rattrape pas.
 
 La seconde n'est pas un détail : beaucoup d'exports automatiques n'utilisent
 **que** cette forme et ne produisent aucun `sharedStrings.xml`. Ne lire que le

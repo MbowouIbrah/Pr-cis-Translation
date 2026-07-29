@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import zipfile
@@ -61,9 +62,12 @@ _PARTIES: dict[str, tuple[bool, str]] = {
                "souvent que cette forme — les ignorer, c'est ne rien traduire "
                "d'un classeur entier."),
     "xl/workbook.xml (noms d'onglets)":
-        (False, "Le nom d'un onglet est VISIBLE et référencé par les formules "
-                "(`=Feuil1!A1`). Le traduire impose de réécrire les formules "
-                "qui le citent, sinon le classeur casse. À traiter ensemble."),
+        (True, "Nom VISIBLE et référencé par les formules (`=Feuil1!A1`). "
+               "Renommage et réécriture des références (formules, noms "
+               "définis, plages 3D) faits ENSEMBLE : séparés, ils laisseraient "
+               "un classeur d'apparence traduite dont tous les calculs sont "
+               "morts. Un nom qu'Excel refuserait, ou qui entrerait en "
+               "collision, n'est pas appliqué — l'onglet garde le sien."),
     "xl/charts/chart*.xml":
         (False, "Titres, légendes et étiquettes d'axes. Le PPTX les traite "
                 "déjà : la logique est à reprendre, pas à inventer."),
@@ -102,6 +106,108 @@ def est_numerique(valeur: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+#: Caractères qu'Excel INTERDIT dans un nom d'onglet, plus l'apostrophe qui
+#: sert de délimiteur. Un nom traduit qui en contiendrait rendrait le classeur
+#: illisible — on refuse alors la traduction et on garde le nom d'origine.
+_CAR_INTERDITS_ONGLET = set(":\\/?*[]'")
+#: Longueur maximale d'un nom d'onglet, imposée par Excel.
+_LONGUEUR_MAX_ONGLET = 31
+
+
+def nom_onglet_valide(nom: str) -> bool:
+    """Excel accepterait-il ce nom d'onglet ?
+
+    Cinq règles, toutes du format et non de ce projet : non vide, 31
+    caractères au plus, aucun de `: \\ / ? * [ ]`, pas d'apostrophe (elle
+    délimite les noms dans les références), et pas d'apostrophe en tête ou en
+    queue.
+
+    Un nom refusé n'est pas une erreur : c'est un nom qu'on NE TRADUIT PAS. Le
+    classeur garde alors son onglet d'origine, ce qui est toujours préférable
+    à un fichier qu'Excel refuse d'ouvrir.
+    """
+    n = (nom or "").strip()
+    if not n or len(n) > _LONGUEUR_MAX_ONGLET:
+        return False
+    if any(c in _CAR_INTERDITS_ONGLET for c in n):
+        return False
+    return not (n.startswith("'") or n.endswith("'"))
+
+
+def _citation(nom: str) -> str:
+    """Le nom tel qu'il s'écrit DANS une référence.
+
+    Excel entoure d'apostrophes tout nom qui n'est pas un simple identifiant,
+    et double les apostrophes internes. On ne produit jamais de nom à
+    apostrophe (cf. `nom_onglet_valide`), mais on doit savoir en LIRE.
+    """
+    if re.fullmatch(r"[A-Za-z_À-ɏ][A-Za-z0-9_.À-ɏ]*", nom):
+        return nom
+    return "'" + nom.replace("'", "''") + "'"
+
+
+def reecrire_references(formule: str, renommage: dict[str, str]) -> str:
+    """Remplace les noms d'onglets cités par une formule ou un nom défini.
+
+    POURQUOI CE N'EST PAS UN `str.replace`
+    --------------------------------------
+    Un remplacement naïf casse le classeur de quatre façons, toutes réelles :
+
+      · « Ventes » remplacerait aussi le mot dans la chaîne littérale
+        `="Ventes du mois"` — on ne touche qu'à ce qui PRÉCÈDE un « ! » ;
+      · un onglet nommé « Ventes » et un autre « Ventes2 » se confondraient ;
+      · `[1]Ventes!A1` désigne un onglet d'un classeur EXTERNE, que nous ne
+        traduisons pas — le préfixe `[n]` protège donc la référence ;
+      · `'Chiffre d''affaires'!A1` porte des apostrophes doublées ; les ignorer
+        couperait le nom en deux.
+
+    La plage 3D `Ventes:Synthese!A1` cite DEUX onglets d'un coup : les deux
+    sont réécrits.
+
+    Les chaînes littérales sont mises à l'abri AVANT toute réécriture, puis
+    remises telles quelles : c'est le seul moyen sûr de ne pas traduire du
+    texte qui ressemble à une référence.
+    """
+    if not formule or not renommage:
+        return formule
+
+    # 1. Mettre les chaînes littérales de côté (`"…"`, apostrophes doublées
+    #    à l'intérieur d'Excel : `""`).
+    litterales: list[str] = []
+
+    def _garer(m):
+        litterales.append(m.group(0))
+        return f"\x00{len(litterales) - 1}\x00"
+
+    sans_texte = re.sub(r'"(?:[^"]|"")*"', _garer, formule)
+
+    # 2. Réécrire les références. Le motif capture soit un nom entre
+    #    apostrophes, soit un identifiant nu, suivi de « ! » ou de « : ».
+    def _remplacer(m):
+        prefixe = m.group("ext") or ""
+        if prefixe:
+            return m.group(0)          # classeur externe : intouchable
+        brut = m.group("nom")
+        if brut.startswith("'") and brut.endswith("'"):
+            nom = brut[1:-1].replace("''", "'")
+        else:
+            nom = brut
+        cible = renommage.get(nom)
+        if cible is None:
+            return m.group(0)
+        return _citation(cible) + m.group("fin")
+
+    motif = re.compile(
+        r"(?P<ext>\[\d+\])?"
+        r"(?P<nom>'(?:[^']|'')+'|[A-Za-z_À-ɏ][A-Za-z0-9_.À-ɏ]*)"
+        r"(?P<fin>\s*[!:])")
+    reecrit = motif.sub(_remplacer, sans_texte)
+
+    # 3. Remettre les chaînes littérales.
+    return re.sub(r"\x00(\d+)\x00",
+                  lambda m: litterales[int(m.group(1))], reecrit)
 
 
 def _baliser(morceaux: list) -> str:
@@ -279,6 +385,7 @@ class XLSXTranslatorEngine(TranslationEngine):
         Ne rend rien et ne referme rien : l'appelant reste maître du dossier.
         """
         dossier = self._dossier()
+        self._injecter_noms_onglets(dossier, traductions)
         self._injecter_chaines_partagees(dossier, traductions)
         self._injecter_chaines_en_ligne(dossier, traductions)
 
@@ -423,6 +530,7 @@ class XLSXTranslatorEngine(TranslationEngine):
         if progress_callback:
             progress_callback("Lecture du classeur…")
 
+        self._relever_noms_onglets(dossier, elements, types)
         self._relever_chaines_partagees(dossier, elements, types)
         self._relever_chaines_en_ligne(dossier, elements, types)
 
@@ -440,6 +548,38 @@ class XLSXTranslatorEngine(TranslationEngine):
         with open(output_json, "w", encoding="utf-8") as f:
             json.dump(extraction, f, ensure_ascii=False, indent=2)
         return extraction, output_json
+
+    def _relever_noms_onglets(self, dossier: Path, elements, types) -> None:
+        """`xl/workbook.xml` — le nom de chaque onglet.
+
+        Un nom d'onglet est VISIBLE, en bas de la fenêtre : le laisser en langue
+        source dans un classeur par ailleurs traduit se remarque immédiatement.
+
+        Il est aussi RÉFÉRENCÉ — par les formules (`=Ventes!A1`) et par les noms
+        définis. Le traduire sans réécrire ces références produit `#REF!` dans
+        toute la feuille. Les deux gestes sont donc faits ENSEMBLE à
+        l'injection ; le relevé, lui, se contente de nommer chaque onglet.
+
+        Pas de balises `[[n]]` ici : un nom d'onglet n'a pas de mise en forme
+        par morceaux, et le baliser ferait passer des crochets dans un champ où
+        Excel ne les accepte pas.
+
+        `dossier` n'est pas lu — `feuilles()` travaille déjà sur le dossier
+        courant — mais reste dans la signature : les trois releveurs s'appellent
+        de la même façon, et briser cette symétrie pour un paramètre inutilisé
+        rendrait le point d'appel moins lisible qu'il ne l'est.
+        """
+        for f in self.feuilles():
+            nom = f["nom"]
+            if not nom.strip() or est_numerique(nom):
+                continue
+            elements.append({
+                "id": f"sheetname_{f['index']}",
+                "text": nom,
+                "context": {"part": "sheetName", "index": f["index"],
+                            "sheet_id": f["sheet_id"]},
+            })
+            types["workbook"].add("Nom d'onglet")
 
     def _relever_chaines_partagees(self, dossier: Path, elements, types) -> None:
         """`xl/sharedStrings.xml` — le magasin de chaînes du classeur.
@@ -518,6 +658,12 @@ class XLSXTranslatorEngine(TranslationEngine):
             if progress_callback:
                 progress_callback("Réinjection dans le classeur…")
 
+            # L'ordre compte : les noms d'onglets D'ABORD. La réécriture des
+            # références lit les noms COURANTS des feuilles pour construire sa
+            # table de renommage ; la faire après une autre injection ne
+            # changerait rien ici, mais garder le même ordre que
+            # `injecter_partiel` évite d'avoir à se poser la question.
+            self._injecter_noms_onglets(dossier, traductions)
             self._injecter_chaines_partagees(dossier, traductions)
             self._injecter_chaines_en_ligne(dossier, traductions)
 
@@ -529,6 +675,91 @@ class XLSXTranslatorEngine(TranslationEngine):
             return False, f"Le classeur n'a pas pu être reconstruit : {exc}"
         finally:
             self._nettoyer()
+
+    def _injecter_noms_onglets(self, dossier: Path, traductions: dict) -> None:
+        """Renomme les onglets ET réécrit TOUTES les références qui les citent.
+
+        LES DEUX GESTES SONT UN SEUL, ET C'EST TOUT L'ENJEU
+        ---------------------------------------------------
+        Un nom d'onglet est cité à trois endroits, et en oublier un casse le
+        classeur :
+
+          · `<sheet name="…">` dans `workbook.xml` — le nom lui-même ;
+          · `<definedName>` — les noms définis (`Zone_ventes` -> `Ventes!$A$1`) ;
+          · `<f>` dans chaque feuille — les formules (`=Ventes!A2-Charges!A2`).
+
+        Renommer l'onglet sans réécrire les formules produit `#REF!` dans toute
+        la feuille : l'utilisateur reçoit un classeur ouvrable, d'apparence
+        traduite, et dont tous les calculs sont morts. C'est exactement le
+        genre de dégât silencieux qu'on refuse.
+
+        UN NOM REFUSÉ N'EST PAS UNE ERREUR
+        ----------------------------------
+        Excel impose ses règles (31 caractères, pas de `: \\ / ? * [ ]`, pas
+        d'apostrophe). Une traduction qui les viole n'est pas appliquée : le
+        classeur garde l'onglet d'origine. Un onglet non traduit se voit ;
+        un classeur qu'Excel refuse d'ouvrir ne se rattrape pas.
+
+        On refuse aussi les COLLISIONS — deux onglets ne peuvent pas porter le
+        même nom, et le modèle peut très bien traduire « Ventes » et « Ventes
+        2026 » par le même mot. La comparaison est insensible à la casse, comme
+        celle d'Excel.
+        """
+        wb = dossier / "xl" / "workbook.xml"
+        if not wb.exists():
+            return
+
+        feuilles = self.feuilles()
+        renommage: dict[str, str] = {}
+        # Les noms DÉJÀ pris : ceux qu'on ne traduit pas restent en place et
+        # continuent d'occuper leur nom.
+        pris = {f["nom"].casefold() for f in feuilles}
+
+        for f in feuilles:
+            propose = (traductions.get(f"sheetname_{f['index']}") or "").strip()
+            if not propose or propose == f["nom"]:
+                continue
+            if not nom_onglet_valide(propose):
+                continue
+            if propose.casefold() in pris - {f["nom"].casefold()}:
+                continue                      # collision : on garde l'original
+            pris.discard(f["nom"].casefold())
+            pris.add(propose.casefold())
+            renommage[f["nom"]] = propose
+
+        if not renommage:
+            return
+
+        # 1. Le nom lui-même, et les noms définis.
+        arbre = etree.parse(str(wb))
+        for sh in arbre.getroot().xpath(".//s:sheet", namespaces=NS):
+            cible = renommage.get(sh.get("name") or "")
+            if cible:
+                sh.set("name", cible)
+        for dn in arbre.getroot().xpath(".//s:definedName", namespaces=NS):
+            if dn.text:
+                dn.text = reecrire_references(dn.text, renommage)
+        arbre.write(str(wb), xml_declaration=True, encoding="UTF-8",
+                    standalone=True)
+
+        # 2. Les formules de CHAQUE feuille. Une formule d'une feuille peut
+        #    citer n'importe quelle autre : on les parcourt toutes.
+        for f in feuilles:
+            chemin = dossier / f["cible"]
+            if not chemin.exists():
+                continue
+            arbre_f = etree.parse(str(chemin))
+            touche = False
+            for noeud in arbre_f.getroot().xpath(".//s:f", namespaces=NS):
+                if not noeud.text:
+                    continue
+                reecrit = reecrire_references(noeud.text, renommage)
+                if reecrit != noeud.text:
+                    noeud.text = reecrit
+                    touche = True
+            if touche:
+                arbre_f.write(str(chemin), xml_declaration=True,
+                              encoding="UTF-8", standalone=True)
 
     def _injecter_chaines_partagees(self, dossier: Path, traductions: dict) -> None:
         chemin = dossier / "xl" / "sharedStrings.xml"
