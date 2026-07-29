@@ -93,6 +93,19 @@ def run_translation_job(
             elif ext == "pptx" and pptx_eng:
                 filters = {"shapes": True, "smartarts": True, "tables": True, "connectors": True}
                 extraction, _ = pptx_eng.extract_text(original_path, extraction_path, filters=filters, progress_callback=cb_extract, pages=pages_set)
+            elif ext == "xlsx":
+                # Le moteur XLSX était ENREGISTRÉ et l'extension ACCEPTÉE à
+                # l'envoi, mais aucune branche ne l'appelait : tout classeur
+                # échouait ici sur « Type de fichier .xlsx non supporté ». Le
+                # moteur passait ses 29 contrôles sans jamais servir.
+                #
+                # Pas de `filters` : un classeur n'a pas de sections à cocher
+                # (en-têtes, zones de texte, SmartArts). Ce que le moteur sait
+                # lire, il le lit ; ce qu'il ne sait pas encore lire est déclaré
+                # dans `workbook.non_traite` (cf. `_PARTIES`).
+                extraction, _ = engines.new_engine("xlsx").extract_text(
+                    original_path, extraction_path,
+                    progress_callback=cb_extract)
             else:
                 raise ValueError(f"Type de fichier .{ext} non supporté.")
             if not extraction:
@@ -139,6 +152,15 @@ def run_translation_job(
             if inj_ok:
                 pptm_auto_path = output_path[:-5] + "_autorefresh.pptm" if output_path.endswith(".pptx") else output_path + "_autorefresh.pptm"
                 pptx_eng.generate_autorefresh_pptm(output_path, pptm_auto_path)
+        elif ext == "xlsx":
+            # Instance NEUVE, comme partout ailleurs : tout l'état du moteur
+            # tient dans son dossier temporaire, et deux opérations qui le
+            # partagent écrivent dans les mêmes fichiers (cf. engines/CONTEXTE).
+            # Ce n'est PAS le moteur qui a servi à l'extraction : celui-là a
+            # déjà nettoyé son dossier.
+            inj_ok, inj_msg = engines.new_engine("xlsx").inject_translation(
+                original_path, translated_path, output_path,
+                format_options=format_opts)
         else:
             raise ValueError("Type de fichier non supporté pour la génération.")
 
