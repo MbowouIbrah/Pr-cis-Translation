@@ -77,10 +77,17 @@ _PARTIES: dict[str, tuple[bool, str]] = {
                "au premier rafraîchissement. On traduit le texte riche "
                "(`<a:t>`) et les `<c:v>` SANS cache — le texte en dur."),
     "xl/drawings/drawing*.xml":
-        (False, "Zones de texte et formes posées sur la feuille."),
+        (True, "Zones de texte et formes posées sur la feuille — souvent "
+               "l'essentiel du commentaire éditorial. Le `name=` d'une forme "
+               "(« TextBox 1 ») est un IDENTIFIANT interne, jamais affiché et "
+               "cité par les macros : jamais traduit."),
     "xl/comments*.xml / xl/threadedComments/*":
-        (False, "Commentaires. Deux formats coexistent : l'ancien (comments) "
-                "et le moderne (threadedComments)."),
+        (True, "Les DEUX formats sont traités : l'ancien porte le texte "
+               "affiché, le moderne les fils de discussion, et Excel maintient "
+               "les deux — n'en traiter qu'un laisse la moitié des notes en "
+               "langue source. Les `<author>` ne sont JAMAIS traduits : ce "
+               "sont des noms de personnes, et `authorId` y renvoie par "
+               "index."),
     "xl/tables/table*.xml":
         (False, "En-têtes de tableaux structurés — visibles, et cités par les "
                 "formules en références structurées."),
@@ -394,6 +401,9 @@ class XLSXTranslatorEngine(TranslationEngine):
         self._injecter_chaines_partagees(dossier, traductions)
         self._injecter_chaines_en_ligne(dossier, traductions)
         self._injecter_graphiques(dossier, traductions)
+        self._injecter_dessins(dossier, traductions)
+        self._injecter_commentaires(dossier, traductions)
+        self._injecter_fils(dossier, traductions)
 
     def build_partial_xlsx(self, output_path: str,
                            only_sheets: set[int] | None = None) -> None:
@@ -540,6 +550,9 @@ class XLSXTranslatorEngine(TranslationEngine):
         self._relever_chaines_partagees(dossier, elements, types)
         self._relever_chaines_en_ligne(dossier, elements, types)
         self._relever_graphiques(dossier, elements, types)
+        self._relever_dessins(dossier, elements, types)
+        self._relever_commentaires(dossier, elements, types)
+        self._relever_fils(dossier, elements, types)
 
         extraction = {
             "workbook": {
@@ -711,6 +724,171 @@ class XLSXTranslatorEngine(TranslationEngine):
                 arbre.write(str(chart), xml_declaration=True,
                             encoding="UTF-8", standalone=True)
 
+    def _relever_dessins(self, dossier: Path, elements, types) -> None:
+        """`xl/drawings/drawing*.xml` — zones de texte et formes.
+
+        Une zone de texte posée sur une feuille porte souvent l'essentiel du
+        commentaire éditorial : un encadré « Attention », une légende, une note
+        de bas de tableau. Elle est aussi visible que le tableau lui-même.
+
+        Le texte y vit dans des `<a:t>`, comme dans un graphique — c'est le
+        même DrawingML.
+
+        CE QU'ON NE TOUCHE PAS : le `name=` d'un `<xdr:cNvPr>` (« TextBox 1 »,
+        « Rectangle 4 »). C'est un IDENTIFIANT interne, jamais affiché, et des
+        macros ou des références peuvent le citer. Le traduire ne se verrait
+        nulle part et casserait ce qui s'y réfère.
+        """
+        dossier_dessins = dossier / "xl" / "drawings"
+        if not dossier_dessins.is_dir():
+            return
+        for dessin in sorted(dossier_dessins.glob("drawing*.xml")):
+            arbre = etree.parse(str(dessin))
+            noeuds = [t for t in arbre.getroot().xpath(".//a:t", namespaces=NS)
+                      if (t.text or "").strip()]
+            for i, noeud in enumerate(noeuds):
+                elements.append({
+                    "id": f"drawing_{dessin.stem}_{i}",
+                    "text": f"[[0]]{noeud.text}[[/0]]",
+                    "context": {"part": "drawing", "drawing": dessin.stem,
+                                "index": i},
+                })
+                types["workbook"].add("Zone de texte")
+
+    def _injecter_dessins(self, dossier: Path, traductions: dict) -> None:
+        """Réinjecte dans les zones de texte, par POSITION (cf. graphiques)."""
+        from engines import runtags
+
+        dossier_dessins = dossier / "xl" / "drawings"
+        if not dossier_dessins.is_dir():
+            return
+        for dessin in sorted(dossier_dessins.glob("drawing*.xml")):
+            arbre = etree.parse(str(dessin))
+            noeuds = [t for t in arbre.getroot().xpath(".//a:t", namespaces=NS)
+                      if (t.text or "").strip()]
+            touche = False
+            for i, noeud in enumerate(noeuds):
+                traduit = traductions.get(f"drawing_{dessin.stem}_{i}")
+                if traduit is None:
+                    continue
+                propre = runtags.sans_balises(traduit).strip()
+                if propre and propre != noeud.text:
+                    noeud.text = propre
+                    touche = True
+            if touche:
+                arbre.write(str(dessin), xml_declaration=True,
+                            encoding="UTF-8", standalone=True)
+
+    def _relever_commentaires(self, dossier: Path, elements, types) -> None:
+        """`xl/comments*.xml` — les notes attachées aux cellules.
+
+        DEUX FORMATS COEXISTENT, et ils ne se remplacent pas :
+
+          · `comments*.xml` — le format historique. C'est LUI qui porte le
+            texte affiché, et il est présent même quand le moderne l'est aussi
+            (Excel le maintient pour la compatibilité).
+          · `threadedComments/*` — le format moderne, celui des fils de
+            discussion. Traité plus bas.
+
+        CE QU'ON NE TRADUIT PAS : les `<authors>`. Ce sont des NOMS DE
+        PERSONNES, et un nom propre traduit devient une autre personne. Le
+        `authorId` d'un commentaire y renvoie par index : toucher à cette liste
+        réattribuerait les notes à quelqu'un d'autre.
+        """
+        dossier_xl = dossier / "xl"
+        if not dossier_xl.is_dir():
+            return
+        for fichier in sorted(dossier_xl.glob("comments*.xml")):
+            arbre = etree.parse(str(fichier))
+            for c_idx, commentaire in enumerate(
+                    arbre.getroot().xpath(".//s:commentList/s:comment",
+                                          namespaces=NS)):
+                # `.//s:t` SOUS le commentaire : jamais sous `<authors>`, qui
+                # est ailleurs dans l'arbre.
+                balise = _baliser(commentaire.xpath(".//s:t", namespaces=NS))
+                if not balise:
+                    continue
+                elements.append({
+                    "id": f"comment_{fichier.stem}_{c_idx}",
+                    "text": balise,
+                    "context": {"part": "comment", "file": fichier.stem,
+                                "index": c_idx,
+                                "cell": commentaire.get("ref") or ""},
+                })
+                types["workbook"].add("Commentaire")
+
+    def _injecter_commentaires(self, dossier: Path, traductions: dict) -> None:
+        dossier_xl = dossier / "xl"
+        if not dossier_xl.is_dir():
+            return
+        for fichier in sorted(dossier_xl.glob("comments*.xml")):
+            arbre = etree.parse(str(fichier))
+            touche = False
+            for c_idx, commentaire in enumerate(
+                    arbre.getroot().xpath(".//s:commentList/s:comment",
+                                          namespaces=NS)):
+                traduit = traductions.get(f"comment_{fichier.stem}_{c_idx}")
+                if traduit is None:
+                    continue
+                noeuds = commentaire.xpath(".//s:t", namespaces=NS)
+                if noeuds:
+                    self._repartir(noeuds, traduit)
+                    touche = True
+            if touche:
+                arbre.write(str(fichier), xml_declaration=True,
+                            encoding="UTF-8", standalone=True)
+
+    def _relever_fils(self, dossier: Path, elements, types) -> None:
+        """`xl/threadedComments/*.xml` — les fils de discussion modernes.
+
+        Le texte est dans `<text>`, en clair, sans découpage en runs.
+
+        On ne touche ni aux `personId` ni au fichier `persons.xml` : ce sont
+        des identités, pas du contenu.
+        """
+        dossier_fils = dossier / "xl" / "threadedComments"
+        if not dossier_fils.is_dir():
+            return
+        ns_tc = {"tc": "http://schemas.microsoft.com/office/spreadsheetml/"
+                       "2018/threadedcomments"}
+        for fichier in sorted(dossier_fils.glob("*.xml")):
+            arbre = etree.parse(str(fichier))
+            for i, noeud in enumerate(
+                    arbre.getroot().xpath(".//tc:text", namespaces=ns_tc)):
+                if not (noeud.text or "").strip():
+                    continue
+                elements.append({
+                    "id": f"thread_{fichier.stem}_{i}",
+                    "text": f"[[0]]{noeud.text}[[/0]]",
+                    "context": {"part": "threadedComment",
+                                "file": fichier.stem, "index": i},
+                })
+                types["workbook"].add("Fil de discussion")
+
+    def _injecter_fils(self, dossier: Path, traductions: dict) -> None:
+        from engines import runtags
+
+        dossier_fils = dossier / "xl" / "threadedComments"
+        if not dossier_fils.is_dir():
+            return
+        ns_tc = {"tc": "http://schemas.microsoft.com/office/spreadsheetml/"
+                       "2018/threadedcomments"}
+        for fichier in sorted(dossier_fils.glob("*.xml")):
+            arbre = etree.parse(str(fichier))
+            touche = False
+            for i, noeud in enumerate(
+                    arbre.getroot().xpath(".//tc:text", namespaces=ns_tc)):
+                traduit = traductions.get(f"thread_{fichier.stem}_{i}")
+                if traduit is None:
+                    continue
+                propre = runtags.sans_balises(traduit).strip()
+                if propre and propre != noeud.text:
+                    noeud.text = propre
+                    touche = True
+            if touche:
+                arbre.write(str(fichier), xml_declaration=True,
+                            encoding="UTF-8", standalone=True)
+
     def _relever_chaines_en_ligne(self, dossier: Path, elements, types) -> None:
         """Cellules `t="inlineStr"` — la chaîne est écrite DANS la feuille.
 
@@ -774,6 +952,9 @@ class XLSXTranslatorEngine(TranslationEngine):
             self._injecter_chaines_partagees(dossier, traductions)
             self._injecter_chaines_en_ligne(dossier, traductions)
             self._injecter_graphiques(dossier, traductions)
+            self._injecter_dessins(dossier, traductions)
+            self._injecter_commentaires(dossier, traductions)
+            self._injecter_fils(dossier, traductions)
 
             self._refermer(output_path)
             return True, "Classeur traduit."

@@ -70,6 +70,22 @@ que là. C'est précisément pourquoi la preuve se fait sur du synthétique.
 | Cellules `t="inlineStr"` | ✅ chaîne écrite dans la feuille, sans magasin partagé |
 | `xl/workbook.xml` — noms d'onglets | ✅ renommage **et** réécriture des références, d'un seul geste |
 | `xl/charts/chart*.xml` | ✅ titres, noms d'axes, étiquettes en dur — **jamais** les caches |
+| `xl/drawings/drawing*.xml` | ✅ zones de texte et formes — **jamais** le `name=` |
+| `comments*.xml` + `threadedComments/*` | ✅ les **deux** formats — **jamais** les `<author>` |
+
+### Annotations : on traduit ce qui s'affiche, jamais ce qui identifie
+
+Deux formats de commentaires **coexistent** : `comments*.xml` (historique,
+celui qui porte le texte affiché) et `threadedComments/*` (moderne, les fils).
+Excel maintient les deux — n'en traiter qu'un laisse la moitié des notes en
+langue source.
+
+Deux choses ne sont jamais traduites, et ce ne sont pas des oublis :
+
+* `name="TextBox 1"` — identifiant **interne** d'une forme, jamais affiché,
+  cité par les macros ;
+* `<author>` — un **nom de personne**, et `authorId` y renvoie **par index** :
+  toucher à cette liste réattribuerait les notes.
 
 ### Les graphiques : là où la logique du PPTX ne se recopie pas
 

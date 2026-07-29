@@ -166,6 +166,60 @@ def construire_avec_graphique(chemin: str) -> str:
     return chemin
 
 
+# ── Zone de texte, commentaires ─────────────────────────────────────────────
+# `name="TextBox 1"` est un IDENTIFIANT interne, jamais affiché, que des macros
+# peuvent citer. Le traduire ne se verrait nulle part et casserait ce qui s'y
+# réfère : il est ici pour vérifier qu'on n'y touche PAS.
+_DRAWING = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<xdr:twoCellAnchor>
+<xdr:sp macro="" textlink="">
+<xdr:nvSpPr><xdr:cNvPr id="2" name="TextBox 1"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr>
+<xdr:txBody><a:bodyPr/><a:p><a:r><a:t>Attention aux arrondis</a:t></a:r></a:p>
+<a:p><a:r><a:t>Verifier avant diffusion</a:t></a:r></a:p></xdr:txBody>
+</xdr:sp>
+</xdr:twoCellAnchor>
+</xdr:wsDr>"""
+
+# Format HISTORIQUE. `<authors>` porte des NOMS DE PERSONNES : les traduire
+# ferait d'un auteur quelqu'un d'autre, et `authorId` y renvoie par index.
+_COMMENTS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<authors><author>Marie Durand</author></authors>
+<commentList>
+<comment ref="A1" authorId="0"><text><r><t>Note du reviseur</t></r></text></comment>
+<comment ref="B2" authorId="0"><text><r><t>Chiffre </t></r><r><t>a confirmer</t></r></text></comment>
+</commentList>
+</comments>"""
+
+# Format MODERNE (fils de discussion). Coexiste avec l'ancien : Excel maintient
+# les deux, et `comments*.xml` reste celui qui porte le texte affiché.
+_THREADED = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments">
+<threadedComment ref="A1" dT="2026-07-29T10:00:00" personId="{1}" id="{2}">
+<text>Peux-tu revoir ce total</text>
+</threadedComment>
+</ThreadedComments>"""
+
+#: Ce que le moteur DOIT relever hors feuilles et graphique.
+DRAWING_TRADUISIBLES = ["Attention aux arrondis", "Verifier avant diffusion"]
+COMMENT_TRADUISIBLES = ["Note du reviseur", "Chiffre a confirmer"]
+THREAD_TRADUISIBLES = ["Peux-tu revoir ce total"]
+#: Ce qu'il ne doit JAMAIS toucher.
+JAMAIS_TRADUIT = ["TextBox 1", "Marie Durand"]
+
+
+def construire_complet(chemin: str) -> str:
+    """Le classeur multi-feuilles + graphique + zone de texte + commentaires."""
+    construire_avec_graphique(chemin)
+    with zipfile.ZipFile(chemin, "a", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("xl/drawings/drawing1.xml", _DRAWING)
+        z.writestr("xl/comments1.xml", _COMMENTS)
+        z.writestr("xl/threadedComments/threadedComment1.xml", _THREADED)
+    return chemin
+
+
 def construire_multi(chemin: str) -> str:
     """Un classeur de TROIS feuilles dont la numérotation trompe l'ordre."""
     with zipfile.ZipFile(chemin, "w", zipfile.ZIP_DEFLATED) as z:
