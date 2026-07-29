@@ -97,6 +97,16 @@ def main() -> int:
           "CHEMIN  il route l'EXTRACTION *et* l'INJECTION",
           f"{source.count('ext == \"xlsx\"')} branche(s) — il en faut 2")
 
+    # L'API aiguille-t-elle un classeur vers le job PROGRESSIF ? Sans cette
+    # branche, un .xlsx retomberait sur `run_translation_job`, qui n'a pas de
+    # `partial_path` : la traduction marcherait, mais sans aucun aperçu.
+    import app.api.translate as api_translate
+    src_api = inspect.getsource(api_translate)
+    check('elif ext == "xlsx":' in src_api
+          and "run_xlsx_progressive_job" in src_api,
+          "CHEMIN  l'API aiguille le classeur vers le job PROGRESSIF",
+          "sans cette branche : traduction sans apercu")
+
     # ── 2. Le traducteur sait-il lire un relevé de classeur ? ───────────────
     extraction, _ = engines.new_engine("xlsx").extract_text(src, ex_json)
     check("workbook" in extraction,

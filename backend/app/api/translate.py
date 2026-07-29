@@ -36,7 +36,8 @@ from app.services.office import convert_to_pdf_bytes
 from app.services.scheduler import scheduler
 from app.services.translation_runner import (run_pdf_v2_job,
                                              run_pptx_progressive_job,
-                                             run_translation_job)
+                                             run_translation_job,
+                                             run_xlsx_progressive_job)
 from app.services.trial_preview import rasterize_for_trial
 
 router = APIRouter(tags=["Traduction"])
@@ -385,6 +386,16 @@ async def translate_endpoint(
         job_args = (job_id, file_bytes, original_path, output_path,
                     output_filename, partial_path, translation_path, target_lang,
                     pages_set, debug_mode, is_admin)
+    elif ext == "xlsx":
+        # XLSX → aperçu progressif FEUILLE PAR FEUILLE. La traduction, elle,
+        # reste d'un bloc : `sharedStrings.xml` est commun à tout le classeur
+        # et une même chaîne peut servir dix feuilles, donc aucune ne peut la
+        # revendiquer. C'est l'AFFICHAGE qui est progressif, pas la traduction.
+        partial_path = os.path.join(lang_dir, f"partial{qsuffix}{psuffix}_{job_id[:8]}.pdf")
+        target = run_xlsx_progressive_job
+        job_args = (job_id, file_bytes, original_path, output_path,
+                    output_filename, partial_path, translation_path, target_lang,
+                    model, max_tokens, debug_mode)
     else:
         target = run_translation_job
         job_args = (job_id, file_bytes, filename, ext, target_lang, format_opts,

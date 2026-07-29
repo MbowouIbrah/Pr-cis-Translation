@@ -180,6 +180,186 @@ def run_translation_job(
         jobs.error(job_id, "La traduction a rencontré une erreur. Réessayez ou contactez le support.")
 
 
+def run_xlsx_progressive_job(
+    job_id: str, file_bytes: bytes, original_path: str,
+    output_path: str, output_filename: str, partial_path: str,
+    translation_path: str, target_lang: str,
+    model: str = None, max_tokens: int = None, debug: bool = False,
+):
+    """Pipeline XLSX PROGRESSIF : l'aperçu se remplit FEUILLE PAR FEUILLE.
+
+    LE FLUX, COMME LE PDF ET LE PPTX
+    --------------------------------
+    1. SOCLE — le classeur d'ORIGINE, converti une fois. L'utilisateur voit
+       tout le document en langue source dès la première seconde.
+    2. GREFFE — chaque feuille dont le texte est traduit est convertie SEULE,
+       et sa page remplace celle du socle.
+
+    CE QUI DIFFÈRE D'UN DIAPORAMA, ET POURQUOI ÇA CHANGE LE DÉCOUPAGE
+    -----------------------------------------------------------------
+    Une diapositive est autonome : on peut l'extraire, la traduire, l'injecter.
+    Une feuille ne l'est pas. Excel déduplique le texte de TOUT le classeur
+    dans `sharedStrings.xml`, et une même chaîne peut servir dix feuilles :
+    aucune ne peut la revendiquer, et la traduire « pour la feuille 3 » n'a
+    aucun sens.
+
+    On ne découpe donc PAS la traduction par feuille. Le classeur est traduit
+    d'un bloc — c'est de toute façon le seul découpage honnête — et c'est
+    l'AFFICHAGE qui est progressif : dès que la traduction est réinjectée, on
+    convertit les feuilles une à une. L'utilisateur voit son classeur se
+    remplir, ce qui est exactement ce qu'on lui promet.
+
+    Le rattachement d'une chaîne à ses feuilles se reconstruit dans l'autre
+    sens (`chaines_par_feuille`) : on lit chaque feuille et on note les index
+    qu'elle cite.
+    """
+    eng = engines.new_engine("xlsx")
+    try:
+        if not os.path.exists(original_path):
+            with open(original_path, "wb") as f:
+                f.write(file_bytes)
+
+        jobs.emit(job_id, "progress", {"step": "start",
+                                       "message": "Démarrage du job...",
+                                       "page": 0, "total": None})
+
+        # ── Le SOCLE, tout de suite ───────────────────────────────────────
+        # Mis en cache par CONTENU : retraduire le même classeur dans une autre
+        # langue ne le reconvertit pas.
+        # DEUX CONVENTIONS D'INDEX SE RENCONTRENT ICI, et les confondre décale
+        # tout l'aperçu d'un cran : `ProgressivePreview` raisonne en NUMÉROS DE
+        # PAGE 1-basés (c'est ce que voit le lecteur de PDF), `feuilles()` en
+        # INDEX 0-basés (c'est ce que voit le format). La conversion se fait à
+        # cet unique endroit — la frontière entre les deux mondes.
+        apercu = ProgressivePreview(
+            extraire=lambda chemin, pages: eng.build_partial_xlsx(
+                chemin, only_sheets={n - 1 for n in pages}),
+            convertir=lambda octets: convert_to_pdf_bytes(octets, "xlsx",
+                                                          use_cache=False),
+            extension="xlsx",
+        )
+
+        def _poser_socle():
+            with open(original_path, "rb") as f:
+                brut = f.read()
+            pdf = convert_to_pdf_bytes(brut, "xlsx", use_cache=True)
+            ecrire_atomiquement(partial_path, apercu.poser_socle(pdf))
+
+        try:
+            _poser_socle()
+        except Exception as e:
+            # Best-effort : sans socle, l'aperçu est manqué mais la traduction
+            # continue. C'est la règle de tous les moteurs progressifs.
+            note(logging.WARNING, f"XLSX {job_id} : socle manqué ({e})")
+
+        # ── Extraction (classeur ENTIER : cf. l'en-tête) ──────────────────
+        extraction_path = os.path.join(os.path.dirname(translation_path),
+                                       "extraction_xlsx.json")
+        jobs.emit(job_id, "progress", {"step": "extract",
+                                       "message": "Extraction du texte...",
+                                       "page": 0, "total": None})
+        if not os.path.exists(extraction_path):
+            eng.extract_text(original_path, extraction_path,
+                             progress_callback=jobs.progress_callback(
+                                 job_id, "extract"))
+
+        # La carte feuille -> chaînes, et l'ordre d'affichage des onglets. Les
+        # deux se lisent sur le dossier de travail ouvert par l'extraction.
+        eng._ouvrir(original_path)
+        feuilles = eng.feuilles()
+        carte = eng.chaines_par_feuille()
+        total = len(feuilles)
+        jobs.emit(job_id, "progress", {"step": "extract",
+                                       "message": f"{total} feuille(s).",
+                                       "page": 0, "total": total})
+
+        # ── Traduction ────────────────────────────────────────────────────
+        if debug:
+            with open(extraction_path, encoding="utf-8") as f:
+                donnees = json.load(f)
+            for el in donnees.get("workbook", {}).get("elements", []):
+                el["translated_text"] = el.get("text", "")
+            with open(translation_path, "w", encoding="utf-8") as f:
+                json.dump(donnees, f, ensure_ascii=False)
+        elif not os.path.exists(translation_path):
+            if not ai_active:
+                raise ValueError("Le traducteur IA n'est pas disponible.")
+            jobs.emit(job_id, "progress",
+                      {"step": "translate", "message": "Traduction IA en cours...",
+                       "page": 0, "total": total})
+            ok, res = ai_translator.translate_json(
+                extraction_path, target_lang=target_lang,
+                progress_callback=jobs.progress_callback(job_id, "translate"),
+                model=model, max_tokens=max_tokens)
+            if not ok:
+                raise ValueError(f"Traduction échouée : {res}")
+            if os.path.exists(res) and os.path.abspath(res) != os.path.abspath(
+                    translation_path):
+                shutil.move(res, translation_path)
+
+        with open(translation_path, encoding="utf-8") as f:
+            traduit = json.load(f)
+        traductions = {
+            el["id"]: (el.get("translated_text") or el.get("text", ""))
+            for el in traduit.get("workbook", {}).get("elements", [])
+        }
+        if not traductions:
+            raise ValueError("Aucun texte traduit à réinjecter.")
+
+        # ── Réinjection, puis GREFFE feuille par feuille ──────────────────
+        eng.injecter_partiel(traductions)
+
+        # UNE FEUILLE NE FAIT PAS TOUJOURS UNE PAGE, et c'est la limite connue
+        # de cette greffe. Une feuille longue s'imprime sur dix pages ; le
+        # socle en compte alors dix, quand `feuilles()` n'en annonce qu'une.
+        # `greffer` refuse justement de deviner : il lève dès que le nombre de
+        # pages rendues ne correspond pas au nombre demandé, plutôt que
+        # d'afficher la traduction d'une feuille en face d'une autre.
+        #
+        # On ne greffe donc feuille par feuille que si les deux comptes
+        # coïncident. Sinon on saute la greffe progressive : l'utilisateur
+        # garde le socle en langue source jusqu'au document final, ce qui est
+        # honnête, là où une greffe décalée serait un mensonge visible.
+        greffable = (apercu.pret and apercu.pages_socle == total)
+        if not greffable and apercu.pret:
+            note(logging.INFO,
+                 f"XLSX {job_id} : {apercu.pages_socle} page(s) pour {total} "
+                 f"feuille(s) — aperçu progressif désactivé pour ce classeur")
+
+        for f in feuilles:
+            idx = f["index"]
+            if greffable:
+                try:
+                    ecrire_atomiquement(partial_path, apercu.greffer([idx + 1]))
+                except Exception as e:
+                    # Un échec de rendu n'interrompt JAMAIS la traduction : la
+                    # feuille reste correcte dans le fichier final, seul son
+                    # aperçu progressif est manqué et le socle continue de la
+                    # montrer en langue source.
+                    note(logging.WARNING,
+                         f"XLSX {job_id} : aperçu feuille {idx} manqué ({e})")
+            jobs.emit(job_id, "progress",
+                      {"step": "render",
+                       "message": f"Feuille « {f['nom']} » traduite.",
+                       "page": idx + 1, "total": total})
+            _ = carte.get(idx)      # rattachement disponible pour l'aval
+
+        # ── Le classeur final ─────────────────────────────────────────────
+        eng.build_partial_xlsx(output_path, only_sheets=None)
+        if not os.path.exists(output_path):
+            raise ValueError("Le fichier traduit est introuvable après génération.")
+
+        jobs.done(job_id, output_path, output_filename,
+                  translation_path=translation_path)
+
+    except Exception as e:
+        logger.error(f"Job XLSX {job_id} failed: {e}")
+        jobs.error(job_id, "La traduction a rencontré une erreur. "
+                           "Réessayez ou contactez le support.")
+    finally:
+        eng._nettoyer()
+
+
 def _elements_de(slide_data: dict):
     """Tous les fragments traduisibles d'une slide, à plat.
 

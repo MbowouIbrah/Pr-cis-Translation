@@ -227,6 +227,61 @@ class XLSXTranslatorEngine(TranslationEngine):
             })
         return out
 
+    def chaines_par_feuille(self, chemin_xlsx: str | None = None
+                            ) -> dict[int, set[str]]:
+        """Quelles chaînes chaque feuille AFFICHE — `{index_feuille: {id, …}}`.
+
+        POURQUOI CETTE CARTE EXISTE
+        ---------------------------
+        Une chaîne du magasin partagé ne SAIT PAS à quelle feuille elle
+        appartient, et c'est volontaire : Excel y déduplique le texte de tout
+        le classeur, si bien qu'une même entrée peut servir dix feuilles. Le
+        relevé ne peut donc pas porter cette information, et l'aperçu
+        progressif — qui veut savoir quand une feuille est prête — en a
+        pourtant besoin.
+
+        On la reconstruit dans l'autre sens : on lit chaque feuille et on note
+        les index qu'elle CITE (`<c t="s"><v>3</v></c>`). Une même chaîne
+        apparaît alors dans plusieurs feuilles, ce qui est la réalité et non un
+        défaut : cette chaîne n'est traduite qu'une fois, mais elle rend
+        plusieurs feuilles complètes à la fois.
+
+        Les chaînes EN LIGNE, elles, appartiennent à une feuille et à une
+        seule : leur identifiant porte déjà son nom de fichier.
+        """
+        dossier = self._ouvrir(chemin_xlsx) if chemin_xlsx else self._dossier()
+        carte: dict[int, set[str]] = {}
+        for f in self.feuilles():
+            chemin = dossier / f["cible"]
+            ids: set[str] = set()
+            if chemin.exists():
+                arbre = etree.parse(str(chemin))
+                for c in arbre.getroot().xpath(".//s:c[@t='s']", namespaces=NS):
+                    v = c.find(f"{{{NS['s']}}}v")
+                    if v is not None and (v.text or "").strip().isdigit():
+                        ids.add(f"ss_{int(v.text.strip())}")
+                stem = chemin.stem
+                for c in arbre.getroot().xpath(".//s:c[@t='inlineStr']",
+                                               namespaces=NS):
+                    ref = c.get("r") or ""
+                    ids.add(f"inline_{stem}_{ref}")
+            carte[f["index"]] = ids
+        return carte
+
+    def injecter_partiel(self, traductions: dict) -> None:
+        """Réinjecte DANS LE DOSSIER DE TRAVAIL, sans refermer le classeur.
+
+        `inject_translation` fait tout d'un bloc — ouvrir, injecter, refermer,
+        nettoyer — ce qui convient au fichier final mais pas à l'aperçu, qui
+        doit réinjecter plusieurs fois de suite puis construire un partiel à
+        partir de l'état courant.
+
+        Ne rend rien et ne referme rien : l'appelant reste maître du dossier.
+        """
+        dossier = self._dossier()
+        self._injecter_chaines_partagees(dossier, traductions)
+        self._injecter_chaines_en_ligne(dossier, traductions)
+
     def build_partial_xlsx(self, output_path: str,
                            only_sheets: set[int] | None = None) -> None:
         """Écrit un classeur ne contenant QUE les feuilles demandées.

@@ -94,9 +94,48 @@ de travail**, ordonné par importance et non par ordre alphabétique.
 transporte la liste des manques sous `workbook.non_traite`. **L'écart entre la
 promesse et le code reste ainsi mesurable**, au lieu d'être une impression.
 
+## L'aperçu progressif — feuille par feuille
+
+Le classeur suit désormais le même flux que le PDF et le PPTX :
+
+1. **socle** — le classeur d'origine, converti une fois, affichable tout de
+   suite en langue source ;
+2. **greffe** — chaque feuille traduite est convertie *seule* et sa page
+   remplace celle du socle.
+
+`build_partial_xlsx(sortie, only_sheets={…})` écrit un classeur ne contenant
+que ces feuilles ; `feuilles()` les énumère **dans l'ordre d'affichage**.
+
+### Ce qui distingue un classeur d'un diaporama
+
+Une diapositive est autonome : on l'extrait, on la traduit, on l'injecte. **Une
+feuille ne l'est pas.** Excel déduplique le texte de tout le classeur dans
+`sharedStrings.xml`, et une même chaîne peut servir dix feuilles — aucune ne
+peut la revendiquer.
+
+On ne découpe donc **pas la traduction** par feuille : le classeur part d'un
+bloc, seul découpage honnête. C'est **l'affichage** qui est progressif.
+`chaines_par_feuille()` reconstruit le rattachement dans l'autre sens, en
+lisant les index que chaque feuille cite.
+
+### Trois pièges, chacun verrouillé par un test
+
+| Piège | Conséquence si ignoré |
+|---|---|
+| Le numéro du fichier ne dit rien de la position de l'onglet | Feuilles affichées dans le désordre |
+| `sharedStrings.xml` est indexé par **position** | L'élaguer décale les index : les feuilles gardées affichent le mauvais texte |
+| `ProgressivePreview` compte en pages **1-basées**, `feuilles()` en index **0-basés** | Tout l'aperçu décalé d'un cran |
+
+Le partiel est **non destructif** (fichiers de contrôle calculés en mémoire) et
+écrit **atomiquement** — le convertisseur lit pendant qu'on écrit.
+
 ## Limites au-delà du texte
 
-* pas d'aperçu progressif : le classeur est traité d'un bloc ;
+* **une feuille longue s'imprime sur plusieurs pages.** La greffe exige alors
+  un appariement certain feuille ↔ page, qu'on n'a pas : dans ce cas l'aperçu
+  progressif est **désactivé pour ce classeur** et l'utilisateur garde le socle
+  en langue source jusqu'au document final. Mieux vaut ne rien greffer que
+  poser une traduction en face de la mauvaise page ;
 * l'aperçu passe par LibreOffice, comme tout format non-PDF ;
 * **l'expansion n'est pas gérée** — une traduction plus longue que sa source
   déborde de sa colonne ou s'affiche en `#####`. Les moteurs PDF et PPTX
