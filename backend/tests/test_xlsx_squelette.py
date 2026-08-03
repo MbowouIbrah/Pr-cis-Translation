@@ -171,8 +171,14 @@ def main() -> int:
            "aucune partie non traitee declaree")
         ok("AVEU  le relevé transporte la liste des manques",
            len(extraction["workbook"]["non_traite"]) > 0)
-        ok("AVEU  les tableaux croisés y figurent (duplication cache/table)",
-           any("pivot" in nom for nom in extraction["workbook"]["non_traite"]))
+        # L'ACCORD entre les deux façons de dire la même chose, et non le nom
+        # d'une partie précise : nommer « pivot » ici obligeait à corriger ce
+        # test le jour où les croisés seraient traités — un test qui doit être
+        # réécrit à chaque progrès ne mesure pas le progrès, il le suit.
+        ok("AVEU  la liste annoncée est EXACTEMENT celle des parties à faire",
+           sorted(extraction["workbook"]["non_traite"])
+           == sorted(n for n, fait in couverture.items() if not fait),
+           str(extraction["workbook"]["non_traite"]))
 
         # ── 5. Le moteur reste indépendant ───────────────────────────────
         ok("COUCHES  importer le moteur ne charge aucun module `app`",

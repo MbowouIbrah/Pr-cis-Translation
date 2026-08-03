@@ -303,6 +303,104 @@ TABLE_ENTETES = ["Produit", "Quantite vendue"]
 TABLE_JAMAIS_TRADUIT = ["Tableau1"]
 
 
+# ── Tableau croisé dynamique ────────────────────────────────────────────────
+# LE TEXTE D'UN CROISÉ EST DUPLIQUÉ, ET C'EST TOUT LE PIÈGE.
+#
+# Le cache (`pivotCacheDefinition.xml`) contient :
+#   · `<cacheField name="Produit">` — le nom de la COLONNE SOURCE. Il doit
+#     rester égal à l'en-tête de la source, sinon le croisé perd son champ ;
+#   · `<sharedItems><s v="Cafe moulu"/>` — les VALEURS DISTINCTES recopiées
+#     de la source. Elles aussi sont déjà traduites dans la feuille.
+#
+# La table (`pivotTable1.xml`) NE RÉPÈTE PAS ces textes : ses `<item x="0"/>`
+# renvoient au cache PAR INDEX. Y toucher réordonnerait le croisé.
+#
+# Ce qui n'existe QUE dans la table, et qu'il faut donc traduire :
+#   · `dataCaption`, `rowHeaderCaption`, `colHeaderCaption` — des libellés
+#     affichés, saisis par l'utilisateur, reflets de rien ;
+#   · le `name=` d'un `<dataField>` (« Somme de Quantite ») — affiché en tête
+#     de la colonne de valeurs.
+#
+# `name="TCD1"` est l'identifiant du croisé : jamais traduit.
+_PIVOT_CACHE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ r:id="rId1" recordCount="1">
+<cacheSource type="worksheet"><worksheetSource ref="B2:C3" sheet="Stock"/></cacheSource>
+<cacheFields count="2">
+<cacheField name="Produit" numFmtId="0">
+<sharedItems count="1"><s v="Cafe moulu"/></sharedItems>
+</cacheField>
+<cacheField name="Quantite vendue" numFmtId="0">
+<sharedItems containsSemiMixedTypes="0" containsString="0" containsNumber="1"/>
+</cacheField>
+</cacheFields>
+</pivotCacheDefinition>"""
+
+_PIVOT_TABLE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ name="TCD1" cacheId="1" dataCaption="Valeurs"
+ rowHeaderCaption="Etiquettes de lignes" colHeaderCaption="Etiquettes de colonnes">
+<location ref="E2:F4" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/>
+<pivotFields count="2">
+<pivotField axis="axisRow" showAll="0"><items count="2">
+<item x="0"/><item t="default"/></items></pivotField>
+<pivotField dataField="1" showAll="0"/>
+</pivotFields>
+<rowFields count="1"><field x="0"/></rowFields>
+<dataFields count="1">
+<dataField name="Somme de Quantite vendue" fld="1" baseField="0" baseItem="0"/>
+</dataFields>
+</pivotTableDefinition>"""
+
+#: Ce qui n'existe QUE dans la table : à traduire, une seule fois.
+PIVOT_TRADUISIBLES = ["Valeurs", "Etiquettes de lignes",
+                      "Etiquettes de colonnes", "Somme de Quantite vendue"]
+#: Ce que le cache DUPLIQUE depuis la feuille : aligné, jamais retraduit.
+PIVOT_DUPLIQUES = ["Produit", "Quantite vendue", "Cafe moulu"]
+#: L'identifiant du croisé.
+PIVOT_JAMAIS_TRADUIT = ["TCD1"]
+
+
+def construire_avec_croise(chemin: str) -> str:
+    """Le classeur à tableau structuré, plus un CROISÉ bâti dessus.
+
+    Le croisé prend sa source dans le tableau (`B2:C3` de « Stock ») : c'est
+    la situation réelle, et c'est elle qui rend la duplication observable —
+    « Produit » et « Cafe moulu » existent alors dans la feuille ET dans le
+    cache.
+    """
+    construire_avec_tableau(chemin)
+    with zipfile.ZipFile(chemin) as z:
+        contenu = {n: z.read(n) for n in z.namelist()}
+
+    contenu["xl/pivotCache/pivotCacheDefinition1.xml"] = \
+        _PIVOT_CACHE.encode("utf-8")
+    contenu["xl/pivotTables/pivotTable1.xml"] = _PIVOT_TABLE.encode("utf-8")
+    contenu["xl/pivotTables/_rels/pivotTable1.xml.rels"] = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/'
+        'officeDocument/2006/relationships/pivotCacheDefinition" '
+        'Target="../pivotCache/pivotCacheDefinition1.xml"/>'
+        "</Relationships>").encode("utf-8")
+
+    ct = contenu["[Content_Types].xml"].decode("utf-8").replace(
+        "</Types>",
+        '<Override PartName="/xl/pivotCache/pivotCacheDefinition1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.'
+        'spreadsheetml.pivotCacheDefinition+xml"/>'
+        '<Override PartName="/xl/pivotTables/pivotTable1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.'
+        'spreadsheetml.pivotTable+xml"/></Types>')
+    contenu["[Content_Types].xml"] = ct.encode("utf-8")
+
+    with zipfile.ZipFile(chemin, "w", zipfile.ZIP_DEFLATED) as z:
+        for nom, octets in contenu.items():
+            z.writestr(nom, octets)
+    return chemin
+
+
 def construire_avec_tableau(chemin: str) -> str:
     """Un classeur d'une feuille portant un TABLEAU STRUCTURÉ.
 

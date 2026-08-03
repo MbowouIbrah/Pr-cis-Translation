@@ -9,7 +9,7 @@ Version **0.1.0** · `engines/xlsx/` · inscrit au registre sous `xlsx`
 > réassemblé. Un `.xlsx` entre et ressort ouvrable par Excel.
 >
 > La **couverture du format** ne l'est pas. Excel range du texte à une dizaine
-> d'endroits ; **sept** sont traités. Les autres sont recensés plus bas — pas
+> d'endroits ; **huit** sont traités. Les autres sont recensés plus bas — pas
 > oubliés, pas masqués.
 >
 > D'où le **0.1.0** et non 1.0.0 : une version majeure dit « le contrat est
@@ -73,6 +73,7 @@ que là. C'est précisément pourquoi la preuve se fait sur du synthétique.
 | `xl/drawings/drawing*.xml` | ✅ zones de texte et formes — **jamais** le `name=` |
 | `comments*.xml` + `threadedComments/*` | ✅ les **deux** formats — **jamais** les `<author>` |
 | `xl/tables/table*.xml` | ✅ en-têtes **alignés** sur la cellule, jamais retraduits |
+| `pivotCache/*` + `pivotTables/*` | ✅ libellés traduits, cache **aligné** — index intacts |
 
 La seconde n'est pas un détail : beaucoup d'exports automatiques n'utilisent
 **que** cette forme et ne produisent aucun `sharedStrings.xml`. Ne lire que le
@@ -121,6 +122,37 @@ Les références structurées (`Tableau1[Produit]`, `[@Produit]`) sont réécrit
 du même geste : c'est le piège déjà payé sur les noms d'onglets, et il se
 traite de la même façon.
 
+### Les croisés dynamiques : le texte y est dupliqué, et les deux moitiés ne se traitent pas pareil
+
+Un croisé range son texte à deux endroits qui ne jouent pas le même rôle :
+
+| | contenu | traitement |
+|---|---|---|
+| **la table** (`pivotTable1.xml`) | `dataCaption`, `rowHeaderCaption`, le `name=` d'un `<dataField>` | **traduits** — ils n'existent que là |
+| **le cache** (`pivotCacheDefinition1.xml`) | `<cacheField name=>`, `<sharedItems>` | **alignés** — ce sont des copies de la feuille |
+
+Le cache est, par construction, une **copie de la source** : le nom des champs
+reprend l'en-tête des colonnes, les `sharedItems` leurs valeurs distinctes. Ces
+cellules sont **déjà traduites** via `sharedStrings`. Les traduire à nouveau
+donnerait deux formulations pour la même donnée — le croisé cesserait de
+correspondre à sa source — et Excel réécrit ce cache au premier
+rafraîchissement, si bien que le travail serait perdu **en plus** d'être faux.
+
+C'est la même règle que pour les caches de graphiques et les en-têtes de
+tableaux : **on traduit la source, on aligne ses copies.**
+
+**Les `<item x="0"/>` ne bougent jamais.** Ils renvoient aux `sharedItems`
+**par index** : l'ordre est le lien. En ajouter, en retirer ou en réordonner un
+seul réattribuerait les lignes du croisé. L'alignement remplace donc les
+valeurs **sur place**, exclusivement.
+
+Une difficulté propre à cette partie : le cache porte des **valeurs**
+(`<s v="Cafe moulu"/>`), pas des index de cellules. L'aligner exige de relier
+un texte source à sa traduction — or au moment de l'alignement, le magasin
+partagé est déjà réécrit. `self._sources` capture donc le magasin **à
+l'ouverture**, seul instant où il porte encore ses sources ; rien de plus n'est
+conservé.
+
 ### Les graphiques : là où la logique du PPTX ne se recopie pas
 
 Le moteur PPTX traduit les `<c:v>` d'un graphique, et il a raison : là-bas, le
@@ -166,7 +198,6 @@ de travail**, ordonné par importance et non par ordre alphabétique.
 
 | Partie | Pourquoi ça compte |
 |---|---|
-| `pivotCache` / `pivotTables` | Les libellés sont **dupliqués** entre le cache et la table. N'en traduire qu'un des deux désaligne le croisé au premier rafraîchissement. |
 | `xl/styles.xml` — formats personnalisés | Un format peut contenir du texte littéral (`#\ ##0\ "F CFA"`). C'est du visible, et la syntaxe doit rester intacte autour du mot. |
 | `docProps/core.xml` | Titre et sujet. Rarement décisifs — en dernier. |
 

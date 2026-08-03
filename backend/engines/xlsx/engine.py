@@ -7,7 +7,7 @@ chaînes relevées et balisées, la traduction réinjectée, le classeur re-zipp
 Un fichier passe de bout en bout et ressort ouvrable par Excel.
 
 Il n'est PAS la couverture complète du format. Excel range du texte à une
-dizaine d'endroits (voir `CONTEXTE.md`) ; sept sont traités. Les autres sont
+dizaine d'endroits (voir `CONTEXTE.md`) ; huit sont traités. Les autres sont
 recensés, nommés, et laissés en place : `_PARTIES` liste ce qui reste à faire,
 et chaque manque y porte son motif.
 
@@ -98,9 +98,17 @@ _PARTIES: dict[str, tuple[bool, str]] = {
                "sont réécrites du même geste ; le `name=` du TABLEAU, lui, est "
                "un identifiant et n'est jamais traduit."),
     "xl/pivotCache/* et xl/pivotTables/*":
-        (False, "Tableaux croisés dynamiques : les libellés y sont DUPLIQUÉS "
-                "entre le cache et la table. En traduire un seul des deux "
-                "désaligne le croisé au premier rafraîchissement."),
+        (True, "Tableaux croisés dynamiques. Le texte y est DUPLIQUÉ, et les "
+               "deux moitiés ne se traitent pas pareil : on TRADUIT ce qui "
+               "n'existe que dans la table (`dataCaption`, les autres "
+               "légendes, le nom d'un `<dataField>`), et on ALIGNE ce que le "
+               "cache recopie de la feuille (`<cacheField name=>`, "
+               "`<sharedItems>`) — déjà traduit via sharedStrings. Traduire "
+               "les deux donnerait deux formulations pour la même donnée, et "
+               "Excel réécrit le cache au premier rafraîchissement. Les "
+               "`<item x=>` de la table renvoient au cache PAR INDEX : "
+               "l'alignement remplace SUR PLACE, sans jamais ajouter, retirer "
+               "ni réordonner."),
     "xl/styles.xml (formats de nombre personnalisés)":
         (False, "Un format peut contenir du texte littéral — `#\\ ##0\\ \"F "
                 "CFA\"`. C'est du visible, et c'est piégeux : la syntaxe du "
@@ -266,6 +274,11 @@ class XLSXTranslatorEngine(TranslationEngine):
 
     def __init__(self):
         self.temp_dir = None
+        #: `{ss_i: texte source}`, capturé à l'ouverture. Le cache d'un croisé
+        #: porte des VALEURS et non des index : l'aligner exige de relier un
+        #: texte source à sa traduction, et l'ouverture est le seul instant où
+        #: le magasin porte encore ses sources.
+        self._sources: dict[str, str] = {}
 
     # ── Dossier de travail ────────────────────────────────────────────────
     def _dossier(self) -> Path:
@@ -285,6 +298,11 @@ class XLSXTranslatorEngine(TranslationEngine):
         dossier = self._dossier()
         with zipfile.ZipFile(chemin_xlsx, "r") as z:
             z.extractall(dossier)
+        # Le magasin AVANT toute injection. Capturé ici parce que c'est le
+        # seul instant où il porte encore ses textes sources — après, il est
+        # réécrit. Sert à aligner les caches de croisés (`_aligner_croises`).
+        self._sources = {f"ss_{i}": t for i, t in
+                         enumerate(self._magasin_courant(dossier))}
         return dossier
 
     def _refermer(self, chemin_sortie: str) -> None:
@@ -410,9 +428,11 @@ class XLSXTranslatorEngine(TranslationEngine):
         self._injecter_dessins(dossier, traductions)
         self._injecter_commentaires(dossier, traductions)
         self._injecter_fils(dossier, traductions)
-        # APRÈS les chaînes, et jamais avant : l'alignement RECOPIE les
-        # cellules d'en-tête telles qu'elles viennent d'être traduites.
+        self._injecter_croises(dossier, traductions)
+        # APRÈS les chaînes, et jamais avant : les alignements RECOPIENT
+        # les cellules telles qu'elles viennent d'être traduites.
         self._aligner_tableaux(dossier)
+        self._aligner_croises(dossier, traductions)
 
     def build_partial_xlsx(self, output_path: str,
                            only_sheets: set[int] | None = None) -> None:
@@ -562,6 +582,7 @@ class XLSXTranslatorEngine(TranslationEngine):
         self._relever_dessins(dossier, elements, types)
         self._relever_commentaires(dossier, elements, types)
         self._relever_fils(dossier, elements, types)
+        self._relever_croises(dossier, elements, types)
 
         extraction = {
             "workbook": {
@@ -1102,6 +1123,236 @@ class XLSXTranslatorEngine(TranslationEngine):
                 arbre.write(str(feuille), xml_declaration=True,
                             encoding="UTF-8", standalone=True)
 
+    # ── Tableaux croisés dynamiques ───────────────────────────────────────
+    #: Les libellés d'un croisé qui n'existent QUE dans la table — donc les
+    #: seuls qu'on envoie au modèle. Les autres textes du croisé sont des
+    #: DUPLICATAS de la feuille et s'alignent au lieu de se traduire.
+    _CAPTIONS_CROISE = ("dataCaption", "rowHeaderCaption", "colHeaderCaption",
+                        "grandTotalCaption", "missingCaption",
+                        "errorCaption")
+
+    def _relever_croises(self, dossier: Path, elements, types) -> None:
+        """`xl/pivotTables/*.xml` — les libellés PROPRES au croisé.
+
+        CE QU'ON TRADUIT ICI, ET CE QU'ON NE TRADUIT SURTOUT PAS
+        --------------------------------------------------------
+        Le texte d'un croisé est DUPLIQUÉ, et c'est tout le piège. Il faut
+        donc séparer ce qui n'existe qu'ici de ce qui est recopié d'ailleurs.
+
+        N'EXISTE QUE DANS LA TABLE — on le traduit, une seule fois :
+
+          · `dataCaption`, `rowHeaderCaption`, `colHeaderCaption`… — des
+            libellés affichés, saisis par l'utilisateur, reflets de rien ;
+          · le `name=` d'un `<dataField>` (« Somme de Quantité »), affiché en
+            tête de la colonne de valeurs.
+
+        EST RECOPIÉ DE LA FEUILLE — jamais relevé (voir `_aligner_croises`) :
+        les `<cacheField name=>` et les `<sharedItems>` du CACHE, qui sont le
+        reflet de cellules déjà traduites via `sharedStrings`. Les relever
+        les soumettrait une seconde fois au modèle, qui peut rendre deux
+        formulations : le croisé afficherait alors autre chose que sa source,
+        et Excel réécrirait le cache au premier rafraîchissement de toute
+        façon. C'est exactement la règle des graphiques et des tableaux.
+
+        `name="TCD1"` est l'IDENTIFIANT du croisé : jamais traduit.
+        """
+        dossier_tcd = dossier / "xl" / "pivotTables"
+        if not dossier_tcd.is_dir():
+            return
+        for tcd in sorted(dossier_tcd.glob("pivotTable*.xml")):
+            arbre = etree.parse(str(tcd))
+            racine = arbre.getroot()
+            for attribut in self._CAPTIONS_CROISE:
+                valeur = racine.get(attribut)
+                if not valeur or not valeur.strip():
+                    continue
+                elements.append({
+                    "id": f"pivot_{tcd.stem}_{attribut}",
+                    "text": f"[[0]]{valeur}[[/0]]",
+                    "context": {"part": "pivotTable", "file": tcd.stem,
+                                "attribut": attribut},
+                })
+                types["workbook"].add("Tableau croisé")
+            for i, champ in enumerate(
+                    racine.xpath(".//s:dataFields/s:dataField",
+                                 namespaces=NS)):
+                nom = champ.get("name")
+                if not nom or not nom.strip():
+                    continue
+                elements.append({
+                    "id": f"pivotdata_{tcd.stem}_{i}",
+                    "text": f"[[0]]{nom}[[/0]]",
+                    "context": {"part": "pivotDataField", "file": tcd.stem,
+                                "index": i},
+                })
+                types["workbook"].add("Tableau croisé")
+
+    def _injecter_croises(self, dossier: Path, traductions: dict) -> None:
+        """Réinjecte les libellés propres au croisé, par ATTRIBUT et position.
+
+        Un libellé vide n'est jamais écrit : un `dataCaption=""` remplacerait
+        un libellé affiché par du blanc, ce qui se verrait immédiatement.
+        """
+        from engines import runtags
+
+        dossier_tcd = dossier / "xl" / "pivotTables"
+        if not dossier_tcd.is_dir():
+            return
+        for tcd in sorted(dossier_tcd.glob("pivotTable*.xml")):
+            arbre = etree.parse(str(tcd))
+            racine = arbre.getroot()
+            touche = False
+            for attribut in self._CAPTIONS_CROISE:
+                traduit = traductions.get(f"pivot_{tcd.stem}_{attribut}")
+                if traduit is None or racine.get(attribut) is None:
+                    continue
+                propre = runtags.sans_balises(traduit).strip()
+                if propre and propre != racine.get(attribut):
+                    racine.set(attribut, propre)
+                    touche = True
+            for i, champ in enumerate(
+                    racine.xpath(".//s:dataFields/s:dataField",
+                                 namespaces=NS)):
+                traduit = traductions.get(f"pivotdata_{tcd.stem}_{i}")
+                if traduit is None:
+                    continue
+                propre = runtags.sans_balises(traduit).strip()
+                if propre and propre != champ.get("name"):
+                    champ.set("name", propre)
+                    touche = True
+            if touche:
+                arbre.write(str(tcd), xml_declaration=True,
+                            encoding="UTF-8", standalone=True)
+
+    def _traduction_des_chaines(self, traductions: dict) -> dict[str, str]:
+        """`{texte source: texte traduit}` pour les chaînes partagées.
+
+        POURQUOI CETTE TABLE EXISTE
+        ---------------------------
+        Le cache d'un croisé porte des VALEURS, pas des index de cellules :
+        `<s v="Cafe moulu"/>`. Pour l'aligner, il faut savoir en quoi « Cafe
+        moulu » a été traduit — donc relier un texte SOURCE à son texte
+        traduit.
+
+        Au moment de l'alignement, le magasin partagé du dossier de travail
+        est déjà réécrit : les sources n'y sont plus. Mais il n'y a rien à
+        conserver pour autant — `self._sources` les a capturées à l'ouverture,
+        au seul instant où elles existaient encore, et le relevé les apparie
+        par identifiant comme partout ailleurs dans ce moteur.
+        """
+        from engines import runtags
+
+        table: dict[str, str] = {}
+        for cle, source in self._sources.items():
+            traduit = traductions.get(cle)
+            if traduit is None:
+                continue
+            propre = runtags.sans_balises(traduit).strip()
+            if source and propre and source != propre:
+                table[source] = propre
+        return table
+
+    def _aligner_croises(self, dossier: Path, traductions: dict) -> None:
+        """`xl/pivotCache/*` — recopie dans le cache ce que la feuille affiche.
+
+        POURQUOI ALIGNER ET NON TRADUIRE
+        ---------------------------------
+        Un cache de croisé est, par construction, une COPIE de sa source :
+        `<cacheField name="Produit">` reprend l'en-tête de la colonne, et les
+        `<sharedItems>` reprennent ses valeurs distinctes. Ces cellules sont
+        déjà traduites via `sharedStrings`.
+
+        Traduire le cache séparément le désaligne de sa source — c'est le
+        piège que `_PARTIES` annonçait. Excel réécrit d'ailleurs ce cache au
+        premier rafraîchissement, si bien que le travail serait perdu en plus
+        d'être faux.
+
+        ON NE TOUCHE PAS AUX `<item x="…"/>` DE LA TABLE. Ils renvoient aux
+        `<sharedItems>` PAR INDEX : l'ordre est le lien, et le préserver
+        suffit. C'est pourquoi l'alignement remplace les valeurs SUR PLACE,
+        sans jamais en ajouter, en retirer ni en réordonner.
+
+        La source est lue via `<worksheetSource>`. Quand elle est absente ou
+        introuvable — un cache externe, une source supprimée — on ne touche à
+        rien : sans preuve de ce que le texte doit devenir, le garder est
+        toujours préférable à l'inventer.
+        """
+        dossier_cache = dossier / "xl" / "pivotCache"
+        if not dossier_cache.is_dir():
+            return
+        magasin = self._magasin_courant(dossier)
+        traduction_des_chaines = self._traduction_des_chaines(traductions)
+        feuilles = {f["nom"]: dossier / f["cible"] for f in self.feuilles()}
+
+        for cache in sorted(dossier_cache.glob("pivotCacheDefinition*.xml")):
+            arbre = etree.parse(str(cache))
+            racine = arbre.getroot()
+            source = racine.find(f".//{{{NS['s']}}}worksheetSource")
+            if source is None:
+                continue
+            feuille = feuilles.get(source.get("sheet") or "")
+            ref = source.get("ref") or ""
+            if feuille is None or not feuille.exists() or ":" not in ref:
+                continue
+
+            entetes = self._entetes_source(feuille, ref, magasin)
+
+            touche = False
+            for i, champ in enumerate(
+                    racine.xpath(".//s:cacheFields/s:cacheField",
+                                 namespaces=NS)):
+                # 1. Le nom du champ = l'en-tête de la colonne source, repéré
+                #    par sa POSITION dans la zone.
+                if i < len(entetes) and entetes[i] \
+                        and entetes[i] != champ.get("name"):
+                    champ.set("name", entetes[i])
+                    touche = True
+                # 2. Les valeurs distinctes. On remplace SUR PLACE, sans
+                #    jamais en ajouter, retirer ni réordonner : les `<item
+                #    x="…"/>` de la table y renvoient par index.
+                for item in champ.xpath("./s:sharedItems/s:s", namespaces=NS):
+                    ancien = item.get("v") or ""
+                    nouveau = traduction_des_chaines.get(ancien)
+                    if nouveau and nouveau != ancien:
+                        item.set("v", nouveau)
+                        touche = True
+            if touche:
+                arbre.write(str(cache), xml_declaration=True,
+                            encoding="UTF-8", standalone=True)
+
+    def _entetes_source(self, feuille: Path, ref: str,
+                        magasin: list[str]) -> list[str]:
+        """Les en-têtes de la zone source d'un croisé, dans l'ordre.
+
+        La première ligne de `<worksheetSource ref="B2:C3">` porte les noms
+        des champs. Ils sont repérés par POSITION dans la zone, et non par
+        leur texte : au moment de l'alignement la feuille est déjà traduite,
+        si bien que le nom du cache et celui de la cellule ne se ressemblent
+        plus — la position est le seul lien qui survive à la traduction.
+
+        Une colonne dont l'en-tête est vide, absent ou numérique rend une
+        chaîne vide, et le champ garde alors son nom : sans preuve de ce qu'il
+        doit devenir, on n'invente pas.
+        """
+        debut, fin = ref.split(":", 1)
+        col_debut, col_fin = (self._colonne_de_ref(debut),
+                              self._colonne_de_ref(fin))
+        ligne_entete = "".join(c for c in debut if c.isdigit())
+        if not ligne_entete or col_fin < col_debut:
+            return []
+
+        arbre = etree.parse(str(feuille))
+        entetes = [""] * (col_fin - col_debut + 1)
+        for c in arbre.getroot().xpath(
+                f".//s:row[@r='{ligne_entete}']/s:c", namespaces=NS):
+            col = self._colonne_de_ref(c.get("r") or "")
+            if not (col_debut <= col <= col_fin):
+                continue
+            texte = self._texte_de_cellule(c, magasin)
+            if texte and texte.strip():
+                entetes[col - col_debut] = texte
+        return entetes
+
     def _relever_chaines_en_ligne(self, dossier: Path, elements, types) -> None:
         """Cellules `t="inlineStr"` — la chaîne est écrite DANS la feuille.
 
@@ -1168,9 +1419,11 @@ class XLSXTranslatorEngine(TranslationEngine):
             self._injecter_dessins(dossier, traductions)
             self._injecter_commentaires(dossier, traductions)
             self._injecter_fils(dossier, traductions)
-            # APRÈS les chaînes, et jamais avant : l'alignement RECOPIE les
-            # cellules d'en-tête telles qu'elles viennent d'être traduites.
+            self._injecter_croises(dossier, traductions)
+            # APRÈS les chaînes, et jamais avant : les alignements RECOPIENT
+            # les cellules telles qu'elles viennent d'être traduites.
             self._aligner_tableaux(dossier)
+            self._aligner_croises(dossier, traductions)
 
             self._refermer(output_path)
             return True, "Classeur traduit."
