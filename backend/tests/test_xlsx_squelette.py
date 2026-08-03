@@ -166,15 +166,21 @@ def main() -> int:
         couverture = XLSXTranslatorEngine.couverture()
         ok("AVEU  le moteur déclare ce qu'il lit",
            couverture.get("xl/sharedStrings.xml") is True)
-        ok("AVEU  et ce qu'il ne lit PAS encore",
-           any(fait is False for fait in couverture.values()),
-           "aucune partie non traitee declaree")
-        ok("AVEU  le relevé transporte la liste des manques",
-           len(extraction["workbook"]["non_traite"]) > 0)
-        # L'ACCORD entre les deux façons de dire la même chose, et non le nom
-        # d'une partie précise : nommer « pivot » ici obligeait à corriger ce
-        # test le jour où les croisés seraient traités — un test qui doit être
-        # réécrit à chaque progrès ne mesure pas le progrès, il le suit.
+        ok("AVEU  chaque partie déclare un état FRANC (traitée ou non)",
+           couverture and all(isinstance(f, bool)
+                              for f in couverture.values()),
+           str(couverture))
+        # CE QUI EST MESURÉ ICI, ET CE QUI NE L'EST PLUS
+        # ----------------------------------------------
+        # Ces contrôles ont d'abord exigé « il reste des manques » — vrai tant
+        # que la couverture était partielle, faux le jour où elle fut complète.
+        # Un test qui tombe quand le code s'améliore mesure l'ÉTAT, pas la
+        # PROPRIÉTÉ.
+        #
+        # La propriété durable est que l'aveu dise VRAI, quel que soit l'état :
+        # la liste annoncée dans le relevé doit être exactement celle des
+        # parties déclarées non traitées — vide comprise. C'est ce qui restera
+        # vérifiable quand une onzième partie apparaîtra.
         ok("AVEU  la liste annoncée est EXACTEMENT celle des parties à faire",
            sorted(extraction["workbook"]["non_traite"])
            == sorted(n for n, fait in couverture.items() if not fait),

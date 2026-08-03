@@ -1,4 +1,4 @@
-"""Moteur XLSX — SQUELETTE.
+"""Moteur XLSX.
 
 CE QUE CE FICHIER EST, ET CE QU'IL N'EST PAS
 --------------------------------------------
@@ -6,13 +6,26 @@ Il est le CHEMIN complet : un `.xlsx` est accepté, décompressé, parcouru, ses
 chaînes relevées et balisées, la traduction réinjectée, le classeur re-zippé.
 Un fichier passe de bout en bout et ressort ouvrable par Excel.
 
-Il n'est PAS la couverture complète du format. Excel range du texte à une
-dizaine d'endroits (voir `CONTEXTE.md`) ; huit sont traités. Les autres sont
-recensés, nommés, et laissés en place : `_PARTIES` liste ce qui reste à faire,
-et chaque manque y porte son motif.
+La COUVERTURE DU TEXTE est complète elle aussi : les dix endroits où Excel
+range du texte sont traités (`_PARTIES`, et `CONTEXTE.md` pour le détail).
 
-C'est délibéré. Un squelette qui prétend tout couvrir est pire qu'un squelette :
-il fait croire le travail fini, et le trou se découvre chez l'utilisateur.
+Il n'est PAS pour autant un moteur de FIDÉLITÉ. L'expansion n'est pas gérée :
+une traduction plus longue que sa source déborde de sa colonne ou s'affiche en
+`#####`. Le texte est juste, sa présentation pas toujours — c'est le prochain
+chantier, et le taire ferait découvrir le trou chez l'utilisateur.
+
+LA RÈGLE QUI REVIENT PARTOUT DANS CE FICHIER
+--------------------------------------------
+ON TRADUIT LA SOURCE, ON ALIGNE SES COPIES. Excel duplique le même texte à
+plusieurs endroits — cache d'un graphique, en-tête d'un tableau structuré,
+cache d'un croisé. Chacune de ces copies est le reflet d'une cellule DÉJÀ
+traduite. Les soumettre à nouveau au modèle donnerait deux formulations pour
+la même donnée, et Excel réécrit ces caches au premier rafraîchissement : le
+travail serait perdu EN PLUS d'être faux. On y recopie donc la traduction
+déjà faite, jamais une seconde traduction.
+
+Corollaire d'ordonnancement : les alignements s'exécutent APRÈS les injections
+de chaînes, jamais avant.
 
 CE QUI EST DÉJÀ JUSTE ET NE DOIT PAS BOUGER
 -------------------------------------------
@@ -110,12 +123,18 @@ _PARTIES: dict[str, tuple[bool, str]] = {
                "l'alignement remplace SUR PLACE, sans jamais ajouter, retirer "
                "ni réordonner."),
     "xl/styles.xml (formats de nombre personnalisés)":
-        (False, "Un format peut contenir du texte littéral — `#\\ ##0\\ \"F "
-                "CFA\"`. C'est du visible, et c'est piégeux : la syntaxe du "
-                "format doit rester intacte autour du mot."),
+        (True, "Un format peut afficher du texte à côté du nombre — "
+               "`#,##0\" F CFA\"`. C'est du visible. Mais un format est un "
+               "MINI-LANGAGE : seuls les littéraux entre guillemets sont du "
+               "texte, le reste (`#0.,;%`, `[Red]`, `[$-40C]`) est de la "
+               "syntaxe. Un format invalide est remplacé SILENCIEUSEMENT par "
+               "« Standard » — toute la colonne change d'apparence sans la "
+               "moindre erreur."),
     "docProps/core.xml":
-        (False, "Titre et sujet du document. Visibles dans les propriétés, "
-                "rarement décisifs — à faire en dernier."),
+        (True, "Titre, sujet, mots-clés, description — visibles dans les "
+               "propriétés du fichier. `dc:creator` et `cp:lastModifiedBy` "
+               "sont des NOMS DE PERSONNES et ne sont jamais traduits, comme "
+               "les `<author>` d'un commentaire."),
 }
 
 
@@ -234,6 +253,60 @@ def reecrire_references(formule: str, renommage: dict[str, str]) -> str:
     # 3. Remettre les chaînes littérales.
     return re.sub(r"\x00(\d+)\x00",
                   lambda m: litterales[int(m.group(1))], reecrit)
+
+
+#: Les morceaux TEXTE d'un `formatCode`, et rien d'autre.
+#:
+#: Un format de nombre est un mini-langage, pas une phrase. Seuls deux motifs
+#: y portent du texte affichable :
+#:
+#:   `"…"`  un littéral entre guillemets — `#,##0" F CFA"` ;
+#:   `\x`   un caractère échappé, qui s'affiche tel quel.
+#:
+#: Tout le reste est de la SYNTAXE : `#0.,%` les emplacements de chiffres, `;`
+#: la séparation des sections (positif / négatif / zéro / texte), `[Red]` une
+#: couleur, `[$-40C]` une locale, `@` le texte de la cellule, `jjjj mmmm` un
+#: motif de date. Y toucher produit un format INVALIDE, qu'Excel remplace
+#: silencieusement par « Standard » : toute la colonne change d'apparence sans
+#: la moindre erreur.
+_LITTERAL_FORMAT = re.compile(r'"([^"]*)"')
+
+
+def morceaux_de_format(code: str) -> list[str]:
+    """Les littéraux TRADUISIBLES d'un `formatCode`, dans l'ordre.
+
+    Un même littéral peut revenir plusieurs fois — `#,##0" u";[Red]-#,##0" u"`
+    porte deux fois « u », une par section. Les deux sont rendus : n'en
+    traduire qu'un afficherait les nombres négatifs dans l'autre langue.
+
+    Un littéral vide ou fait de seuls espaces n'est pas rendu : il n'y a rien
+    à traduire, et le soumettre au modèle rapporterait du bruit.
+    """
+    return [m.group(1) for m in _LITTERAL_FORMAT.finditer(code or "")
+            if m.group(1).strip()]
+
+
+def remplacer_morceaux_de_format(code: str, traduits: list[str]) -> str:
+    """Réécrit un `formatCode` en n'y remplaçant QUE ses littéraux.
+
+    Les littéraux sont repris DANS L'ORDRE de `morceaux_de_format`, ce qui est
+    le même appariement par position que partout ailleurs dans ce moteur.
+
+    Un guillemet dans la traduction fermerait le littéral et couperait le
+    format en deux : il est retiré. De même, une traduction vide laisse le
+    littéral d'origine — mieux vaut un mot non traduit qu'un format cassé.
+    """
+    restants = list(traduits)
+
+    def _remplacer(m):
+        if not m.group(1).strip():
+            return m.group(0)       # littéral d'espacement : pas un texte
+        if not restants:
+            return m.group(0)
+        nouveau = restants.pop(0).replace('"', "")
+        return f'"{nouveau}"' if nouveau else m.group(0)
+
+    return _LITTERAL_FORMAT.sub(_remplacer, code or "")
 
 
 def _baliser(morceaux: list) -> str:
@@ -429,6 +502,8 @@ class XLSXTranslatorEngine(TranslationEngine):
         self._injecter_commentaires(dossier, traductions)
         self._injecter_fils(dossier, traductions)
         self._injecter_croises(dossier, traductions)
+        self._injecter_formats(dossier, traductions)
+        self._injecter_proprietes(dossier, traductions)
         # APRÈS les chaînes, et jamais avant : les alignements RECOPIENT
         # les cellules telles qu'elles viennent d'être traduites.
         self._aligner_tableaux(dossier)
@@ -583,6 +658,8 @@ class XLSXTranslatorEngine(TranslationEngine):
         self._relever_commentaires(dossier, elements, types)
         self._relever_fils(dossier, elements, types)
         self._relever_croises(dossier, elements, types)
+        self._relever_formats(dossier, elements, types)
+        self._relever_proprietes(dossier, elements, types)
 
         extraction = {
             "workbook": {
@@ -1353,6 +1430,140 @@ class XLSXTranslatorEngine(TranslationEngine):
                 entetes[col - col_debut] = texte
         return entetes
 
+    # ── Formats de nombre personnalisés ───────────────────────────────────
+    def _relever_formats(self, dossier: Path, elements, types) -> None:
+        """`xl/styles.xml` — le texte LITTÉRAL des formats personnalisés.
+
+        Un format peut afficher du texte à côté du nombre : `#,##0" F CFA"`,
+        `0" jours"`. C'est du visible, aussi visible que la cellule elle-même.
+
+        MAIS UN FORMAT EST UN MINI-LANGAGE, PAS UNE PHRASE. On n'en relève
+        donc que les littéraux entre guillemets (voir `morceaux_de_format`),
+        chacun comme une balise distincte : `#,##0" u";[Red]-#,##0" u"` en
+        porte deux, une par section, et les deux doivent suivre — sinon les
+        nombres négatifs s'afficheraient dans l'autre langue.
+
+        Les formats INTÉGRÉS d'Excel (numFmtId < 164) ne sont pas dans le
+        fichier : ils sont désignés par leur seul identifiant et Excel les
+        localise lui-même. Il n'y a donc rien à y faire, et c'est heureux.
+        """
+        chemin = dossier / "xl" / "styles.xml"
+        if not chemin.exists():
+            return
+        arbre = etree.parse(str(chemin))
+        for fmt in arbre.getroot().xpath(".//s:numFmts/s:numFmt",
+                                         namespaces=NS):
+            morceaux = morceaux_de_format(fmt.get("formatCode") or "")
+            if not morceaux:
+                continue
+            elements.append({
+                "id": f"numfmt_{fmt.get('numFmtId')}",
+                "text": "".join(f"[[{i}]]{m}[[/{i}]]"
+                                for i, m in enumerate(morceaux)),
+                "context": {"part": "numberFormat",
+                            "numFmtId": fmt.get("numFmtId") or ""},
+            })
+            types["workbook"].add("Format personnalisé")
+
+    def _injecter_formats(self, dossier: Path, traductions: dict) -> None:
+        """Réinjecte les littéraux, en laissant la SYNTAXE intacte.
+
+        La reconstruction passe par `remplacer_morceaux_de_format`, qui ne
+        touche qu'à l'intérieur des guillemets. Un format qu'on ne saurait pas
+        reconstruire est laissé tel quel : un mot non traduit se voit, un
+        format invalide fait basculer toute une colonne en « Standard » sans
+        prévenir.
+        """
+        from engines import runtags
+
+        chemin = dossier / "xl" / "styles.xml"
+        if not chemin.exists():
+            return
+        arbre = etree.parse(str(chemin))
+        touche = False
+        for fmt in arbre.getroot().xpath(".//s:numFmts/s:numFmt",
+                                         namespaces=NS):
+            traduit = traductions.get(f"numfmt_{fmt.get('numFmtId')}")
+            if traduit is None:
+                continue
+            code = fmt.get("formatCode") or ""
+            # `parse` rend `{index: texte}` : on reprend les morceaux DANS
+            # L'ORDRE des balises, le même appariement par position que
+            # partout ailleurs dans ce moteur.
+            par_index = runtags.parse(traduit)
+            morceaux = [par_index[i] for i in sorted(par_index)]
+            if not morceaux:
+                continue
+            nouveau = remplacer_morceaux_de_format(code, morceaux)
+            if nouveau and nouveau != code:
+                fmt.set("formatCode", nouveau)
+                touche = True
+        if touche:
+            arbre.write(str(chemin), xml_declaration=True,
+                        encoding="UTF-8", standalone=True)
+
+    # ── Propriétés du document ────────────────────────────────────────────
+    #: Ce qui s'AFFICHE dans les propriétés du fichier. `dc:creator` et
+    #: `cp:lastModifiedBy` en sont exclus : ce sont des NOMS DE PERSONNES, et
+    #: les dates `dcterms:*` sont des dates.
+    _CHAMPS_CORE = (
+        ("{http://purl.org/dc/elements/1.1/}title", "title"),
+        ("{http://purl.org/dc/elements/1.1/}subject", "subject"),
+        ("{http://purl.org/dc/elements/1.1/}description", "description"),
+        ("{http://schemas.openxmlformats.org/package/2006/"
+         "metadata/core-properties}keywords", "keywords"),
+        ("{http://schemas.openxmlformats.org/package/2006/"
+         "metadata/core-properties}category", "category"),
+    )
+
+    def _relever_proprietes(self, dossier: Path, elements, types) -> None:
+        """`docProps/core.xml` — titre, sujet, mots-clés, description.
+
+        Visibles dans les propriétés du fichier, et dans les résultats de
+        recherche de l'explorateur.
+
+        JAMAIS RELEVÉS : `dc:creator` et `cp:lastModifiedBy` — des noms de
+        personnes, comme les `<author>` d'un commentaire ; et les dates, qui
+        ne sont pas du texte.
+        """
+        chemin = dossier / "docProps" / "core.xml"
+        if not chemin.exists():
+            return
+        arbre = etree.parse(str(chemin))
+        racine = arbre.getroot()
+        for tag, nom in self._CHAMPS_CORE:
+            noeud = racine.find(tag)
+            if noeud is None or not (noeud.text or "").strip():
+                continue
+            elements.append({
+                "id": f"core_{nom}",
+                "text": f"[[0]]{noeud.text}[[/0]]",
+                "context": {"part": "documentProperty", "champ": nom},
+            })
+            types["workbook"].add("Propriété du document")
+
+    def _injecter_proprietes(self, dossier: Path, traductions: dict) -> None:
+        from engines import runtags
+
+        chemin = dossier / "docProps" / "core.xml"
+        if not chemin.exists():
+            return
+        arbre = etree.parse(str(chemin))
+        racine = arbre.getroot()
+        touche = False
+        for tag, nom in self._CHAMPS_CORE:
+            traduit = traductions.get(f"core_{nom}")
+            noeud = racine.find(tag)
+            if traduit is None or noeud is None:
+                continue
+            propre = runtags.sans_balises(traduit).strip()
+            if propre and propre != noeud.text:
+                noeud.text = propre
+                touche = True
+        if touche:
+            arbre.write(str(chemin), xml_declaration=True,
+                        encoding="UTF-8", standalone=True)
+
     def _relever_chaines_en_ligne(self, dossier: Path, elements, types) -> None:
         """Cellules `t="inlineStr"` — la chaîne est écrite DANS la feuille.
 
@@ -1420,6 +1631,8 @@ class XLSXTranslatorEngine(TranslationEngine):
             self._injecter_commentaires(dossier, traductions)
             self._injecter_fils(dossier, traductions)
             self._injecter_croises(dossier, traductions)
+            self._injecter_formats(dossier, traductions)
+            self._injecter_proprietes(dossier, traductions)
             # APRÈS les chaînes, et jamais avant : les alignements RECOPIENT
             # les cellules telles qu'elles viennent d'être traduites.
             self._aligner_tableaux(dossier)

@@ -362,6 +362,83 @@ PIVOT_DUPLIQUES = ["Produit", "Quantite vendue", "Cafe moulu"]
 PIVOT_JAMAIS_TRADUIT = ["TCD1"]
 
 
+# ── Formats de nombre personnalisés, et propriétés du document ──────────────
+# UN `formatCode` EST UN MINI-LANGAGE, PAS UNE PHRASE.
+#
+# Seuls sont du TEXTE : ce qui est entre guillemets, et un caractère précédé
+# d'un `\`. Tout le reste est de la SYNTAXE — `#0.,%` les emplacements de
+# chiffres, `;` la séparation des sections (positif / négatif / zéro / texte),
+# `[Red]` une couleur, `[$-40C]` une locale, `@` le texte de la cellule.
+#
+# Traduire un format, c'est donc traduire les MORCEAUX CITÉS et rien d'autre.
+# Y toucher plus largement produit un format invalide, qu'Excel remplace
+# silencieusement par « Standard » : tous les nombres de la colonne changent
+# d'apparence, sans la moindre erreur.
+_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<numFmts count="4">
+<numFmt numFmtId="164" formatCode="#,##0&quot; F CFA&quot;"/>
+<numFmt numFmtId="165" formatCode="#,##0&quot; unites&quot;;[Red]-#,##0&quot; unites&quot;"/>
+<numFmt numFmtId="166" formatCode="0.0%"/>
+<numFmt numFmtId="167" formatCode="[$-40C]jjjj\\ j\\ mmmm"/>
+</numFmts>
+<cellXfs count="1"><xf numFmtId="164" fontId="0" fillId="0" borderId="0"/></cellXfs>
+</styleSheet>"""
+
+#: Le TEXTE cité, seul traduisible. « F CFA » apparaît une fois, « unites »
+#: DEUX fois dans le même format (section positive et section négative) : les
+#: deux doivent suivre, sinon un nombre négatif s'afficherait dans l'autre
+#: langue.
+FORMATS_TRADUISIBLES = [" F CFA", " unites"]
+#: De la SYNTAXE. La traduire donne un format invalide, qu'Excel remplace
+#: silencieusement par « Standard ».
+FORMATS_SYNTAXE = ["#,##0", "0.0%", "[Red]", "[$-40C]"]
+
+# `docProps/core.xml` — le titre et le sujet sont VISIBLES dans les propriétés
+# du fichier. Le créateur est un NOM DE PERSONNE, jamais traduit ; les dates
+# sont des dates.
+_CORE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties
+ xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+ xmlns:dc="http://purl.org/dc/elements/1.1/"
+ xmlns:dcterms="http://purl.org/dc/terms/"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<dc:title>Rapport trimestriel</dc:title>
+<dc:subject>Ventes et charges</dc:subject>
+<dc:creator>Marie Durand</dc:creator>
+<cp:keywords>ventes, budget</cp:keywords>
+<dc:description>Document de travail interne</dc:description>
+<cp:lastModifiedBy>Marie Durand</cp:lastModifiedBy>
+<dcterms:created xsi:type="dcterms:W3CDTF">2026-07-01T09:00:00Z</dcterms:created>
+</cp:coreProperties>"""
+
+#: Ce qui s'affiche dans les propriétés — traduisible.
+CORE_TRADUISIBLES = ["Rapport trimestriel", "Ventes et charges",
+                     "ventes, budget", "Document de travail interne"]
+#: Une IDENTITÉ et une DATE : jamais traduites.
+CORE_JAMAIS_TRADUIT = ["Marie Durand", "2026-07-01T09:00:00Z"]
+
+
+def construire_avec_styles(chemin: str) -> str:
+    """Le classeur multi-feuilles, plus `styles.xml` et `docProps/core.xml`."""
+    construire_multi(chemin)
+    with zipfile.ZipFile(chemin) as z:
+        contenu = {n: z.read(n) for n in z.namelist()}
+    contenu["xl/styles.xml"] = _STYLES.encode("utf-8")
+    contenu["docProps/core.xml"] = _CORE.encode("utf-8")
+    ct = contenu["[Content_Types].xml"].decode("utf-8").replace(
+        "</Types>",
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.'
+        'openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        '<Override PartName="/docProps/core.xml" ContentType="application/vnd.'
+        'openxmlformats-package.core-properties+xml"/></Types>')
+    contenu["[Content_Types].xml"] = ct.encode("utf-8")
+    with zipfile.ZipFile(chemin, "w", zipfile.ZIP_DEFLATED) as z:
+        for nom, octets in contenu.items():
+            z.writestr(nom, octets)
+    return chemin
+
+
 def construire_avec_croise(chemin: str) -> str:
     """Le classeur à tableau structuré, plus un CROISÉ bâti dessus.
 

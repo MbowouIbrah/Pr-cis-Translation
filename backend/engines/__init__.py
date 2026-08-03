@@ -32,8 +32,10 @@ except ImportError as _e:                       # pragma: no cover
     PPTXTranslatorEngine = None
     INDISPONIBLES["pptx"] = str(_e)
 
-# XLSX — SQUELETTE (0.1.0). Le chemin est complet, la couverture du format ne
-# l'est pas : voir `xlsx/CONTEXTE.md`, section « Ce qui n'est pas encore fait ».
+# XLSX (0.2.0). La couverture du TEXTE est complète — les dix endroits où Excel
+# range du texte sont traités. Reste un défaut de RENDU : l'expansion n'est pas
+# gérée (une traduction plus longue déborde ou s'affiche en `#####`). Voir
+# `xlsx/CONTEXTE.md`, section « Limites au-delà du texte ».
 try:
     from .xlsx.engine import XLSXTranslatorEngine
     _REGISTRE["xlsx"] = XLSXTranslatorEngine

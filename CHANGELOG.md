@@ -11,6 +11,22 @@ Rubriques : `Ajouté`, `Modifié`, `Corrigé`, `Retiré`, `Sécurité`.
 ## [Unreleased]
 
 ### Ajouté
+- **Traduction Excel complète, avec aperçu progressif** (moteur XLSX `0.2.0`).
+  Les **dix** endroits où Excel range du texte sont désormais traités : chaînes
+  partagées et en ligne, noms d'onglets, graphiques, zones de texte, les **deux**
+  formats de commentaires (ancien et fils modernes), en-têtes de tableaux
+  structurés, croisés dynamiques, formats de nombre personnalisés et propriétés
+  du document. L'aperçu suit le même flux progressif que le PDF et le PPTX —
+  socle en langue source affichable tout de suite, puis chaque feuille traduite
+  greffée à sa place.
+  Deux règles gouvernent le moteur : **on ne traduit jamais un nombre ni une
+  formule** (une cellule cassée propage `#VALUE!` dans toute la feuille), et
+  **on traduit la source, on aligne ses copies** — les caches de graphiques,
+  d'en-têtes de tableaux et de croisés reflètent des cellules déjà traduites ;
+  les retraduire donnerait deux formulations pour la même donnée.
+  Ce qui n'est **pas** couvert : l'**expansion**. Une traduction plus longue que
+  sa source déborde de sa colonne ou s'affiche en `#####`. C'est la raison du
+  `0.2.0` plutôt qu'un `1.0.0`.
 - **Journal central des erreurs** : toutes les erreurs (interface, backend, API)
   sont captées et regroupées par empreinte. Capture front (erreurs JS, promesses
   rejetées, rendu React via `ErrorBoundary`, échecs réseau/5xx) → `POST

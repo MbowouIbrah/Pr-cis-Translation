@@ -1,19 +1,25 @@
 # Moteur XLSX — contexte
 
-Version **0.1.0** · `engines/xlsx/` · inscrit au registre sous `xlsx`
+Version **0.2.0** · `engines/xlsx/` · inscrit au registre sous `xlsx`
 
-> ## ⚠ C'est un SQUELETTE
+> ## La couverture du TEXTE est complète — la FIDÉLITÉ ne l'est pas
 >
 > Le **chemin** est complet : un classeur est accepté, décompressé, parcouru,
 > ses chaînes relevées et balisées, la traduction réinjectée, le fichier
 > réassemblé. Un `.xlsx` entre et ressort ouvrable par Excel.
 >
-> La **couverture du format** ne l'est pas. Excel range du texte à une dizaine
-> d'endroits ; **huit** sont traités. Les autres sont recensés plus bas — pas
-> oubliés, pas masqués.
+> La **couverture du format** l'est désormais aussi : les **dix** endroits où
+> Excel range du texte sont traités (table ci-dessous). `couverture()` ne
+> déclare plus aucun manque.
 >
-> D'où le **0.1.0** et non 1.0.0 : une version majeure dit « le contrat est
-> stable ». Le déclarer en 1.0.0 ferait croire l'inverse à qui lit `/health`.
+> Ce qui reste n'est plus une question de couverture mais de **rendu** :
+> **l'expansion n'est pas gérée**. Une traduction plus longue que sa source
+> déborde de sa colonne ou s'affiche en `#####`. Le texte est juste ; sa
+> présentation ne l'est pas toujours.
+>
+> D'où **0.2.0** et non 1.0.0 : la couverture est faite, mais un utilisateur
+> qui lit « 1.0.0 » dans `/health` comprendrait « ce moteur rend un classeur
+> fidèle », ce qui n'est pas encore vrai.
 
 > À lire d'abord : [`../CONTEXTE.md`](../CONTEXTE.md) — la règle
 > d'indépendance, l'instance par opération, les balises de runs.
@@ -74,6 +80,8 @@ que là. C'est précisément pourquoi la preuve se fait sur du synthétique.
 | `comments*.xml` + `threadedComments/*` | ✅ les **deux** formats — **jamais** les `<author>` |
 | `xl/tables/table*.xml` | ✅ en-têtes **alignés** sur la cellule, jamais retraduits |
 | `pivotCache/*` + `pivotTables/*` | ✅ libellés traduits, cache **aligné** — index intacts |
+| `xl/styles.xml` — formats de nombre | ✅ les **littéraux** entre guillemets, jamais la syntaxe |
+| `docProps/core.xml` | ✅ titre, sujet, mots-clés — **jamais** `dc:creator` |
 
 La seconde n'est pas un détail : beaucoup d'exports automatiques n'utilisent
 **que** cette forme et ne produisent aucun `sharedStrings.xml`. Ne lire que le
@@ -121,6 +129,39 @@ de chaînes**, jamais avant.
 Les références structurées (`Tableau1[Produit]`, `[@Produit]`) sont réécrites
 du même geste : c'est le piège déjà payé sur les noms d'onglets, et il se
 traite de la même façon.
+
+### Les formats de nombre : un mini-langage, pas une phrase
+
+Un format peut afficher du texte à côté du chiffre — `#,##0" F CFA"`. C'est du
+visible : une colonne de montants qui garde « F CFA » dans un document traduit
+en anglais se remarque tout de suite.
+
+Mais **seul est du texte ce qui est entre guillemets**. Le reste est de la
+syntaxe :
+
+| morceau | ce que c'est |
+|---|---|
+| `#,##0` `0.0%` | emplacements de chiffres |
+| `;` | sépare les sections **positif / négatif / zéro / texte** |
+| `[Red]` | une couleur |
+| `[$-40C]` | une locale |
+| `@` | le texte de la cellule |
+
+**Et l'erreur ne se voit pas.** Un format invalide n'ouvre aucune boîte de
+dialogue : Excel le remplace **silencieusement** par « Standard », et toute la
+colonne change d'apparence. C'est le même genre d'échec que la cellule vidée du
+« piège déjà payé » — il se croit réussi.
+
+Deux conséquences dans le code :
+
+* `#,##0" unites";[Red]-#,##0" unites"` porte **deux fois** le même littéral,
+  un par section. Chacun est une balise distincte, et les deux suivent —
+  n'en traduire qu'un afficherait les **nombres négatifs** dans l'autre langue ;
+* un guillemet arrivant dans la traduction fermerait le littéral et couperait
+  le format en deux : il est retiré.
+
+Les formats **intégrés** d'Excel (`numFmtId < 164`) ne sont pas dans le
+fichier — Excel les localise lui-même. Il n'y a rien à y faire.
 
 ### Les croisés dynamiques : le texte y est dupliqué, et les deux moitiés ne se traitent pas pareil
 
@@ -193,17 +234,17 @@ se voit ; un fichier qu'Excel refuse d'ouvrir ne se rattrape pas.
 
 ## Ce qui n'est pas encore fait
 
-Recensé dans `_PARTIES` (`engine.py`), avec le motif de chacun. C'est le **plan
-de travail**, ordonné par importance et non par ordre alphabétique.
+**Plus aucune partie du format.** `_PARTIES` (`engine.py`) les déclare toutes
+traitées, et `couverture()` ne rend plus aucun manque.
 
-| Partie | Pourquoi ça compte |
-|---|---|
-| `xl/styles.xml` — formats personnalisés | Un format peut contenir du texte littéral (`#\ ##0\ "F CFA"`). C'est du visible, et la syntaxe doit rester intacte autour du mot. |
-| `docProps/core.xml` | Titre et sujet. Rarement décisifs — en dernier. |
+Le mécanisme d'aveu reste en place et reste utile : `couverture()` rend la
+table, le relevé transporte la liste des manques sous `workbook.non_traite`, et
+`test_xlsx_squelette` vérifie que **les deux disent la même chose** — liste
+vide comprise. Une onzième partie qui apparaîtrait serait donc annoncée sans
+qu'on ait à y penser.
 
-`XLSXTranslatorEngine.couverture()` rend cette table, et le relevé d'extraction
-transporte la liste des manques sous `workbook.non_traite`. **L'écart entre la
-promesse et le code reste ainsi mesurable**, au lieu d'être une impression.
+Ce qui reste n'est pas une lacune de couverture mais un défaut de **rendu** :
+voir « Limites au-delà du texte » plus bas — **l'expansion**.
 
 ## L'aperçu progressif — feuille par feuille
 
@@ -256,9 +297,37 @@ Le partiel est **non destructif** (fichiers de contrôle calculés en mémoire) 
 ## Vérifier
 
 ```bash
-backend/venv/Scripts/python.exe backend/tests/test_xlsx_squelette.py
+for t in squelette branchement partiel apercu_progressif onglets \
+         graphiques annotations tableaux croises formats; do
+  backend/venv/Scripts/python.exe backend/tests/test_xlsx_$t.py
+done
 ```
 
-29 contrôles sur un classeur **synthétique** écrit par la suite elle-même.
-Prouvé par mutation : garde numérique remise par-morceau → 28/29 ; lecture des
-chaînes en ligne retirée → 27/29.
+| suite | contrôles | ce qu'elle garde |
+|---|---|---|
+| `squelette` | 28 | chemin de bout en bout, garde numérique, aveu de couverture |
+| `branchement` | 17 | le moteur est bien celui qu'appelle l'application |
+| `partiel` | 17 | classeur amputé : ordre des onglets, index du magasin |
+| `apercu_progressif` | 11 | socle + greffe feuille par feuille |
+| `onglets` | 22 | renommage **et** réécriture des références |
+| `graphiques` | 11 | texte riche traduit, caches intacts |
+| `annotations` | 13 | les deux formats de commentaires, identités intactes |
+| `tableaux` | 11 | en-têtes alignés, références structurées suivies |
+| `croises` | 15 | table traduite, cache aligné, index intacts |
+| `formats` | 23 | littéraux traduits, **syntaxe intacte**, propriétés |
+
+Tout est prouvé sur des classeurs **synthétiques** écrits par la fabrique
+(`tests/fabrique_classeurs.py`), jamais sur un fichier réel : il faut pouvoir
+poser des pièges précis, et un classeur réel ne les contient qu'au hasard.
+
+**Chaque suite est passée au test de mutation** — un test qui passe aussi sur
+du code cassé ne prouve rien. Deux failles de mesure ont d'ailleurs été
+trouvées ainsi, dans les tests eux-mêmes :
+
+* la fabrique posait le tableau structuré en `A1`, ce qui rendait **invisible**
+  toute erreur de décalage de colonne (`col_debut = 0`). Le tableau occupe
+  maintenant `B2:C3`, avec un titre en `A1` qui n'en fait pas partie ;
+* le contrôle du spécificateur `[#Totals]` passait pour une mauvaise raison —
+  ce nom n'étant dans aucun renommage, la garde était sans effet. Une
+  **colonne** s'appelle désormais `#Totals`, seul cas où la garde change
+  quelque chose.
