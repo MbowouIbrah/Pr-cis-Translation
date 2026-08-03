@@ -7,10 +7,9 @@ chaînes relevées et balisées, la traduction réinjectée, le classeur re-zipp
 Un fichier passe de bout en bout et ressort ouvrable par Excel.
 
 Il n'est PAS la couverture complète du format. Excel range du texte à une
-dizaine d'endroits (voir `CONTEXTE.md`) ; ce squelette en traite deux — les
-chaînes partagées et les chaînes en ligne. Les autres sont recensées, nommées,
-et laissées en place : `_PARTIES` liste ce qui reste à faire, et chaque manque
-y porte son motif.
+dizaine d'endroits (voir `CONTEXTE.md`) ; sept sont traités. Les autres sont
+recensés, nommés, et laissés en place : `_PARTIES` liste ce qui reste à faire,
+et chaque manque y porte son motif.
 
 C'est délibéré. Un squelette qui prétend tout couvrir est pire qu'un squelette :
 il fait croire le travail fini, et le trou se découvre chez l'utilisateur.
@@ -89,8 +88,15 @@ _PARTIES: dict[str, tuple[bool, str]] = {
                "sont des noms de personnes, et `authorId` y renvoie par "
                "index."),
     "xl/tables/table*.xml":
-        (False, "En-têtes de tableaux structurés — visibles, et cités par les "
-                "formules en références structurées."),
+        (True, "En-têtes de tableaux structurés. Ils vivent à DEUX endroits "
+               "qui doivent rester identiques : `<tableColumn name=>` et la "
+               "cellule de la ligne d'en-tête — Excel refuse d'ouvrir le "
+               "classeur quand les deux divergent. La cellule étant déjà "
+               "traduite via sharedStrings, on n'envoie PAS l'en-tête une "
+               "seconde fois au modèle : on ALIGNE la colonne sur la cellule. "
+               "Les formules en références structurées (`Tableau1[Produit]`) "
+               "sont réécrites du même geste ; le `name=` du TABLEAU, lui, est "
+               "un identifiant et n'est jamais traduit."),
     "xl/pivotCache/* et xl/pivotTables/*":
         (False, "Tableaux croisés dynamiques : les libellés y sont DUPLIQUÉS "
                 "entre le cache et la table. En traduire un seul des deux "
@@ -404,6 +410,9 @@ class XLSXTranslatorEngine(TranslationEngine):
         self._injecter_dessins(dossier, traductions)
         self._injecter_commentaires(dossier, traductions)
         self._injecter_fils(dossier, traductions)
+        # APRÈS les chaînes, et jamais avant : l'alignement RECOPIE les
+        # cellules d'en-tête telles qu'elles viennent d'être traduites.
+        self._aligner_tableaux(dossier)
 
     def build_partial_xlsx(self, output_path: str,
                            only_sheets: set[int] | None = None) -> None:
@@ -889,6 +898,210 @@ class XLSXTranslatorEngine(TranslationEngine):
                 arbre.write(str(fichier), xml_declaration=True,
                             encoding="UTF-8", standalone=True)
 
+    # ── Tableaux structurés ───────────────────────────────────────────────
+    @staticmethod
+    def _colonne_de_ref(ref: str) -> int:
+        """« B12 » → 1. L'index 0-basé de la colonne d'une référence A1."""
+        lettres = "".join(c for c in ref if c.isalpha()).upper()
+        n = 0
+        for c in lettres:
+            n = n * 26 + (ord(c) - 64)
+        return n - 1
+
+    def _texte_de_cellule(self, cellule, magasin: list[str]) -> str | None:
+        """Le texte AFFICHÉ par une cellule, quelle que soit sa forme.
+
+        Trois formes portent du texte, et l'alignement des tableaux doit lire
+        les trois : l'index vers `sharedStrings` (`t="s"`), la chaîne écrite
+        dans la feuille (`t="inlineStr"`), et le texte nu (`t="str"`). Rendre
+        `None` signifie « pas de texte » — une cellule numérique, ou vide.
+        """
+        typ = cellule.get("t") or ""
+        if typ == "s":
+            v = cellule.find(f"{{{NS['s']}}}v")
+            if v is None or not (v.text or "").strip().isdigit():
+                return None
+            i = int(v.text.strip())
+            return magasin[i] if 0 <= i < len(magasin) else None
+        if typ == "inlineStr":
+            noeuds = cellule.xpath(".//s:t", namespaces=NS)
+            return "".join(t.text or "" for t in noeuds) if noeuds else None
+        if typ == "str":
+            v = cellule.find(f"{{{NS['s']}}}v")
+            return v.text if v is not None else None
+        return None
+
+    def _magasin_courant(self, dossier: Path) -> list[str]:
+        """`sharedStrings.xml` tel qu'il est MAINTENANT — après injection.
+
+        Lu à chaque appel et jamais mis en cache : l'alignement des tableaux
+        s'exécute APRÈS l'injection des chaînes, et c'est précisément l'état
+        traduit qu'il doit lire.
+        """
+        chemin = dossier / "xl" / "sharedStrings.xml"
+        if not chemin.exists():
+            return []
+        arbre = etree.parse(str(chemin))
+        return ["".join(t.text or "" for t in si.xpath(".//s:t",
+                                                       namespaces=NS))
+                for si in arbre.getroot().xpath("./s:si", namespaces=NS)]
+
+    def _feuille_du_tableau(self, dossier: Path, table: Path) -> Path | None:
+        """Quelle feuille porte ce tableau ?
+
+        Le lien est dans l'AUTRE sens : c'est `xl/worksheets/_rels/sheetN.xml
+        .rels` qui cite `../tables/tableM.xml`. Le fichier de tableau, lui, ne
+        nomme pas sa feuille — il n'y a donc pas de raccourci.
+        """
+        rels_dir = dossier / "xl" / "worksheets" / "_rels"
+        if not rels_dir.is_dir():
+            return None
+        for rels in sorted(rels_dir.glob("sheet*.xml.rels")):
+            arbre = etree.parse(str(rels))
+            for rel in arbre.getroot():
+                cible = (rel.get("Target") or "").replace("\\", "/")
+                if cible.rsplit("/", 1)[-1] == table.name:
+                    feuille = (dossier / "xl" / "worksheets"
+                               / rels.name[:-len(".rels")])
+                    return feuille if feuille.exists() else None
+        return None
+
+    def _aligner_tableaux(self, dossier: Path) -> None:
+        """`xl/tables/table*.xml` — aligne les en-têtes sur les cellules.
+
+        POURQUOI ON N'ENVOIE PAS CES EN-TÊTES AU MODÈLE
+        -----------------------------------------------
+        Un en-tête de tableau structuré vit à DEUX endroits qui doivent rester
+        rigoureusement identiques :
+
+          · `<tableColumn name="Produit">` dans `xl/tables/table1.xml` ;
+          · la CELLULE de la ligne d'en-tête, dans la feuille — déjà traduite
+            via `sharedStrings` ou en ligne.
+
+        Excel refuse d'ouvrir un classeur où les deux divergent (« nous avons
+        trouvé un problème dans le contenu »). Or les relever comme un texte de
+        plus les soumettrait une SECONDE fois au modèle, qui peut rendre une
+        autre formulation que celle déjà écrite dans la cellule : on
+        fabriquerait la divergence qu'on veut éviter.
+
+        La règle est donc l'inverse d'un relevé : on ne traduit rien ici, on
+        RECOPIE ce que la cellule affiche désormais. Un seul texte part au
+        modèle, un seul revient, les deux endroits s'accordent par
+        construction.
+
+        DEUX CHOSES NE BOUGENT PAS :
+
+          · `name=` / `displayName=` du TABLEAU (« Tableau1 ») — un
+            identifiant, cité par les références structurées, jamais affiché
+            comme du texte ;
+          · une colonne dont la cellule d'en-tête est vide, absente ou
+            numérique : sans preuve de ce qu'elle doit devenir, on garde le
+            nom d'origine. Une colonne non traduite se voit ; un classeur
+            qu'Excel refuse d'ouvrir ne se rattrape pas.
+
+        Enfin, un nom de colonne est cité par les formules en RÉFÉRENCES
+        STRUCTURÉES (`Tableau1[Produit]`, `[@Produit]`). Renommer sans les
+        réécrire produirait des `#REF!` — c'est exactement le piège déjà payé
+        sur les noms d'onglets, et il se traite du même geste, ici.
+        """
+        dossier_tables = dossier / "xl" / "tables"
+        if not dossier_tables.is_dir():
+            return
+        magasin = self._magasin_courant(dossier)
+        renommages: list[dict[str, str]] = []
+
+        for table in sorted(dossier_tables.glob("table*.xml")):
+            arbre = etree.parse(str(table))
+            racine = arbre.getroot()
+            colonnes = racine.xpath(".//s:tableColumn", namespaces=NS)
+            if not colonnes:
+                continue
+
+            feuille = self._feuille_du_tableau(dossier, table)
+            if feuille is None:
+                continue
+
+            # `ref="A1:B2"` donne la ligne d'en-tête (la première) et la
+            # colonne de départ. `headerRowCount="0"` = tableau SANS en-tête
+            # affiché : il n'y a alors aucune cellule à recopier.
+            ref = racine.get("ref") or ""
+            if racine.get("headerRowCount") == "0" or ":" not in ref:
+                continue
+            debut = ref.split(":")[0]
+            ligne_entete = "".join(c for c in debut if c.isdigit())
+            col_debut = self._colonne_de_ref(debut)
+            if not ligne_entete:
+                continue
+
+            arbre_f = etree.parse(str(feuille))
+            entetes: dict[int, str] = {}
+            for c in arbre_f.getroot().xpath(
+                    f".//s:row[@r='{ligne_entete}']/s:c", namespaces=NS):
+                texte = self._texte_de_cellule(c, magasin)
+                if texte and texte.strip():
+                    entetes[self._colonne_de_ref(c.get("r") or "")] = texte
+
+            renommage: dict[str, str] = {}
+            touche = False
+            for i, colonne in enumerate(colonnes):
+                ancien = colonne.get("name") or ""
+                nouveau = entetes.get(col_debut + i)
+                if not nouveau or nouveau == ancien:
+                    continue
+                colonne.set("name", nouveau)
+                renommage[ancien] = nouveau
+                touche = True
+            if touche:
+                arbre.write(str(table), xml_declaration=True,
+                            encoding="UTF-8", standalone=True)
+            if renommage:
+                renommages.append(renommage)
+
+        if renommages:
+            fusion: dict[str, str] = {}
+            for r in renommages:
+                fusion.update(r)
+            self._reecrire_refs_structurees(dossier, fusion)
+
+    def _reecrire_refs_structurees(self, dossier: Path,
+                                   renommage: dict[str, str]) -> None:
+        """Réécrit `Tableau1[Produit]` et `[@Produit]` dans les formules.
+
+        On ne touche QUE ce qui est entre crochets, et jamais le nom du
+        tableau qui précède. Le `#` d'un spécificateur (`[#Tout]`,
+        `[#Headers]`) marque un mot-clé du format, pas un nom de colonne : il
+        est laissé tel quel — le traduire donnerait une formule invalide.
+        """
+        if not renommage:
+            return
+
+        def _remplacer(m):
+            interieur = m.group(1)
+            if interieur.startswith("#"):
+                return m.group(0)
+            arobase = interieur.startswith("@")
+            nu = interieur[1:] if arobase else interieur
+            cible = renommage.get(nu)
+            if cible is None:
+                return m.group(0)
+            return "[" + ("@" if arobase else "") + cible + "]"
+
+        motif = re.compile(r"\[([^\[\]]*)\]")
+        for feuille in sorted(
+                (dossier / "xl" / "worksheets").glob("sheet*.xml")):
+            arbre = etree.parse(str(feuille))
+            touche = False
+            for f in arbre.getroot().xpath(".//s:f", namespaces=NS):
+                if not (f.text or "") or "[" not in f.text:
+                    continue
+                reecrit = motif.sub(_remplacer, f.text)
+                if reecrit != f.text:
+                    f.text = reecrit
+                    touche = True
+            if touche:
+                arbre.write(str(feuille), xml_declaration=True,
+                            encoding="UTF-8", standalone=True)
+
     def _relever_chaines_en_ligne(self, dossier: Path, elements, types) -> None:
         """Cellules `t="inlineStr"` — la chaîne est écrite DANS la feuille.
 
@@ -955,6 +1168,9 @@ class XLSXTranslatorEngine(TranslationEngine):
             self._injecter_dessins(dossier, traductions)
             self._injecter_commentaires(dossier, traductions)
             self._injecter_fils(dossier, traductions)
+            # APRÈS les chaînes, et jamais avant : l'alignement RECOPIE les
+            # cellules d'en-tête telles qu'elles viennent d'être traduites.
+            self._aligner_tableaux(dossier)
 
             self._refermer(output_path)
             return True, "Classeur traduit."

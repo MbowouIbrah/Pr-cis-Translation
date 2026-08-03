@@ -9,7 +9,7 @@ Version **0.1.0** · `engines/xlsx/` · inscrit au registre sous `xlsx`
 > réassemblé. Un `.xlsx` entre et ressort ouvrable par Excel.
 >
 > La **couverture du format** ne l'est pas. Excel range du texte à une dizaine
-> d'endroits ; **six** sont traités. Les autres sont recensés plus bas — pas
+> d'endroits ; **sept** sont traités. Les autres sont recensés plus bas — pas
 > oubliés, pas masqués.
 >
 > D'où le **0.1.0** et non 1.0.0 : une version majeure dit « le contrat est
@@ -72,6 +72,7 @@ que là. C'est précisément pourquoi la preuve se fait sur du synthétique.
 | `xl/charts/chart*.xml` | ✅ titres, noms d'axes, étiquettes en dur — **jamais** les caches |
 | `xl/drawings/drawing*.xml` | ✅ zones de texte et formes — **jamais** le `name=` |
 | `comments*.xml` + `threadedComments/*` | ✅ les **deux** formats — **jamais** les `<author>` |
+| `xl/tables/table*.xml` | ✅ en-têtes **alignés** sur la cellule, jamais retraduits |
 
 La seconde n'est pas un détail : beaucoup d'exports automatiques n'utilisent
 **que** cette forme et ne produisent aucun `sharedStrings.xml`. Ne lire que le
@@ -92,6 +93,33 @@ Deux choses ne sont jamais traduites, et ce ne sont pas des oublis :
   cité par les macros ;
 * `<author>` — un **nom de personne**, et `authorId` y renvoie **par index** :
   toucher à cette liste réattribuerait les notes.
+
+### Les tableaux structurés : aligner, et surtout ne pas retraduire
+
+Un en-tête de tableau vit à **deux** endroits qui doivent rester
+rigoureusement identiques : `<tableColumn name="Produit">` et la **cellule**
+de la ligne d'en-tête. Excel refuse d'ouvrir un classeur où les deux divergent
+— pas une colonne fautive, un fichier qui ne s'ouvre pas.
+
+Or la cellule est **déjà** traduite via `sharedStrings`. Relever l'en-tête
+comme un texte de plus le soumettrait une **seconde** fois au modèle, qui peut
+rendre « Product » ici et « Article » là : on fabriquerait la divergence qu'on
+veut éviter, et on la paierait deux fois.
+
+La règle est donc l'**inverse d'un relevé** : rien n'est traduit dans le
+fichier de tableau, on y **recopie** ce que la cellule affiche désormais. D'où
+l'ordre, qui est tout l'enjeu — **l'alignement s'exécute APRÈS les injections
+de chaînes**, jamais avant.
+
+| Ne bouge pas | Pourquoi |
+|---|---|
+| `name="Tableau1"` | identifiant, cité par `Tableau1[Produit]` |
+| colonne sans cellule d'en-tête lisible | aucune preuve de ce qu'elle doit devenir |
+| `[#Totals]`, `[#Headers]` | **spécificateurs** du format, pas des noms de colonne |
+
+Les références structurées (`Tableau1[Produit]`, `[@Produit]`) sont réécrites
+du même geste : c'est le piège déjà payé sur les noms d'onglets, et il se
+traite de la même façon.
 
 ### Les graphiques : là où la logique du PPTX ne se recopie pas
 
@@ -138,7 +166,6 @@ de travail**, ordonné par importance et non par ordre alphabétique.
 
 | Partie | Pourquoi ça compte |
 |---|---|
-| `xl/tables/table*.xml` | En-têtes de tableaux structurés — visibles, et cités en références structurées. |
 | `pivotCache` / `pivotTables` | Les libellés sont **dupliqués** entre le cache et la table. N'en traduire qu'un des deux désaligne le croisé au premier rafraîchissement. |
 | `xl/styles.xml` — formats personnalisés | Un format peut contenir du texte littéral (`#\ ##0\ "F CFA"`). C'est du visible, et la syntaxe doit rester intacte autour du mot. |
 | `docProps/core.xml` | Titre et sujet. Rarement décisifs — en dernier. |

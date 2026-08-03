@@ -220,6 +220,108 @@ def construire_complet(chemin: str) -> str:
     return chemin
 
 
+# ── Tableaux structurés ─────────────────────────────────────────────────────
+# UN EN-TÊTE DE TABLEAU VIT À DEUX ENDROITS QUI DOIVENT RESTER IDENTIQUES :
+#
+#   · `<tableColumn name="Produit">` dans `xl/tables/table1.xml` ;
+#   · la CELLULE de la ligne d'en-tête, dans la feuille, à la colonne
+#     correspondante — ici via `sharedStrings`.
+#
+# Excel refuse d'ouvrir le classeur (« contenu illisible ») quand les deux
+# divergent. Or `sharedStrings` est traduit par ailleurs : traduire les
+# `tableColumn` SÉPAREMENT, avec un second appel au modèle, produirait deux
+# formulations pour le même en-tête — et donc la divergence. La règle du
+# moteur est d'ALIGNER la colonne sur la cellule déjà traduite, sans jamais
+# soumettre l'en-tête une deuxième fois.
+#
+# `name="Tableau1"` (le nom du TABLEAU) est un identifiant cité par les
+# références structurées `Tableau1[Produit]` : jamais traduit, comme le
+# `name=` d'une forme.
+# LE TABLEAU NE COMMENCE PAS EN A1, ET C'EST DÉLIBÉRÉ.
+# Un tableau posé à l'origine rend INVISIBLE toute erreur de décalage : la
+# première colonne du tableau est alors la première de la feuille, et un code
+# qui ignore la colonne de départ donne le même résultat qu'un code juste.
+# Ici le tableau occupe `B2:C3`, avec un TITRE en A1 qui n'en fait pas partie —
+# la disposition la plus banale d'un classeur réel.
+_TABLE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ id="1" name="Tableau1" displayName="Tableau1" ref="B2:C3" totalsRowShown="0">
+<autoFilter ref="B2:C3"/>
+<tableColumns count="2">
+<tableColumn id="1" name="Produit"/>
+<tableColumn id="2" name="Quantite vendue"/>
+</tableColumns>
+</table>"""
+
+_TABLE_SHEET = _feuille(
+    '<row r="1"><c r="A1" t="s"><v>3</v></c></row>'
+    '<row r="2"><c r="B2" t="s"><v>0</v></c><c r="C2" t="s"><v>1</v></c></row>'
+    '<row r="3"><c r="B3" t="s"><v>2</v></c><c r="C3"><v>42</v></c></row>')
+
+# Le magasin du classeur À TABLEAU. Les deux premières entrées sont les
+# en-têtes ; la troisième est une donnée ordinaire et la quatrième un TITRE
+# hors tableau — ni l'une ni l'autre ne doit aligner quoi que ce soit.
+_TABLE_SHARED = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="4" uniqueCount="4">
+<si><t>Produit</t></si>
+<si><t>Quantite vendue</t></si>
+<si><t>Cafe moulu</t></si>
+<si><t>Inventaire du trimestre</t></si>
+</sst>"""
+
+_TABLE_WORKBOOK = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Stock" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"""
+
+_TABLE_WB_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+<Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
+</Relationships>"""
+
+_TABLE_SHEET_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/>
+</Relationships>"""
+
+_TABLE_CT = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+<Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>
+</Types>"""
+
+#: Les en-têtes du tableau, dans l'ordre des colonnes. Ils sont AUSSI dans le
+#: magasin partagé : c'est tout l'enjeu de l'alignement.
+TABLE_ENTETES = ["Produit", "Quantite vendue"]
+#: Le nom du TABLEAU — un identifiant cité par `Tableau1[Produit]`.
+TABLE_JAMAIS_TRADUIT = ["Tableau1"]
+
+
+def construire_avec_tableau(chemin: str) -> str:
+    """Un classeur d'une feuille portant un TABLEAU STRUCTURÉ.
+
+    Volontairement séparé de `construire_multi` : l'enjeu est l'ACCORD entre
+    `xl/tables/table1.xml` et la ligne d'en-tête de la feuille, et il se lit
+    plus clairement sur un classeur qui ne contient que cela.
+    """
+    with zipfile.ZipFile(chemin, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", _TABLE_CT)
+        z.writestr("_rels/.rels", _RELS)
+        z.writestr("xl/workbook.xml", _TABLE_WORKBOOK)
+        z.writestr("xl/_rels/workbook.xml.rels", _TABLE_WB_RELS)
+        z.writestr("xl/sharedStrings.xml", _TABLE_SHARED)
+        z.writestr("xl/worksheets/sheet1.xml", _TABLE_SHEET)
+        z.writestr("xl/worksheets/_rels/sheet1.xml.rels", _TABLE_SHEET_RELS)
+        z.writestr("xl/tables/table1.xml", _TABLE)
+    return chemin
+
+
 def construire_multi(chemin: str) -> str:
     """Un classeur de TROIS feuilles dont la numérotation trompe l'ordre."""
     with zipfile.ZipFile(chemin, "w", zipfile.ZIP_DEFLATED) as z:
