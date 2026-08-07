@@ -28,6 +28,7 @@ import sys
 import racine  # noqa: F401  -- met backend/ sur le chemin
 
 from engines.ocr import invariants                     # noqa: E402
+from engines.ocr import tri                            # noqa: E402
 from engines.ocr.spans import (CHAMPS_REQUIS,          # noqa: E402
                                CHAMP_CONFIANCE,
                                RepertoireConfiance,
@@ -257,6 +258,42 @@ def run():
        invariants.blocs_qui_se_croisent(
            [{"bbox": [0, 0, 50, 20], "lines": []},
             {"bbox": [50, 0, 100, 20], "lines": []}]) == [])
+
+    # ── 5. Le tri des debris ─────────────────────────────────────────────
+    # Chaque cas vient d'une MESURE sur le Code de la Route, pas d'une idee
+    # de ce qui « devrait » etre un debris.
+    print("\n-- le tri des debris --")
+
+    def _bloc(txt, n=1):
+        return {"text": txt, "bbox": [0, 0, 50, 10],
+                "lines": [{"runs": []}] * n}
+
+    for debris in ("-", "ar", "ou", "si", "LUS", "—>", "4:", "+"):
+        r, e = tri.trier([_bloc(debris)])
+        ok(f"debris ecarte : {debris!r}", len(e) == 1 and not r,
+           f"retenus={len(r)}")
+    # Ce que le tri ne doit JAMAIS emporter -- tous releves dans le document.
+    for vrai in ("532", "3", "12 50", "E(B).",
+                 "Elles delimitent la chaussee de l'accotement."):
+        r, e = tri.trier([_bloc(vrai)])
+        ok(f"vrai texte GARDE : {vrai[:28]!r}", len(r) == 1 and not e,
+           f"ecarte : {e[0]['_raison'] if e else ''}")
+    # LIMITE ASSUMEE, ecrite pour qu'elle ne se decouvre pas en production :
+    # un mot court ALPHABETIQUE isole est ecarte, « Oui » compris. Isole sur
+    # une ligne, c'est presque toujours le fragment d'une ligne voisine mal
+    # decoupee -- et l'erreur n'est pas destructive, le mot reste lisible en
+    # langue source.
+    ok("LIMITE : un mot court alphabetique isole est ecarte (« Oui »)",
+       len(tri.trier([_bloc("Oui")])[1]) == 1)
+    # MUTATION mesuree : `isalnum()` gardait « ar », « ou », « si », « LUS »
+    # (violations 31 -> 37) ; « contient un chiffre » gardait « 4: ».
+    ok("MUTATION : ni isalnum() ni « contient un chiffre » ne suffisent",
+       tri.trier([_bloc("ar")])[1] and tri.trier([_bloc("4:")])[1]
+       and tri.trier([_bloc("532")])[0])
+    # Un bloc de PLUSIEURS lignes n'est jamais un debris, meme tres court :
+    # trois lignes de deux caracteres sont une colonne de chiffres.
+    r, _ = tri.trier([_bloc("de", n=3)])
+    ok("un bloc de 3 lignes n'est jamais un debris, meme court", len(r) == 1)
 
     print(f"\n== {_ok}/{_ok + _ko} ==")
     return 0 if _ko == 0 else 1

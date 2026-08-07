@@ -166,7 +166,8 @@ def _mots_bruts(img, langue: str):
     return mots
 
 
-def _boite_encre(img_gris, boite, marge_relative: float = 0.25):
+def _boite_encre(img_gris, boite, marge_relative: float = 0.25,
+                 boite_de_ligne: bool = False):
     """Resserre une boîte sur l'ENCRE qu'elle contient réellement.
 
     POURQUOI C'EST INDISPENSABLE
@@ -229,6 +230,22 @@ def _boite_encre(img_gris, boite, marge_relative: float = 0.25):
     cols = np.where(sombre.any(axis=0))[0]
     ex0 = float(fx0 + cols[0]); ey0 = float(fy0 + lignes[0])
     ex1 = float(fx0 + cols[-1] + 1); ey1 = float(fy0 + lignes[-1] + 1)
+    if boite_de_ligne:
+        # La boîte reçue est celle de la LIGNE. On garde ses bornes verticales
+        # TELLES QUELLES et on ne mesure que l'horizontale.
+        #
+        # ESSAYÉ ET REJETÉ — mesurer librement la hauteur de ces mots-là :
+        # l'encre s'étendait ENCORE plus loin (h 9,9 -> 12,0 pt sur « autorisé
+        # conduire une 125 »), parce que dans une zone à interligne serré il
+        # n'existe aucune rangée de pixels blancs entre deux lignes : la
+        # mesure n'a rien pour s'arrêter. La boîte de ligne est fausse pour la
+        # HAUTEUR du mot, mais elle est au moins BORNÉE.
+        #
+        # Ce qui compte pour le regroupement n'est pas la hauteur exacte :
+        # c'est que tous les mots d'une même ligne reçoivent la MÊME, donc la
+        # même baseline. Une boîte de ligne partagée le garantit — c'est
+        # précisément sa seule qualité, et on s'en sert.
+        return (ex0, y0, ex1, y1)
     # La garde : on borne l'encre à la boîte de Tesseract élargie d'une
     # DEMI-marge. Resserrer reste libre ; s'étendre jusqu'à la ligne voisine
     # ne l'est pas.
@@ -238,6 +255,59 @@ def _boite_encre(img_gris, boite, marge_relative: float = 0.25):
     if ey1 <= ey0:                       # la garde a tout mangé : on renonce
         return None
     return (ex0, ey0, ex1, ey1)
+
+
+def _boites_de_ligne(mots, tolerance: float = 0.15) -> set[int]:
+    """Les mots dont Tesseract a rendu la boîte de la LIGNE, pas celle du mot.
+
+    LE DÉFAUT, MESURÉ
+    ------------------
+    Tesseract rend fréquemment, pour plusieurs mots consécutifs, une boîte
+    verticale IDENTIQUE — celle de la ligne entière. Relevé page 1 du Code de
+    la Route :
+
+        autorisé conduire une 125 avecune  ->  tous y = 547,0-554,9  (h 7,9)
+        Si vous désirez conduire une moto  ->  h 4,3 / 2,9 / 3,8 / 3,6 / 3,1
+
+    La seconde ligne est mesurée mot par mot, la première non. Le v1 l'avait
+    déjà constaté (« 12 mots à y=[89,3 ; 96,7] ») sans en tirer de détection.
+
+    CE QUE ÇA CASSE
+    ---------------
+    La hauteur sert de `size` au regroupement, et la baseline s'en déduit. Un
+    mot deux fois trop haut reçoit donc une baseline décalée de plusieurs
+    points : il quitte sa rangée, sa ligne se déchire, et ses morceaux
+    deviennent des paragraphes qui en croisent d'autres. C'est l'origine des
+    blocs 32/34/35/40/41/42 signalés à l'écran.
+
+    COMMENT ON LE RECONNAÎT SANS SEUIL ARBITRAIRE
+    ----------------------------------------------
+    Une boîte de LIGNE est partagée à l'identique par plusieurs mots. Deux
+    mots réellement de même hauteur (« une » et « moto ») ne le sont qu'à
+    quelques centièmes près ; deux mots qui portent la boîte de leur ligne le
+    sont EXACTEMENT.
+
+    On cherche donc les groupes d'au moins trois mots dont les bords haut ET
+    bas coïncident à `tolerance` près (en fraction de leur hauteur). Trois, et
+    non deux : deux mots voisins peuvent légitimement partager leurs bords
+    (« du » et « la » côte à côte, sans hampe ni jambage). Trois identiques
+    au centième ne se produisent pas par hasard.
+    """
+    suspects: set[int] = set()
+    par_cle: dict[tuple, list[int]] = {}
+    for i, m in enumerate(mots):
+        _, y0, _, y1 = m["boite"]
+        h = y1 - y0
+        if h <= 0:
+            continue
+        # Clé arrondie à la tolérance : deux boîtes « identiques » tombent
+        # dans la même case sans exiger l'égalité stricte des flottants.
+        pas = max(1.0, tolerance * h)
+        par_cle.setdefault((round(y0 / pas), round(y1 / pas)), []).append(i)
+    for idx in par_cle.values():
+        if len(idx) >= 3:
+            suspects.update(idx)
+    return suspects
 
 
 def _fusionner(primaires, secondaires, tolerance: float = 0.5):
@@ -279,9 +349,13 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
     if double_lecture:
         mots = _fusionner(mots, _mots_bruts(_pretraitee(img), langue))
 
+    # Les mots à qui Tesseract a donné la boîte de leur LIGNE. Pour ceux-là, sa
+    # boîte n'est pas un repère : on ne s'en sert pas pour borner l'encre.
+    suspects = _boites_de_ligne(mots)
+
     spans = []
-    for m in mots:
-        encre = _boite_encre(gris, m["boite"])
+    for i, m in enumerate(mots):
+        encre = _boite_encre(gris, m["boite"], boite_de_ligne=(i in suspects))
         if encre is None:
             continue                     # aucune encre : lecture de bruit
         x0, y0, x1, y1 = (v / echelle for v in encre)

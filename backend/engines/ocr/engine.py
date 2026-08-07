@@ -45,6 +45,7 @@ import fitz
 
 from engines.ocr import apercu as apercu_debug
 from engines.ocr import lecture
+from engines.ocr import tri
 from engines.ocr.spans import RepertoireConfiance, valider_spans
 
 logger = logging.getLogger(__name__)
@@ -85,10 +86,10 @@ class OCREngine:
         ne soit connue. La v1 triait au MOT, avant tout regroupement, et c'est
         ce qui la faisait retenir des fragments de dessin.
 
-        À cette étape, AUCUN TRI N'EST APPLIQUÉ : tous les blocs sont retenus.
-        C'est délibéré — on veut voir la détection brute, faux blocs compris,
-        avant d'écrire des seuils qui la filtreraient sans qu'on les ait vus
-        agir.
+        Le tri (`tri.py`) n'écarte que des DÉBRIS de lecture — traits, flèches,
+        fragments d'un ou deux caractères. Les écartés restent dans le
+        résultat, avec leur raison : un tri qu'on ne peut pas inspecter ne se
+        règle pas.
         """
         spans = lecture.spans_de_page(page, langue=self.langue, dpi=self.dpi,
                                       double_lecture=double_lecture)
@@ -108,8 +109,9 @@ class OCREngine:
         moteur = self.mise_en_page
         lignes = moteur._group_text_lines(spans)
         blocs = moteur._group_paragraphs(lignes)
+        retenus, ecartes = tri.trier(blocs)
         return {"spans": spans, "lignes": lignes, "blocs": blocs,
-                "retenus": blocs, "ecartes": [],
+                "retenus": retenus, "ecartes": ecartes,
                 "confiances": RepertoireConfiance(spans)}
 
     # ── L'aperçu de détection ─────────────────────────────────────────────
