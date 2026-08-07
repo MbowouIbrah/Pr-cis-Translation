@@ -116,7 +116,7 @@ concerné.
 |---|---|---|
 | constante de descente (jambages) | 0,70 → 1,00 | 48 à 54, **sans tendance** |
 | plafonner la hauteur d'encre | 1,2× → 3,0× médiane | 22/29/23/23/22/22/22 |
-| plafonner la `size` des spans | 1,0× → 2,0× médiane | 51/21/19/24, bruit |
+| plafonner la `size` des spans *(avant l'alignement)* | 1,0× → 2,0× médiane | 51/21/19/24, bruit — **devenu efficace APRÈS l'alignement** |
 | **borner la dérive d'ancre** (moteur PDF) | 1,0× → 4,0× tol | 73/47/46/36/33/33 — **toute borne dégrade** |
 | **couper les lignes fusionnées** | saut 0,5× → 1,3× médiane | 29/24/24/22 — **jamais mieux que ne rien faire** |
 | augmenter le DPI de lecture | 300 → 600 | 22/25/24/24 — **300 est déjà le meilleur** |
@@ -132,17 +132,20 @@ Les deux dernières méritent un mot, parce qu'elles semblaient évidentes :
   plus de 4 mots) : même conclusion, aucun seuil ne fait mieux que l'absence
   de découpe.
 
-## Ce qui reste, et où il faut chercher
+## Ce qui reste (8 violations)
 
-15 des 22 violations impliquent une **ligne fusionnée**. Les deux leviers
-géométriques évidents sont épuisés (tableau ci-dessus) : le prochain essai doit
-porter sur la **LECTURE**, pas sur le regroupement.
+Concentrées sur la page 2 (1 / 5 / 2). Le défaut visible à l'œil n'est plus le
+sur-découpage mais le **chevauchement d'un interligne** entre deux blocs
+voisins : ils se stratifient au lieu de s'empiler proprement.
 
-La zone la plus atteinte est le texte qui **s'enroule autour d'une
-illustration** — chaque ligne commence à un x différent, interligne ~6,5 pt.
-Le texte y est parfaitement lisible à l'œil : ce n'est **pas** un problème de
-contraste. Pistes non essayées : lire cette zone à un DPI supérieur, ou lire
-par bandes horizontales pour donner à Tesseract un contexte de ligne franc.
+⚠ **Les invariants ne mesurent PAS tout.** Le sur-découpage des lignes
+justifiées — 6 blocs pour un paragraphe de 4 lignes — n'en produisait
+**aucune**, alors que c'était le défaut le plus visible. Il a été signalé à
+l'œil, pas par le compteur. Les invariants restent nécessaires et
+**insuffisants** : toujours regarder l'aperçu.
+
+Piste non essayée : lire par bandes horizontales pour donner à Tesseract un
+contexte de ligne franc dans les zones à interligne serré.
 
 ## Où il tourne
 
