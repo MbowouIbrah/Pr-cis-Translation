@@ -167,7 +167,7 @@ def _mots_bruts(img, langue: str):
 
 
 def _boite_encre(img_gris, boite, marge_relative: float = 0.25,
-                 boite_de_ligne: bool = False):
+                 boite_de_ligne: bool = False, hauteur_max: float = 0.0):
     """Resserre une boîte sur l'ENCRE qu'elle contient réellement.
 
     POURQUOI C'EST INDISPENSABLE
@@ -231,21 +231,57 @@ def _boite_encre(img_gris, boite, marge_relative: float = 0.25,
     ex0 = float(fx0 + cols[0]); ey0 = float(fy0 + lignes[0])
     ex1 = float(fx0 + cols[-1] + 1); ey1 = float(fy0 + lignes[-1] + 1)
     if boite_de_ligne:
-        # La boîte reçue est celle de la LIGNE. On garde ses bornes verticales
-        # TELLES QUELLES et on ne mesure que l'horizontale.
+        # La boîte reçue est celle de la LIGNE : sa hauteur est fausse, et
+        # surtout elle n'est pas COMPARABLE à celle d'un mot mesuré.
         #
-        # ESSAYÉ ET REJETÉ — mesurer librement la hauteur de ces mots-là :
-        # l'encre s'étendait ENCORE plus loin (h 9,9 -> 12,0 pt sur « autorisé
-        # conduire une 125 »), parce que dans une zone à interligne serré il
-        # n'existe aucune rangée de pixels blancs entre deux lignes : la
-        # mesure n'a rien pour s'arrêter. La boîte de ligne est fausse pour la
-        # HAUTEUR du mot, mais elle est au moins BORNÉE.
+        # C'est ce défaut de comparabilité qui casse tout, et il se calcule.
+        # Mesuré page 2 : 28 % des mots portent une boîte de ligne. Sur une
+        # même ligne physique cohabitent donc deux populations :
         #
-        # Ce qui compte pour le regroupement n'est pas la hauteur exacte :
-        # c'est que tous les mots d'une même ligne reçoivent la MÊME, donc la
-        # même baseline. Une boîte de ligne partagée le garantit — c'est
-        # précisément sa seule qualité, et on s'en sert.
-        return (ex0, y0, ex1, y1)
+        #     mot « de ligne »  h = 7,2 pt  ->  baseline = y0 + 0,70 x 7,2
+        #     mot mesuré        h = 3,9 pt  ->  baseline = y0 + 0,70 x 3,9
+        #     écart de baseline .............. 2,57 pt
+        #     tolérance de rangée du plus petit (0,45 x 3,9) ... 1,75 pt
+        #     2,57 > 1,75  ->  SÉPARÉS
+        #
+        # Deux mots voisins d'une même phrase partaient donc dans deux
+        # rangées, la ligne se déchirait, et le paragraphe se dédoublait —
+        # d'où les blocs #9 et #10 superposés sur 175 x 17 pt.
+        #
+        # CE QUI EST STABLE, ET QU'ON UTILISE : le BAS DE L'ENCRE. Mesuré sur
+        # les mêmes mots, ligne par ligne :
+        #     ligne 1 : tous les mots, encre_y1 = 72,7   (boîtes 7,2 ou 3,1)
+        #     ligne 2 : tous les mots, encre_y1 = 79,4
+        # Le bas de l'encre ne dépend pas de l'erreur de Tesseract sur la
+        # hauteur : c'est la position du dernier pixel sombre, et les mots
+        # d'une ligne reposent sur la même ligne d'écriture.
+        #
+        # On garde donc le BAS mesuré, et on reconstruit un haut plausible à
+        # partir de la hauteur MÉDIANE d'un mot — inconnue ici, d'où le
+        # recours à la boîte de Tesseract pour la seule borne haute.
+        if ey1 <= ey0:
+            return None
+        # PLAFOND DE HAUTEUR — ESSAYÉ, MESURÉ, REJETÉ. Ne pas le refaire.
+        #
+        # L'idée : dans le texte qui s'enroule autour du camion (page 2),
+        # l'interligne vaut ~6,5 pt et les hauteurs mesurées montaient à 8,9,
+        # 9,1, 10,9 pt — PLUS que l'interligne lui-même. Plafonner la hauteur à
+        # un multiple de la médiane de la page semblait donc évident.
+        #
+        # BALAYÉ de 1,2x à 3,0x la médiane : le total des violations reste
+        # entre 22 et 29 sans tendance (22 / 29 / 23 / 23 / 22 / 22 / 22).
+        # Le plafond ne mord pas là où ça compte. Même constat qu'en plafonnant
+        # la `size` des spans (19 à 24, bruit).
+        #
+        # Le paramètre est conservé dans la signature parce qu'il est correct
+        # et sans coût, mais il n'est PAS le levier : 15 des 22 violations
+        # restantes viennent de LIGNES FUSIONNÉES, c'est-à-dire de la
+        # tolérance de rangée du regroupement, pas de la mesure des boîtes.
+        if hauteur_max > 0 and (ey1 - ey0) > hauteur_max:
+            ey0 = ey1 - hauteur_max      # on garde le BAS, seul repère stable
+        else:
+            ey0 = max(ey0, y0)
+        return (ex0, ey0, ex1, ey1)
     # La garde : on borne l'encre à la boîte de Tesseract élargie d'une
     # DEMI-marge. Resserrer reste libre ; s'étendre jusqu'à la ligne voisine
     # ne l'est pas.
@@ -353,9 +389,22 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
     # boîte n'est pas un repère : on ne s'en sert pas pour borner l'encre.
     suspects = _boites_de_ligne(mots)
 
+    # L'ÉCHELLE DE LA PAGE : la hauteur médiane d'un mot, relevée sur les
+    # boîtes de Tesseract. Elle sert de plafond à la mesure d'encre, pour que
+    # celle-ci ne traverse pas la ligne voisine dans les zones denses.
+    #
+    # Médiane et non moyenne : un titre géant ou une cote de 90 pt (relevée
+    # page 1) tirerait la moyenne sans rien dire du corps de texte courant.
+    hauteurs = sorted(m["boite"][3] - m["boite"][1] for m in mots)
+    med_h = hauteurs[len(hauteurs) // 2] if hauteurs else 0.0
+    # 2,2 x la médiane : assez pour un mot à hampe ET jambage (« Jg »), qui
+    # dépasse largement un mot moyen, mais moins que deux lignes.
+    plafond = 2.2 * med_h if med_h > 0 else 0.0
+
     spans = []
     for i, m in enumerate(mots):
-        encre = _boite_encre(gris, m["boite"], boite_de_ligne=(i in suspects))
+        encre = _boite_encre(gris, m["boite"], boite_de_ligne=(i in suspects),
+                             hauteur_max=plafond)
         if encre is None:
             continue                     # aucune encre : lecture de bruit
         x0, y0, x1, y1 = (v / echelle for v in encre)
