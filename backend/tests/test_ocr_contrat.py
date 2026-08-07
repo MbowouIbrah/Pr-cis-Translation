@@ -28,6 +28,7 @@ import sys
 import racine  # noqa: F401  -- met backend/ sur le chemin
 
 from engines.ocr import invariants                     # noqa: E402
+from engines.ocr import justifie                       # noqa: E402
 from engines.ocr import tri                            # noqa: E402
 from engines.ocr.spans import (CHAMPS_REQUIS,          # noqa: E402
                                CHAMP_CONFIANCE,
@@ -294,6 +295,64 @@ def run():
     # trois lignes de deux caracteres sont une colonne de chiffres.
     r, _ = tri.trier([_bloc("de", n=3)])
     ok("un bloc de 3 lignes n'est jamais un debris, meme court", len(r) == 1)
+
+    # ── 6. Le recollage des lignes JUSTIFIEES ────────────────────────────
+    # Cas releve a l'ecran : un paragraphe de 4 lignes ressortait en 6 blocs
+    # parce que la justification etire les blancs au-dela du seuil de coupe.
+    print("\n-- le recollage des lignes justifiees --")
+
+    def _frag(x0, x1, y0, y1, txt, gw=2.5):
+        return {"type": "text_line", "bbox": [x0, y0, x1, y1], "gw": gw,
+                "ink_x0": x0, "ink_x1": x1, "text": txt,
+                "runs": [span_depuis_mot(txt, (x0, y0, x1, y1))]}
+
+    # Une colonne justifiee etroite : 3 rangees au MEME fer gauche (140) et
+    # au MEME fer droit (212), dont deux sont coupees en morceaux.
+    #
+    # Les coordonnees sont celles RELEVEES sur le document (page 1, « Voiture
+    # de tourisme plus / remorque si l'ensemble... ») : ecarts de 2,0x a 3,5x
+    # la largeur de glyphe, au-dessus du seuil de coupe (2,5x) mais sous le
+    # plafond de gouttiere (6x). Inventer ces valeurs donnerait un test qui
+    # passe sur une geometrie que le document ne produit pas.
+    col = [_frag(140, 157, 480, 484, "Voiture", gw=3.12),
+           _frag(163, 168, 480, 484, "de", gw=3.12),
+           _frag(173, 198, 480, 488, "tourisme", gw=3.12),
+           _frag(202, 212, 480, 485, "plus", gw=3.12),
+           _frag(140, 163, 487, 492, "remorque"),
+           _frag(173, 176, 487, 491, "si"),
+           _frag(186, 212, 487, 491, "l'ensemble"),
+           _frag(140, 212, 493, 498, "n'entre pas dans la categorie")]
+    rec = justifie.recoller(col)
+    ok("les fragments d'une ligne justifiee sont RECOLLES",
+       len(rec) == 3, f"{len(rec)} lignes au lieu de 3")
+    textes = " | ".join(l["text"] for l in rec)
+    ok("le mot isole « de » revient dans sa phrase",
+       any("Voiture" in l["text"] and "de" in l["text"] for l in rec), textes)
+
+    # GARDE-FOU 1 : deux VRAIES colonnes ne doivent JAMAIS etre recollees.
+    # Elles ne partagent pas leurs fers -- le fer droit de l'une n'est pas le
+    # fer gauche de l'autre.
+    deux = [_frag(40, 110, 100, 105, "colonne gauche une"),
+            _frag(140, 210, 100, 105, "colonne droite une"),
+            _frag(40, 110, 110, 115, "colonne gauche deux"),
+            _frag(140, 210, 110, 115, "colonne droite deux"),
+            _frag(40, 110, 120, 125, "colonne gauche trois"),
+            _frag(140, 210, 120, 125, "colonne droite trois")]
+    r2 = justifie.recoller(deux)
+    ok("MUTATION : deux vraies colonnes ne sont PAS soudees",
+       len(r2) == 6, f"{len(r2)} lignes au lieu de 6")
+
+    # GARDE-FOU 2 : un MUR D'ENCRE (filet, bord d'image) interdit le recollage.
+    mur = [(170.0, 470.0, 172.0, 510.0)]
+    r3 = justifie.recoller(col, murs=mur)
+    ok("MUTATION : un mur d'encre empeche le recollage",
+       len(r3) > 3, f"{len(r3)} lignes")
+
+    # GARDE-FOU 3 : sans colonne attestee (moins de 3 rangees), on ne touche
+    # a rien. « Le vide n'est pas une preuve. »
+    r4 = justifie.recoller(col[:3])
+    ok("sans colonne attestee, la liste ressort INCHANGEE",
+       len(r4) == 3 and all(a is b for a, b in zip(r4, col[:3])))
 
     print(f"\n== {_ok}/{_ok + _ko} ==")
     return 0 if _ko == 0 else 1

@@ -54,7 +54,24 @@ Les deux premières à zéro depuis le début : le regroupement ne duplique jama
 un mot. Les 18 restantes sont **géométriques**, et réparties également
 (6 / 6 / 6) — plus de page catastrophe.
 
-## Les deux correctifs qui ont payé
+## Les trois correctifs qui ont payé
+
+**Les lignes JUSTIFIÉES recollées** (`justifie.py`). Justifier une colonne
+étroite étire ses blancs : mesuré à 2,0× et 3,5× la largeur de glyphe, au-delà
+du seuil de coupe en colonnes (2,5×). Un paragraphe de 4 lignes ressortait en
+**6 blocs**, et deux de ses mots (« de », « si ») étaient écartés comme débris.
+
+`_rejoin_justified` du moteur PDF traite ce cas mais exige 3 lignes
+**intactes** comme témoins ; il n'y en avait qu'**une**. C'est la « colonne
+justifiée courte », limite structurelle connue.
+
+Le signal qu'on a ici : on juge l'**étendue des RANGÉES**, pas des fragments.
+Une rangée coupée commence quand même au fer gauche de sa colonne et finit à
+son fer droit — l'étirement déplace les blancs *intérieurs*, jamais les bords.
+Mesuré : 4 rangées sur 5 au même fer gauche, 3 sur 5 au même fer droit.
+Résultat : 6 blocs → **3**.
+
+
 
 **La boîte de LIGNE.** Tesseract rend souvent, pour plusieurs mots
 consécutifs, la boîte de leur *ligne* et non du *mot* — 28 % des mots d'une

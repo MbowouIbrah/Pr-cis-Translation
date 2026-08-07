@@ -44,6 +44,7 @@ import os
 import fitz
 
 from engines.ocr import apercu as apercu_debug
+from engines.ocr import justifie
 from engines.ocr import lecture
 from engines.ocr import tri
 from engines.ocr.spans import RepertoireConfiance, valider_spans
@@ -107,7 +108,7 @@ class OCREngine:
             return vide
 
         moteur = self.mise_en_page
-        lignes = moteur._group_text_lines(spans)
+        lignes = justifie.recoller(moteur._group_text_lines(spans))
         blocs = moteur._group_paragraphs(lignes)
         retenus, ecartes = tri.trier(blocs)
         return {"spans": spans, "lignes": lignes, "blocs": blocs,
