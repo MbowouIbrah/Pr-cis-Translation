@@ -48,13 +48,28 @@ mesuraient des **pixels** et restaient bons sur une page jugée mauvaise.
 |---|---|
 | mot dans deux lignes | **0** |
 | mot dans deux paragraphes | **0** |
-| inclusions + croisements | **18** (était 80) |
+| inclusions + croisements | **8** (était 80) |
 
 Les deux premières à zéro depuis le début : le regroupement ne duplique jamais
-un mot. Les 18 restantes sont **géométriques**, et réparties également
-(6 / 6 / 6) — plus de page catastrophe.
+un mot. Les 8 restantes sont **géométriques** (1 / 5 / 2).
 
-## Les trois correctifs qui ont payé
+## Les correctifs qui ont payé
+
+**L'alignement sur les lignes de Tesseract** (`_aligner_sur_lignes_ocr`). On
+jette sa segmentation en PARAGRAPHES (`par_num`, fausse en multi-colonnes),
+mais `line_num` est un autre signal, et il est **bon** : mesuré sur « Les
+permis moto », Tesseract rendait les 3 lignes exactement, mots dans l'ordre,
+pendant que l'aval les mélangeait. On donne donc une baseline unique (la
+médiane) à tous les mots d'une même ligne OCR. Les boîtes ne sont pas touchées.
+
+**Le bridage du corps** (`_brider_les_corps`). `size` gouverne la tolérance de
+rangée (0,45 × size) : une boîte gonflée élargit sa propre tolérance et avale
+la ligne voisine. Plafonné à 1,2× la médiane. ⚠ **Ce correctif avait été
+essayé et rejeté AVANT l'alignement** (51/21/19/24, bruit) — il ne mordait pas
+parce que les baselines étaient déjà dispersées en amont. **Un correctif
+inefficace ne l'est pas toujours définitivement : il peut attendre celui qui
+le rend utile.**
+
 
 **Les lignes JUSTIFIÉES recollées** (`justifie.py`). Justifier une colonne
 étroite étire ses blancs : mesuré à 2,0× et 3,5× la largeur de glyphe, au-delà

@@ -29,6 +29,10 @@ import racine  # noqa: F401  -- met backend/ sur le chemin
 
 from engines.ocr import invariants                     # noqa: E402
 from engines.ocr import justifie                       # noqa: E402
+# `lecture` s'importe SANS Tesseract : ses imports de `pytesseract` sont tous
+# dans des fonctions, precisement pour que cette suite tourne sur un poste qui
+# n'a pas le binaire.
+from engines.ocr import lecture                        # noqa: E402
 from engines.ocr import tri                            # noqa: E402
 from engines.ocr.spans import (CHAMPS_REQUIS,          # noqa: E402
                                CHAMP_CONFIANCE,
@@ -353,6 +357,49 @@ def run():
     r4 = justifie.recoller(col[:3])
     ok("sans colonne attestee, la liste ressort INCHANGEE",
        len(r4) == 3 and all(a is b for a, b in zip(r4, col[:3])))
+
+    # ── 7. L'alignement sur les lignes de Tesseract ──────────────────────
+    # Cas releve a l'ecran (« Les permis moto », page 1) : Tesseract rendait
+    # les 3 lignes PARFAITEMENT, et l'aval les melangeait -- parce que les
+    # hauteurs de boites ne sont pas homogenes sur une meme ligne (mots a
+    # boite de LIGNE a 7,7 pt cotoyant des mots mesures a 4,1).
+    print("\n-- l'alignement sur les lignes de Tesseract --")
+    hetero = [
+        span_depuis_mot("Apres", (249, 541, 262, 550), confiance=96),
+        span_depuis_mot("permis", (291, 542, 308, 550), confiance=93),
+        span_depuis_mot("B,", (308, 541, 312, 546), confiance=88),   # boite serree
+        span_depuis_mot("vous", (313, 542, 325, 550), confiance=95),
+    ]
+    for s in hetero:
+        s["_ligne_ocr"] = (15, 1, 1)
+    bases_av = {round(s["_base"], 2) for s in hetero}
+    ok("AVANT alignement, les baselines DIVERGENT (boites heterogenes)",
+       len(bases_av) > 1, f"{sorted(bases_av)}")
+    lecture._aligner_sur_lignes_ocr(hetero)
+    bases_ap = {round(s["_base"], 2) for s in hetero}
+    ok("APRES alignement, tous les mots d'une ligne OCR partagent leur base",
+       len(bases_ap) == 1, f"{sorted(bases_ap)}")
+    ok("l'alignement ne touche PAS aux boites (l'encre reste mesuree)",
+       hetero[2]["bbox"] == [308.0, 541.0, 312.0, 546.0])
+    # Deux lignes OCR DIFFERENTES ne doivent jamais etre alignees ensemble.
+    autre = span_depuis_mot("suite", (249, 552, 268, 560), confiance=95)
+    autre["_ligne_ocr"] = (15, 1, 2)
+    tous = hetero + [autre]
+    lecture._aligner_sur_lignes_ocr(tous)
+    ok("MUTATION : deux lignes OCR distinctes gardent des baselines distinctes",
+       round(autre["_base"], 2) != round(hetero[0]["_base"], 2))
+
+    # Le bridage du corps : une boite gonflee ne doit pas elargir sa propre
+    # tolerance de rangee (0,45 x size) et avaler la ligne voisine.
+    corps = [span_depuis_mot("mot", (0, 0, 10, 4)) for _ in range(9)]
+    corps.append(span_depuis_mot("gonfle", (0, 0, 20, 12)))
+    lecture._brider_les_corps(corps)
+    med = 4.0
+    ok("un corps aberrant est BRIDE a 1,2x la mediane de la page",
+       abs(corps[-1]["size"] - lecture._CORPS_MAX_MEDIANE * med) < 1e-6,
+       f"{corps[-1]['size']:.2f} au lieu de {lecture._CORPS_MAX_MEDIANE * med:.2f}")
+    ok("un corps normal n'est PAS touche",
+       abs(corps[0]["size"] - 4.0) < 1e-6, f"{corps[0]['size']:.2f}")
 
     print(f"\n== {_ok}/{_ok + _ko} ==")
     return 0 if _ko == 0 else 1

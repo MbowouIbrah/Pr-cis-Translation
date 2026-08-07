@@ -161,7 +161,25 @@ def _mots_bruts(img, langue: str):
         w, h = float(d["width"][i]), float(d["height"][i])
         if w <= 0 or h <= 0:
             continue
-        mots.append({"texte": texte, "conf": conf,
+        # `line_num` — LA LIGNE selon Tesseract, et non son paragraphe.
+        #
+        # On jette sa segmentation en PARAGRAPHES (`par_num`), notoirement
+        # fausse en multi-colonnes. Mais `line_num` est un autre signal, et il
+        # est bon : mesuré sur la zone « Les permis moto » (page 1), où le
+        # regroupement géométrique échouait, Tesseract rend les 6 lignes
+        # EXACTEMENT, mots dans l'ordre :
+        #
+        #     ligne1 'Après deux ans de permis B, vous êtes'
+        #     ligne2 'autorisé à conduire une 125 om avecune'
+        #     ligne3 'formation pratique complémentaire.'
+        #
+        # C'est logique : Tesseract dispose des pixels et de son modèle de
+        # ligne, là où l'aval ne voit plus que des boîtes. Refuser cette
+        # information nous obligeait à la redéduire, moins bien.
+        cle = (d.get("block_num", [0])[i] if "block_num" in d else 0,
+               d.get("par_num", [0])[i] if "par_num" in d else 0,
+               d.get("line_num", [0])[i] if "line_num" in d else 0)
+        mots.append({"texte": texte, "conf": conf, "ligne": cle,
                      "boite": (x, y, x + w, y + h)})
     return mots
 
@@ -439,7 +457,96 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
         x0, y0, x1, y1 = (v / echelle for v in encre)
         if x1 <= x0 or y1 <= y0:
             continue
-        spans.append(span_depuis_mot(m["texte"], (x0, y0, x1, y1),
-                                     confiance=m["conf"]))
+        s = span_depuis_mot(m["texte"], (x0, y0, x1, y1),
+                            confiance=m["conf"])
+        s["_ligne_ocr"] = m.get("ligne")
+        spans.append(s)
+
+    _aligner_sur_lignes_ocr(spans)
+    _brider_les_corps(spans)
     spans.sort(key=lambda s: (round(s["_base"], 1), s["bbox"][0]))
     return spans
+
+
+#: Plafond du corps d'un span, en multiple de la MÉDIANE de la page.
+#:
+#: `size` gouverne la tolérance de rangée du regroupement (0,45 x size) : une
+#: boîte gonflée élargit sa propre tolérance et avale la ligne voisine. Le
+#: plafond l'en empêche.
+#:
+#: BALAYÉ, une fois les lignes alignées : 14 / 9 / 8 / 8 / 11 pour
+#: aucun / 1,0x / 1,2x / 1,4x / 1,6x. On prend 1,2 — le début du palier, qui
+#: laisse respirer les vrais titres (mesurés à 1,19x au 90e centile).
+#:
+#: LE MÊME PLAFOND AVAIT ÉTÉ ESSAYÉ ET REJETÉ AVANT l'alignement des lignes
+#: (51 / 21 / 19 / 24, bruit) : il ne mordait pas, parce que les baselines
+#: étaient déjà dispersées en amont. Un correctif inefficace ne l'est pas
+#: toujours définitivement — il peut attendre celui qui le rend utile.
+_CORPS_MAX_MEDIANE = 1.2
+
+
+def _brider_les_corps(spans) -> None:
+    """Empêche une boîte gonflée d'élargir sa propre tolérance de rangée.
+
+    On ne touche qu'à `size` — la boîte, l'encre et la baseline restent ce
+    qu'on a mesuré. `size` n'est pas une donnée du document : c'est
+    l'estimation de corps que le regroupement utilise pour ses comparaisons
+    relatives, et une estimation trop grande y fait plus de mal que de bien.
+    """
+    tailles = sorted(s["size"] for s in spans if s.get("size"))
+    if not tailles:
+        return
+    med = tailles[len(tailles) // 2]
+    if med <= 0:
+        return
+    plafond = _CORPS_MAX_MEDIANE * med
+    for s in spans:
+        if s["size"] > plafond:
+            s["size"] = plafond
+
+
+def _aligner_sur_lignes_ocr(spans) -> None:
+    """Donne UNE SEULE baseline à tous les mots d'une même ligne Tesseract.
+
+    LE DÉFAUT QUE CECI CORRIGE
+    ---------------------------
+    Les hauteurs de boîtes ne sont pas homogènes : sur une même ligne
+    cohabitent des mots à boîte de LIGNE (h ≈ 7,7 pt) et des mots mesurés
+    individuellement (« B, » h 4,5 ; « à » h 4,1 ; « formation » h 4,1). Comme
+    la baseline se déduit de la hauteur, ces deux populations reçoivent des
+    baselines différentes — et le regroupement les met dans des rangées
+    différentes.
+
+    Résultat mesuré sur « Les permis moto » (page 1) : un bloc unique de 23 pt
+    de haut contenant « autoriséformationdeuxàpratiqueconduireansde… », soit
+    trois phrases mélangées, alors que Tesseract avait rendu les trois lignes
+    PARFAITEMENT.
+
+    LA CORRECTION
+    -------------
+    On aligne sur la MÉDIANE des baselines de la ligne. Médiane et non
+    moyenne : un seul mot à boîte aberrante ne doit pas tirer toute la ligne.
+
+    On ne touche PAS aux boîtes elles-mêmes — seulement à `_base` et
+    `origin`, qui sont ce que lit le regroupement. La géométrie visible
+    (cadres, encre) reste celle qu'on a mesurée.
+
+    CE QU'ON N'UTILISE TOUJOURS PAS : `par_num`, la segmentation en
+    PARAGRAPHES de Tesseract, fausse en multi-colonnes. La structure reste au
+    moteur PDF ; on ne lui emprunte que le fait « ces mots sont sur la même
+    ligne », que les pixels lui donnent et que nous n'avons plus.
+    """
+    par_ligne: dict = {}
+    for s in spans:
+        cle = s.get("_ligne_ocr")
+        if cle is None:
+            continue
+        par_ligne.setdefault(cle, []).append(s)
+    for groupe in par_ligne.values():
+        if len(groupe) < 2:
+            continue
+        bases = sorted(s["_base"] for s in groupe)
+        med = bases[len(bases) // 2]
+        for s in groupe:
+            s["_base"] = med
+            s["origin"] = [s["bbox"][0], med]
