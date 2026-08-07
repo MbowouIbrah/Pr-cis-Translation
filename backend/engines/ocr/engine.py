@@ -79,7 +79,7 @@ class OCREngine:
         return self._mise_en_page
 
     # ── Analyse d'UNE page ────────────────────────────────────────────────
-    def analyser_page(self, page, double_lecture: bool = True) -> dict:
+    def analyser_page(self, page, double_lecture: bool = False) -> dict:
         """Rend `{spans, lignes, blocs, retenus, ecartes, confiances}`.
 
         L'ORDRE EST LE FOND DU SUJET : rien n'est jugé avant que la structure
@@ -116,7 +116,7 @@ class OCREngine:
 
     # ── L'aperçu de détection ─────────────────────────────────────────────
     def rendre_apercu(self, chemin_pdf: str, sortie_pdf: str,
-                      max_pages: int = 0, double_lecture: bool = True,
+                      max_pages: int = 0, double_lecture: bool = False,
                       montrer_lignes: bool = True,
                       progression=None) -> dict:
         """Écrit un PDF où chaque page porte la détection par-dessus le scan.

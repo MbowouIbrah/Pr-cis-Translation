@@ -372,11 +372,40 @@ def _fusionner(primaires, secondaires, tolerance: float = 0.5):
 
 
 def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
-                  double_lecture: bool = True) -> list[dict]:
+                  double_lecture: bool = False) -> list[dict]:
     """Lit une page scannée et rend des spans conformes au contrat.
 
     Les coordonnées rendues sont en POINTS de la page (pas en pixels) : c'est
     l'unité du moteur PDF, et celle où les cadres se dessineront.
+
+    LA DOUBLE LECTURE EST DÉSORMAIS OPTIONNELLE, ET ÉTEINTE PAR DÉFAUT
+    -------------------------------------------------------------------
+    La v1 l'avait rendue obligatoire, sur une mesure juste : la binarisation
+    seule détruit les gros titres gras (628 mots -> 464, confiance 73 -> 51).
+    D'où l'union « image prétraitée + image brute ».
+
+    Mais cette mesure portait sur la lecture PRÉTRAITÉE SEULE contre la lecture
+    BRUTE SEULE. Elle ne disait rien du coût de leur UNION, et ce coût est
+    réel. Mesuré sur 3 pages du Code de la Route :
+
+        lecture              mots    violations d'invariants
+        double (union)       1437         22
+        double, conf >= 60   1427         20
+        SIMPLE (brute)       1415         18
+
+    Ce que la seconde lecture apporte vraiment, une fois filtrée à 60 de
+    confiance : **12 mots sur 1415**, dont plusieurs sont des MORCEAUX de mots
+    que la première avait déjà lus entiers (« Usag » + « er » pour
+    « Usagers », « Vie » pour « Vie pratique »). Les autres sont des débris :
+    « mani, » (conf 35), « CL » (42), « TL, » (32), « V4 » (33), « ——— » (3).
+
+    Ces doublons partiels sont précisément ce qui fabrique les boîtes de ligne
+    et les chevauchements : deux lectures du même texte à des découpes
+    différentes se superposent, et le regroupement doit trancher entre elles.
+
+    On garde donc le paramètre — un document au contraste très faible pourrait
+    en avoir besoin, et la mesure de la v1 reste vraie dans son cadre — mais on
+    ne le paye plus par défaut.
     """
     img, echelle = _image_de_page(page, dpi)
     gris = img.convert("L")
