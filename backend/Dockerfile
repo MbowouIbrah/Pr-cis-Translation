@@ -34,12 +34,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # identiques d'Arial, Times New Roman et Courier New. Sans elles, LibreOffice
 # remplace ces polices par ce qu'il trouve, les largeurs changent, et la mise en
 # page de l'aperçu ne correspond plus au document d'origine.
+#
+# `tesseract-ocr` est la SEULE capacité du projet qui repose sur un exécutable
+# externe, donc la seule qui puisse manquer sur une machine où tout le reste
+# marche. Les paquets de langue sont explicites : `tesseract-ocr` seul
+# n'embarque que l'anglais, et une lecture en français avec le modèle anglais
+# perd tous les accents sans lever la moindre erreur.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer \
         libreoffice-impress \
         libreoffice-calc \
         fonts-liberation \
         fonts-dejavu-core \
+        tesseract-ocr \
+        tesseract-ocr-fra \
+        tesseract-ocr-eng \
         curl \
     && rm -rf /var/lib/apt/lists/*
 

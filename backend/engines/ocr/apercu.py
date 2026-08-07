@@ -38,7 +38,7 @@ _ECARTE = (0.95, 0.55, 0.10)
 _LIGNE = (0.55, 0.55, 0.55)
 
 
-def _cadre(page, bbox, couleur, epaisseur=1.2, marge=0.0):
+def _cadre(page, bbox, couleur, epaisseur=0.5, marge=0.0):
     x0, y0, x1, y1 = bbox
     r = fitz.Rect(x0 - marge, y0 - marge, x1 + marge, y1 + marge)
     if r.is_empty or r.is_infinite:
@@ -71,13 +71,13 @@ def dessiner(page, retenus=(), ecartes=(), lignes=(), montrer_lignes=True):
     for i, bloc in enumerate(ecartes or (), 1):
         bb = bloc.get("bbox")
         if bb:
-            _cadre(page, bb, _ECARTE, epaisseur=1.0, marge=1.5)
+            _cadre(page, bb, _ECARTE, epaisseur=0.5, marge=1.0)
             _etiquette(page, bb, f"x{i}", _ECARTE)
 
     for i, bloc in enumerate(retenus or (), 1):
         bb = bloc.get("bbox")
         if bb:
-            _cadre(page, bb, _RETENU, epaisseur=1.6, marge=2.0)
+            _cadre(page, bb, _RETENU, epaisseur=0.7, marge=1.0)
             _etiquette(page, bb, str(i), _RETENU)
 
     return {"retenus": len(retenus or ()), "ecartes": len(ecartes or ()),

@@ -176,9 +176,32 @@ def _boite_encre(img_gris, boite, marge_relative: float = 0.25):
     telle quelle, la hauteur du mot vaut celle de la ligne, le corps déduit est
     trop grand, et le regroupement par baseline part de travers.
 
-    On cherche donc les pixels sombres dans une fenêtre ÉLARGIE (d'un quart de
-    la hauteur) : élargie, parce qu'une boîte trop serrée coupe les jambages
-    (p, g, q) et laisse des fantômes au masquage — l'autre défaut mesuré.
+    On cherche donc les pixels sombres dans une fenêtre ÉLARGIE : une boîte
+    trop serrée coupe les jambages (p, g, q) et laisse des fantômes au
+    masquage.
+
+    LE PIÈGE DE LA MARGE, MESURÉ
+    -----------------------------
+    Cette fenêtre élargie attrape aussi l'encre de la ligne VOISINE quand
+    l'interligne est serré. Mesuré sur le Code de la Route (page 1, bloc
+    « Voiture de tourisme… ») :
+
+        mot          Tesseract   encre AVEC marge libre
+        tourisme       6,7 pt        8,2 pt   (+1,4)
+        si             3,1 pt        4,1 pt   (+1,0)
+        les 9 autres   ~3,8 pt       ~3,8 pt  (+0,0)
+
+    Une minorité de mots enflait, et cela suffisait : leur `_base` glissait de
+    plusieurs points, ils quittaient leur rangée, et leur paragraphe se
+    déchirait — laissant des blocs d'un mot À L'INTÉRIEUR du bloc voisin
+    (« si », « l'ensemble », « assises, »). C'est l'essentiel des inclusions
+    signalées par les invariants.
+
+    LA GARDE : l'encre trouvée ne peut pas DÉBORDER la boîte de Tesseract
+    au-delà de la marge demandée. Tesseract se trompe sur la hauteur d'un mot,
+    mais il ne se trompe pas de LIGNE — sa boîte reste le meilleur repère de
+    l'endroit où le mot se trouve. On resserre donc librement (c'est le but) et
+    on n'élargit que dans la limite de la marge.
 
     Rend `None` si la fenêtre ne contient aucune encre : le mot est alors une
     lecture de bruit, et l'appelant l'écarte.
@@ -204,8 +227,17 @@ def _boite_encre(img_gris, boite, marge_relative: float = 0.25):
         return None
     lignes = np.where(sombre.any(axis=1))[0]
     cols = np.where(sombre.any(axis=0))[0]
-    return (float(fx0 + cols[0]), float(fy0 + lignes[0]),
-            float(fx0 + cols[-1] + 1), float(fy0 + lignes[-1] + 1))
+    ex0 = float(fx0 + cols[0]); ey0 = float(fy0 + lignes[0])
+    ex1 = float(fx0 + cols[-1] + 1); ey1 = float(fy0 + lignes[-1] + 1)
+    # La garde : on borne l'encre à la boîte de Tesseract élargie d'une
+    # DEMI-marge. Resserrer reste libre ; s'étendre jusqu'à la ligne voisine
+    # ne l'est pas.
+    demi = 0.5 * marge
+    ey0 = max(ey0, y0 - demi)
+    ey1 = min(ey1, y1 + demi)
+    if ey1 <= ey0:                       # la garde a tout mangé : on renonce
+        return None
+    return (ex0, ey0, ex1, ey1)
 
 
 def _fusionner(primaires, secondaires, tolerance: float = 0.5):

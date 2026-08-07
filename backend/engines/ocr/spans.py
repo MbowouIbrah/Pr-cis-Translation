@@ -81,6 +81,34 @@ CHAMPS_REQUIS = (
 #: un bloc APRÈS coup, sur ce que l'OCR a su lire.
 CHAMP_CONFIANCE = "_conf"
 
+#: Les caractères qui descendent SOUS la ligne de base en typographie latine.
+#: La liste est fermée et ne dépend d'aucun document : c'est une propriété de
+#: l'écriture, pas du corpus.
+#:
+#: La virgule et le point-virgule en font partie — ils descendent autant qu'un
+#: « p », et un mot qui finit par une virgule est fréquent.
+_JAMBAGES = set("gjpqy,;()[]{}/\\@$µßçÇ")
+
+#: Part de la hauteur au-dessus de la ligne de base, pour une boîte QUI
+#: DESCEND sous elle. Une police latine ordinaire donne une descente d'environ
+#: un quart de la hauteur totale hampe-à-jambage.
+#:
+#: La valeur exacte importe peu : le regroupement ne compare que des baselines
+#: ENTRE ELLES, donc un biais commun s'annule. Ce qui compte est que deux mots
+#: d'une MÊME ligne reçoivent la même — d'où la distinction avec/sans jambage,
+#: qui est la seule qui les sépare vraiment.
+_DESCENTE = 0.70
+
+
+def _a_jambage(texte: str) -> bool:
+    """Ce mot descend-il sous la ligne de base ?
+
+    On lit le TEXTE et non l'image : Tesseract nous donne les caractères, et
+    savoir qu'un « g » descend ne demande aucune mesure. Chercher la descente
+    dans les pixels coûterait cher et se tromperait sur les mots courts.
+    """
+    return any(c in _JAMBAGES for c in (texte or ""))
+
 
 def span_depuis_mot(texte: str, bbox, *, confiance: float = 100.0,
                     taille: float | None = None,
@@ -120,13 +148,47 @@ def span_depuis_mot(texte: str, bbox, *, confiance: float = 100.0,
     nchar = max(1, len(texte.strip()))
     hauteur = max(1.0, y1 - y0)
     corps = float(taille) if taille else hauteur
+    # LA LIGNE DE BASE SE DÉDUIT DU HAUT, JAMAIS DU BAS.
+    #
+    # Prendre le bas de la boîte (`y1`) paraît naturel — c'est là que le texte
+    # repose. C'est faux dès qu'un mot porte un JAMBAGE : « composées » descend
+    # sous « traits » d'une fraction de ligne, et les deux mots se retrouvent
+    # dans des rangées différentes.
+    #
+    # MESURÉ sur le Code de la Route (page 3, une ligne réelle de 6 mots) :
+    #     dispersion des BAS  : 1,20 pt
+    #     dispersion des HAUTS: 0,72 pt   <- 40 % plus stable
+    # pour une hauteur de ligne de 3,8 pt. La tolérance du regroupement étant
+    # de 0,45 x corps (~1,7 pt), 1,20 pt de dispersion suffisait à faire
+    # basculer des mots d'une rangée à l'autre : les lignes se déchiraient, et
+    # les paragraphes se chevauchaient en travers (47 croisements mesurés sur
+    # 3 pages).
+    #
+    # Le HAUT est plus stable parce que les hampes (l, t, d, f) sont plus
+    # fréquentes et plus régulières que les jambages, et parce que les
+    # capitales les alignent. On y ajoute une fraction fixe de la hauteur pour
+    # retomber sur la ligne d'écriture.
+    #
+    # LA FRACTION DÉPEND DE CE QUE LE MOT CONTIENT, et c'est nécessaire.
+    #
+    # Une fraction FIXE suppose que toute boîte contient hampes ET jambages.
+    # C'est faux mot par mot, et l'erreur se voit : mesuré sur le Code de la
+    # Route (page 3, le titre « - La ligne continue »), les quatre mots d'une
+    # même ligne donnaient des baselines à 378,90 / 379,34 / 380,28 / 379,40 —
+    # 1,38 pt de dispersion, parce que « ligne » porte un jambage (g) et pas
+    # « La ». Le mot au jambage quittait la rangée, le titre se déchirait, et
+    # ses morceaux devenaient des blocs À L'INTÉRIEUR du paragraphe suivant.
+    #
+    # On regarde donc le TEXTE, seul renseignement fiable sur la forme de la
+    # boîte :
+    #   · avec jambage    -> la boîte descend sous la ligne de base : ~0,75 ;
+    #   · sans jambage    -> la boîte s'arrête À la ligne de base : 1,0 ;
+    # Ce n'est pas une heuristique calée sur un document : c'est la
+    # typographie latine, vraie de tout texte quel qu'il soit.
+    base = y0 + (_DESCENTE if _a_jambage(texte) else 1.0) * hauteur
     return {
         "bbox": [x0, y0, x1, y1],
-        # La ligne de base d'un mot scanné est son BAS. Les jambages (p, g, q)
-        # la font descendre un peu ; le regroupement tolère 0,45 × le corps,
-        # donc l'approximation tient. Prétendre mieux demanderait de mesurer
-        # les jambages, ce qui n'apporterait rien au regroupement.
-        "origin": [x0, y1],
+        "origin": [x0, base],
         "text": texte,
         # None, et non « Helvetica » : on ne SAIT pas quelle police c'est. La
         # v1 écrivait un nom par défaut, et tout ressortait en linéale — le
@@ -139,7 +201,7 @@ def span_depuis_mot(texte: str, bbox, *, confiance: float = 100.0,
         "italic": bool(italique),
         "dir": [1.0, 0.0],          # Tesseract redresse la page avant de lire
         "_gw": (x1 - x0) / nchar,
-        "_base": y1,
+        "_base": base,
         # Un mot lu par l'OCR n'a pas de blancs de tête ni de queue : sa boîte
         # EST son encre. L'égalité est donc juste ici, alors qu'elle serait
         # fausse pour un span PDF (« ␣␣Child safety » s'étend au mur de sa

@@ -1,0 +1,42 @@
+# Banc d'essai OCR — l'image MINIMALE qui permet de juger la détection.
+#
+# POURQUOI UNE IMAGE À PART, ALORS QUE LE PROJET EN A DÉJÀ UNE
+# --------------------------------------------------------------
+# `backend/Dockerfile` embarque LibreOffice (~1 Go) parce que la production en
+# a besoin pour convertir les formats Office. La détection OCR n'en a aucun
+# usage : elle lit des pixels et rend des cadres.
+#
+# Construire l'image complète pour regarder un aperçu coûterait ~15 minutes à
+# chaque essai. Ce banc en coûte ~2. C'est la différence entre « on regarde le
+# rendu à chaque correctif » et « on regarde une fois par jour » — et c'est
+# précisément le rythme de regard qui a manqué aux deux versions précédentes.
+#
+# CE N'EST PAS UN SECOND CHEMIN DE PRODUCTION. Il installe le MÊME binaire
+# tesseract et les MÊMES paquets Python que `backend/Dockerfile` ; il en retire
+# seulement ce que l'OCR n'appelle pas. Un résultat obtenu ici vaut donc pour
+# l'image complète.
+#
+#   docker build -f backend/Dockerfile.ocr-banc -t precis-ocr-banc .
+#   docker run --rm -v "$PWD:/w" -w /w precis-ocr-banc \
+#       python backend/scripts/apercu_identification.py \
+#              --source tesseract "entree.pdf" "sortie.pdf"
+FROM python:3.12-slim-bookworm
+
+# Le binaire tesseract et ses modèles de langue. `tesseract-ocr` seul
+# n'embarque que l'anglais : lire du français avec le modèle anglais perd tous
+# les accents SANS lever la moindre erreur.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        tesseract-ocr \
+        tesseract-ocr-fra \
+        tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
+
+# Seulement ce que la lecture et le rendu appellent. Pas de FastAPI, pas de
+# base, pas de LibreOffice : ce banc n'est pas l'application.
+RUN pip install --no-cache-dir \
+        PyMuPDF>=1.23.0 \
+        pytesseract>=0.3.10 \
+        Pillow>=10.0.0 \
+        numpy>=1.26.0
+
+WORKDIR /w

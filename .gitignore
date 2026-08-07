@@ -39,3 +39,6 @@ backend/tests/_generic_tmp/
 *.old
 
 
+
+# Aperçus OCR : sorties de banc, jamais du code.
+.ocr_out/

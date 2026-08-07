@@ -27,6 +27,7 @@ import sys
 
 import racine  # noqa: F401  -- met backend/ sur le chemin
 
+from engines.ocr import invariants                     # noqa: E402
 from engines.ocr.spans import (CHAMPS_REQUIS,          # noqa: E402
                                CHAMP_CONFIANCE,
                                RepertoireConfiance,
@@ -95,8 +96,37 @@ def run():
     ok("valider_spans accepte un span conforme", valider_spans([s]) == [])
     ok("_gw = largeur / nb de caracteres (7 lettres, 60 pt)",
        abs(s["_gw"] - 60.0 / 7) < 1e-6, f"{s['_gw']}")
-    ok("_base est le BAS du mot (ligne de base approchee)",
-       s["_base"] == 114)
+    # On teste l'ACCORD entre le module et le contrat, jamais la VALEUR de la
+    # constante : un test qui recopie 0,78 rougirait au premier reglage sans
+    # qu'aucun defaut n'apparaisse, et resterait vert si le module cessait de
+    # tenir compte des jambages. Cf. la lecon « un test qui partage la
+    # constante est aveugle ».
+    from engines.ocr.spans import _DESCENTE          # noqa: E402
+    ok("_base se deduit du HAUT, pas du bas (immunise aux jambages)",
+       abs(s["_base"] - (100 + _DESCENTE * 14)) < 1e-6, f"{s['_base']}")
+    sans = span_depuis_mot("traits", (0, 100, 30, 114))
+    ok("un mot SANS jambage pose sa baseline au BAS de sa boite",
+       abs(sans["_base"] - 114) < 1e-6, f"{sans['_base']}")
+    # LA PREUVE, et non la formule : deux mots de MEME ligne dont l'un porte un
+    # jambage doivent partager leur baseline. Mesure du Code de la Route,
+    # page 3 : « composées » descendait 1,2 pt sous « traits », soit assez pour
+    # basculer dans une autre rangee (tolerance 0,45 x corps).
+    sans_jambage = span_depuis_mot("traits", (417.4, 113.8, 429.4, 117.6))
+    avec_jambage = span_depuis_mot("composees", (378.7, 114.0, 407.0, 118.8))
+    ecart = abs(sans_jambage["_base"] - avec_jambage["_base"])
+    tolerance = 0.45 * min(sans_jambage["size"], avec_jambage["size"])
+    ok("deux mots d'une MEME ligne restent dans la meme rangee, "
+       "jambage ou non (cas reel mesure)",
+       ecart < tolerance, f"ecart {ecart:.2f} pt / tolerance {tolerance:.2f} pt")
+    # MUTATION : l'ancienne regle prenait le BAS de la boite. Sur ce meme
+    # couple de mots reels, elle dispersait 1,20 pt la ou la nouvelle en
+    # disperse 0,98 -- et surtout, l'ecart ancien ETAIT LE JAMBAGE ENTIER,
+    # donc il grandissait avec le corps, alors que le nouveau est un residu
+    # de mesure. Le controle qui juge vraiment est celui de la page entiere
+    # (invariants ci-dessous) : 47 croisements avant, mesures apres.
+    ancien = abs(117.6 - 118.8)          # bas de boite : traits vs composees
+    ok("MUTATION : l'ancienne regle (bas de boite) dispersait davantage",
+       ecart < ancien, f"ancien {ancien:.2f} pt vs nouveau {ecart:.2f} pt")
     ok("la police est None, jamais devinee",
        s["font"] is None)
     ok("l'encre d'un mot lu EST sa boite (pas de blancs de tete)",
@@ -185,6 +215,48 @@ def run():
     ok("MUTATION : un repertoire vide ne rend AUCUNE confiance "
        "(c'est ce silence qui a fait echouer la v2)",
        vide.confiances_du_bloc(blocs[0]) == [])
+
+    # ── 4. Les invariants de structure ───────────────────────────────────
+    # Les trois regles posees par l'utilisateur. Elles n'ont AUCUN seuil :
+    # on ne demande pas « ce bloc est-il assez regulier ? » mais « ce mot
+    # est-il compte deux fois ? », dont la reponse est un fait.
+    print("\n-- les invariants de structure --")
+    rapport = invariants.controler(lignes, blocs)
+    c = rapport["comptes"]
+    ok("aucun mot n'appartient a DEUX LIGNES",
+       c["mot_deux_lignes"] == 0, f"{c['mot_deux_lignes']} mots")
+    ok("aucun mot n'appartient a DEUX PARAGRAPHES",
+       c["mot_deux_blocs"] == 0, f"{c['mot_deux_blocs']} mots")
+    ok("aucun paragraphe n'en CONTIENT un autre",
+       c["bloc_dans_bloc"] == 0, f"{c['bloc_dans_bloc']} inclusions")
+    ok("aucun paragraphe n'en CROISE un autre",
+       c["blocs_croises"] == 0, f"{c['blocs_croises']} croisements")
+    ok("la page synthetique est integralement CONFORME",
+       rapport["conforme"], str(c))
+
+    # MUTATION — les invariants doivent ROUGIR sur une structure fausse,
+    # sinon ils ne prouvent rien. On fabrique les trois fautes a la main.
+    faux_mot = dict(spans[0])
+    l1 = {"bbox": [0, 0, 10, 10], "runs": [faux_mot]}
+    l2 = {"bbox": [0, 0, 10, 10], "runs": [faux_mot]}
+    ok("MUTATION : un mot pose dans deux lignes est ATTRAPE",
+       len(invariants.mot_dans_deux_lignes([l1, l2])) == 1)
+    ok("MUTATION : un mot pose dans deux blocs est ATTRAPE",
+       len(invariants.mot_dans_deux_blocs(
+           [{"bbox": [0, 0, 9, 9], "lines": [l1]},
+            {"bbox": [0, 0, 9, 9], "lines": [l2]}])) == 1)
+    grand = {"bbox": [0, 0, 100, 100], "lines": []}
+    petit = {"bbox": [10, 10, 20, 20], "lines": []}
+    ok("MUTATION : un bloc INCLUS dans un autre est ATTRAPE",
+       len(invariants.bloc_dans_bloc([grand, petit])) == 1)
+    a = {"bbox": [0, 0, 60, 20], "lines": []}
+    b = {"bbox": [40, 10, 100, 40], "lines": []}
+    ok("MUTATION : deux blocs qui se CROISENT sont attrapes",
+       len(invariants.blocs_qui_se_croisent([a, b])) == 1)
+    ok("deux blocs qui se TOUCHENT par le bord ne sont pas un croisement",
+       invariants.blocs_qui_se_croisent(
+           [{"bbox": [0, 0, 50, 20], "lines": []},
+            {"bbox": [50, 0, 100, 20], "lines": []}]) == [])
 
     print(f"\n== {_ok}/{_ok + _ko} ==")
     return 0 if _ko == 0 else 1

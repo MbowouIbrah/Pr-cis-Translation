@@ -16,14 +16,28 @@ au lieu d'empêcher toute l'application de démarrer.
 from __future__ import annotations
 
 from .base import TranslationEngine
-from .docx.engine import DOCXTranslatorEngine
 
-_REGISTRE: dict[str, type] = {"docx": DOCXTranslatorEngine}
+_REGISTRE: dict[str, type] = {}
 
 #: Pourquoi un format manque à l'appel, s'il en manque un. L'application le lit
 #: au démarrage pour le dire à l'exploitant. Le registre ne journalise pas
 #: lui-même : il n'a pas à connaître le logger de qui l'utilise.
 INDISPONIBLES: dict[str, str] = {}
+
+# DOCX — protégé comme les autres. Il ne l'était pas, et l'asymétrie coûtait :
+# importer N'IMPORTE QUEL moteur exécute ce fichier, donc l'absence de `lxml`
+# faisait échouer l'import du moteur OCR — qui n'a rien à voir avec DOCX et
+# n'utilise pas lxml. Mesuré sur le banc OCR minimal, où seuls PyMuPDF,
+# pytesseract, Pillow et numpy sont installés.
+#
+# Le principe du registre est qu'un format manquant se DÉCLARE au lieu
+# d'empêcher tout le reste de fonctionner ; DOCX y échappait sans raison.
+try:
+    from .docx.engine import DOCXTranslatorEngine
+    _REGISTRE["docx"] = DOCXTranslatorEngine
+except ImportError as _e:                       # pragma: no cover
+    DOCXTranslatorEngine = None
+    INDISPONIBLES["docx"] = str(_e)
 
 try:
     from .pptx.engine import PPTXTranslatorEngine
