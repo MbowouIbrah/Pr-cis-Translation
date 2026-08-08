@@ -19,13 +19,23 @@ parce que la détection ne l'était pas (voir
 [`docs/bilan-ocr-2026-07-28.md`](../../../docs/bilan-ocr-2026-07-28.md), et les
 tags `archive/ocr-v1-*` / `archive/ocr-v2-*`).
 
+## Où on en est : **75 %** (note de l'utilisateur, 08/08)
+
+L'essentiel est détecté. La première partie de l'identification est faite,
+elle n'est pas finie — restent 15 défauts mesurés (voir plus bas), puis
+d'autres problèmes de détection à traiter ensuite.
+
 ## La chaîne
 
 ```
-scan ─▶ lecture.py ─▶ spans ─▶ _group_text_lines ─▶ _group_paragraphs ─▶ tri.py ─▶ apercu.py
-                        │        (moteur PDF)          (moteur PDF)
+scan ─▶ lecture.py ─▶ spans ─▶ _group_text_lines ─▶ _group_paragraphs ─▶ tri.py ─▶ fusion.py ─▶ apercu.py
+                        │       + justifie.py         (moteur PDF)                    │
+                        │        (moteur PDF)                                         └── audit.py juge
                         └── contrat de 14 champs : spans.py
 ```
+
+`fusion.py` passe **après** le tri, délibérément : recoller deux morceaux dont
+l'un aurait été écarté comme débris ferait rentrer le débris par la fenêtre.
 
 Le moteur PDF est une **bibliothèque de mise en page** : il s'instancie sans
 état ni fichier (`vars(e) == {}`). On ne le modifie **jamais** pour arranger un
@@ -42,16 +52,45 @@ Trois règles posées par l'utilisateur, **sans aucun seuil** (`invariants.py`) 
 C'est ce qui manquait aux deux versions précédentes : leurs indicateurs
 mesuraient des **pixels** et restaient bons sur une page jugée mauvaise.
 
+### L'AUDIT CHIRURGICAL — la mesure qui fait foi (`audit.py`)
+
+Les invariants sont **nécessaires et insuffisants** : ils tolèrent 0,5 pt de
+recouvrement et n'annoncent une inclusion qu'au-delà de 90 %. L'utilisateur a
+demandé mieux :
+
+> « chaque bloc doit délimiter au millimètre près uniquement le paragraphe
+>   concerné, sans empiéter ni toucher un autre bloc, ni être inscrit dans un
+>   paragraphe »
+
+`audit.py` n'accepte **rien** : tout recouvrement strictement positif est un
+défaut. Six familles :
+
+| type | ce qu'il détecte |
+|---|---|
+| `chevauchement` | deux blocs partagent une surface |
+| `bloc_dans_bloc` | l'un est entièrement inscrit dans l'autre |
+| `blocs_colles` | aucun blanc entre eux (< 0,25 × ligne, jamais moins que le trait) |
+| `cadre_lache` | le cadre revendique du vide au-delà de son encre |
+| `ligne_partagee` | **une LIGNE de texte revendiquée par deux blocs** |
+| `ligne_amputee` | une ligne qui commence après le fer du paragraphe |
+
+Les deux dernières ont été ajoutées après coup, **signalées à l'œil** et non
+par le compte. `ligne_partagee` est celle qui remonte à la CAUSE : les
+chevauchements de cadres en découlent, le morceau expulsé retombant dans le
+cadre qu'il a quitté.
+
 ### L'état mesuré (3 pages du Code de la Route, vrai scan)
 
 | | valeur |
 |---|---|
 | mot dans deux lignes | **0** |
 | mot dans deux paragraphes | **0** |
-| inclusions + croisements | **8** (était 80) |
+| défauts de l'audit | **15** (était 27) |
 
 Les deux premières à zéro depuis le début : le regroupement ne duplique jamais
-un mot. Les 8 restantes sont **géométriques** (1 / 5 / 2).
+un mot — c'est ce qui a rendu la fusion licite. Détail des 15 : 7
+`ligne_partagee`, 3 `chevauchement`, 3 `ligne_amputee`, 2 `blocs_colles`.
+Répartition 2 / 12 / 1 : **la page 2 concentre tout**.
 
 ## Les correctifs qui ont payé
 
@@ -88,6 +127,33 @@ Résultat : 6 blocs → **3**.
 
 
 
+**Le plafond d'INTERLIGNE** (`_interligne`). Un mot ne peut pas être plus haut
+que l'interligne : il empiéterait sur la ligne voisine *par construction*. Sur
+du texte **barré**, la barre traverse la ligne, la mesure d'encre l'attrape et
+remonte à la ligne du dessus — mesuré page 1, trois lignes de 8,4 / 9,0 /
+9,9 pt pour un interligne de 6,3, dont les boîtes se recouvraient. L'interligne
+est **relevé** sur la page (écart médian entre bas d'encre consécutifs : 5,10 /
+4,80 / 5,20), jamais choisi. Le plafond de 2,2 × la médiane des hauteurs, lui,
+ne mordait pas : les mots fautifs font 2,1 à 2,6 × la médiane.
+
+**La FUSION des paragraphes coupés** (`fusion.py`). Deux blocs qui se touchent
+sont parfois un seul paragraphe. Mais sur 15 paires en conflit, **3 seulement**
+le sont : 9 sont deux colonnes côte à côte, 3 un sommaire et son numéro de
+page. Fusionner tout ce qui se touche abîmerait 12 cas pour en réparer 3.
+
+Le discriminant, lu dans les mesures : écart de fer gauche de **0,00 à 0,24 pt**
+pour les paragraphes coupés, **8 à 306 pt** pour les colonnes — deux populations
+sans recouvrement. Trois garde-fous, chacun imposé par un cas réel : même fer
+(ou recouvrement en x total, pour le texte à contour), largeurs comparables,
+et **jamais de chaîne** (l'union de 32 et 34 contient 33).
+
+**L'aperçu ne GONFLE plus les cadres.** Il les dessinait 1 pt plus grands que
+les blocs : 6 paires se touchent vraiment, **14** se touchaient à l'écran.
+L'utilisateur voyait donc des défauts que l'audit ne signalait pas. Un aperçu
+qui ment sur ce qu'il montre invalide le jugement à l'œil, qui est le mode de
+jugement retenu ici. `audit.py` connaît désormais l'épaisseur du trait
+(`_TRAIT`), et trois tests gardent l'accord entre les deux modules.
+
 **La boîte de LIGNE.** Tesseract rend souvent, pour plusieurs mots
 consécutifs, la boîte de leur *ligne* et non du *mot* — 28 % des mots d'une
 page. Détection sans seuil : trois mots dont les bords haut **et** bas
@@ -120,6 +186,21 @@ concerné.
 | **borner la dérive d'ancre** (moteur PDF) | 1,0× → 4,0× tol | 73/47/46/36/33/33 — **toute borne dégrade** |
 | **couper les lignes fusionnées** | saut 0,5× → 1,3× médiane | 29/24/24/22 — **jamais mieux que ne rien faire** |
 | augmenter le DPI de lecture | 300 → 600 | 22/25/24/24 — **300 est déjà le meilleur** |
+| serrer `_ECART_MAX_GW` (recollage justifié) | 2,5 → 6,0 | 38/36/29/25/23/23 — **serrer DÉGRADE** |
+| plafonner **tous** les mots à l'interligne | — | 17 → 20, `bloc_dans_bloc` reparaît (0 → 2) |
+| accepter **2** mots pour une boîte de ligne | — | 17 → 19 ; `_paires_trop_hautes` conservée, **non appelée** |
+
+Les trois dernières méritent un mot :
+
+* **serrer l'écart de recollage** semblait évident pour empêcher de souder
+  deux colonnes. Le balayage dit l'inverse : le seuil coupe alors de vraies
+  lignes justifiées. Le bon garde-fou était ailleurs — ne pas enjamber le fer
+  gauche d'une autre colonne attestée ;
+* **plafonner tous les mots** à l'interligne : l'argument géométrique est juste
+  et pourtant faux en pratique, une capitale suivie d'un jambage (« Jg », « À »)
+  occupe légitimement plus que l'interligne, et la raboter décale sa baseline ;
+* **abaisser à 2 mots** le seuil de détection des boîtes de ligne : deux mots
+  aux bords identiques se produisent par hasard sur une page dense.
 
 Les deux dernières méritent un mot, parce qu'elles semblaient évidentes :
 
@@ -132,20 +213,47 @@ Les deux dernières méritent un mot, parce qu'elles semblaient évidentes :
   plus de 4 mots) : même conclusion, aucun seuil ne fait mieux que l'absence
   de découpe.
 
-## Ce qui reste (8 violations)
+## Ce qui reste (15 défauts) — la suite du travail
 
-Concentrées sur la page 2 (1 / 5 / 2). Le défaut visible à l'œil n'est plus le
-sur-découpage mais le **chevauchement d'un interligne** entre deux blocs
-voisins : ils se stratifient au lieu de s'empiler proprement.
+Répartition **2 / 12 / 1** : la page 2 concentre tout, et c'est la page à
+l'interligne le plus serré, avec du texte enroulé autour d'une image.
 
-⚠ **Les invariants ne mesurent PAS tout.** Le sur-découpage des lignes
-justifiées — 6 blocs pour un paragraphe de 4 lignes — n'en produisait
-**aucune**, alors que c'était le défaut le plus visible. Il a été signalé à
-l'œil, pas par le compteur. Les invariants restent nécessaires et
-**insuffisants** : toujours regarder l'aperçu.
+| famille | n | ce que c'est |
+|---|---|---|
+| `ligne_partagee` | 7 | deux blocs voisins se partagent une ligne |
+| `chevauchement` | 3 | tous page 2, zone du texte à contour |
+| `ligne_amputee` | 3 | un début de ligne parti dans un autre bloc |
+| `blocs_colles` | 2 | cadres qui se frôlent (0,27 et 0,48 pt) |
 
-Piste non essayée : lire par bandes horizontales pour donner à Tesseract un
-contexte de ligne franc dans les zones à interligne serré.
+Le texte de ces blocs porte la signature du défaut : des mots collés sans
+espace (`'AprèsdeuxansdepermisB'`, `'MA transportdemarchandises'`) trahissent
+une ligne encore mal découpée en amont.
+
+**Pistes non essayées** : lire par bandes horizontales, pour donner à Tesseract
+un contexte de ligne franc dans les zones à interligne serré ; découper après
+coup les lignes dont les boîtes se recouvrent encore.
+
+## La leçon qui revient : LE COMPTEUR NE VOIT QUE CE QU'ON LUI A APPRIS
+
+Trois fois de suite, un défaut réel est passé sous les indicateurs et a été
+signalé **à l'œil** par l'utilisateur :
+
+1. le sur-découpage des lignes justifiées — 6 blocs pour un paragraphe de 4
+   lignes, **zéro** violation des invariants ;
+2. les lignes partagées entre deux blocs — l'audit ne jugeait que les cadres,
+   deux à deux, jamais leur contenu ligne par ligne ;
+3. les cadres gonflés de 1 pt par l'aperçu — l'audit avait raison, c'est le
+   **dessin** qui mentait.
+
+D'où deux règles de travail :
+
+* **toujours regarder l'aperçu**, un compte vert ne prouve rien ;
+* **l'aperçu et l'audit doivent parler de la même géométrie**, sinon le
+  jugement à l'œil ne vaut rien (gardé par test).
+
+Et une règle sur les tests eux-mêmes : trois d'entre eux se sont révélés
+**aveugles** — verts alors que le correctif qu'ils gardaient était neutralisé.
+Un test se vérifie par mutation, sinon il ne protège rien.
 
 ## Où il tourne
 
@@ -164,6 +272,6 @@ Le banc minimal (~2 min de construction contre ~15 pour l'image complète)
 installe le **même** binaire et les **mêmes** paquets Python ; il en retire
 seulement ce que l'OCR n'appelle pas.
 
-**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 60/60) : le
+**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 95/95) : le
 contrat de spans permet d'injecter des mots dont on connaît la vérité. Un test
 qu'on ne peut pas lancer chez soi ne protège rien.
