@@ -104,6 +104,59 @@ def _image_de_page(page, dpi: int):
     return img, echelle
 
 
+#: Confiance minimale exigée d'un mot venu de la passe COULEUR, et longueur
+#: minimale de son texte.
+#:
+#: Cette passe voit peu et se trompe beaucoup : mesurée sur 3 pages, elle
+#: ajoute 37 mots dont **2 seulement sont bons** (« LA » + « SIGNALISATION »,
+#: à 95-96 %). Les 35 autres sont du bruit — `'pi'`, `'£'`, `'Watlt'`, `'"L]'`
+#: — avec des confiances de 1 à 54. Sans filtre, elle coûterait plus qu'elle
+#: ne rapporte, exactement comme la double lecture.
+#:
+#: 75 et 3 caractères : balayé de 60 à 90, le résultat ne bouge pas —
+#: **1 mot retenu, 0 rebut** sur tout le plateau. On se place au milieu.
+_CONF_MIN_COULEUR = 75.0
+_CARS_MIN_COULEUR = 3
+
+
+def _canal_couleur(img):
+    """L'image vue par sa SATURATION : le texte coloré y devient sombre.
+
+    LE DÉFAUT QU'ELLE RÉPARE
+    -------------------------
+    Un titre écrit en couleur vive sur fond clair a une LUMINOSITÉ proche de
+    celle du fond — c'est la couleur qui le distingue, pas le contraste. La
+    conversion en gris standard (`L`), qui est une moyenne pondérée des
+    canaux, l'efface donc au lieu de le révéler.
+
+    Mesuré page 2 : « LA SIGNALISATION » (vert sur blanc) est **absent** de la
+    lecture normale et lu à **95 %** ici.
+
+    COMMENT
+    -------
+    On calcule `max(RGB) - min(RGB)`, qui vaut 0 pour tout gris (noir, blanc,
+    gris moyen) et devient grand dès qu'une couleur est saturée. En
+    l'inversant, le texte coloré devient sombre sur fond clair — la forme que
+    Tesseract attend.
+
+    ⚠ ELLE NE REMPLACE JAMAIS LA LECTURE NORMALE : elle rend 19 à 39 mots là
+    où l'autre en rend 450 à 690, puisqu'elle est aveugle au texte noir, qui
+    est l'immense majorité. C'est une passe COMPLÉMENTAIRE, filtrée par
+    `_CONF_MIN_COULEUR`, et fusionnée avec la première.
+    """
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        # Sans numpy, la passe couleur perd son oeil ; elle ne devient pas
+        # fausse — on rend le gris, qui ne fera qu'ajouter des doublons que
+        # `_fusionner` ecarte.
+        return img.convert("L")
+    a = np.asarray(img.convert("RGB")).astype(int)
+    sat = a.max(axis=2) - a.min(axis=2)
+    return Image.fromarray((255 - sat).astype("uint8"))
+
+
 def _pretraitee(img):
     """L'image binarisée, pour les textes ternes ou bruités.
 
@@ -135,8 +188,20 @@ def _pretraitee(img):
         return gris
 
 
-def _mots_bruts(img, langue: str):
-    """Les mots lus par Tesseract sur UNE image, en pixels de cette image."""
+def _mots_bruts(img, langue: str, passe: str = "n"):
+    """Les mots lus par Tesseract sur UNE image, en pixels de cette image.
+
+    `passe` identifie la LECTURE dont proviennent ces mots, et cette étiquette
+    est indispensable dès qu'on en fusionne deux.
+
+    LE BUG QU'ELLE FERME. Les clés de ligne (`block_num`, `par_num`,
+    `line_num`) sont numérotées par Tesseract PAR APPEL : la ligne (21,1,1) de
+    la passe couleur n'a rien à voir avec la (21,1,1) de la passe normale.
+    Sans distinction, `_aligner_sur_lignes_ocr` les confond et donne une
+    baseline commune à des mots distants de toute la page — mesuré,
+    « SIGNALISATION » (y = 352,8) recevait la baseline 64,56, et le total des
+    défauts passait de 15 à 35.
+    """
     import pytesseract
     from pytesseract import Output
 
@@ -176,7 +241,8 @@ def _mots_bruts(img, langue: str):
         # C'est logique : Tesseract dispose des pixels et de son modèle de
         # ligne, là où l'aval ne voit plus que des boîtes. Refuser cette
         # information nous obligeait à la redéduire, moins bien.
-        cle = (d.get("block_num", [0])[i] if "block_num" in d else 0,
+        cle = (passe,
+               d.get("block_num", [0])[i] if "block_num" in d else 0,
                d.get("par_num", [0])[i] if "par_num" in d else 0,
                d.get("line_num", [0])[i] if "line_num" in d else 0)
         mots.append({"texte": texte, "conf": conf, "ligne": cle,
@@ -584,7 +650,22 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
 
     mots = _mots_bruts(img, langue)
     if double_lecture:
-        mots = _fusionner(mots, _mots_bruts(_pretraitee(img), langue))
+        mots = _fusionner(mots, _mots_bruts(_pretraitee(img), langue,
+                                            passe="b"))
+
+    # LA PASSE COULEUR, toujours active mais SÉVÈREMENT filtrée. Un titre en
+    # couleur vive sur fond clair a une luminosité proche du fond : la
+    # conversion en gris l'efface. Mesuré page 2, « LA SIGNALISATION » est
+    # absent de la lecture normale et lu à 95 % ici.
+    #
+    # Le filtre n'est pas une précaution de confort : sans lui cette passe
+    # ajoute 37 mots dont 35 sont du bruit. Avec, elle en ajoute 1 et rien
+    # d'autre. Voir `_CONF_MIN_COULEUR`.
+    couleur = [m for m in _mots_bruts(_canal_couleur(img), langue, passe="c")
+               if m["conf"] >= _CONF_MIN_COULEUR
+               and len((m["texte"] or "").strip()) >= _CARS_MIN_COULEUR]
+    if couleur:
+        mots = _fusionner(mots, couleur)
 
     # Les mots à qui Tesseract a donné la boîte de leur LIGNE. Pour ceux-là, sa
     # boîte n'est pas un repère : on ne s'en sert pas pour borner l'encre.

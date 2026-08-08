@@ -603,6 +603,44 @@ def run():
     ok("MUTATION : une ligne COURTE mais au fer n'est PAS un defaut",
        audit.auditer([courte])["comptes"].get("ligne_amputee") is None)
 
+    # ---- LA PASSE COULEUR -----------------------------------------------
+    # Un titre en couleur vive sur fond clair a une LUMINOSITE proche du
+    # fond : la conversion en gris l'efface au lieu de le reveler. Mesure
+    # page 2, « LA SIGNALISATION » (vert sur blanc) est ABSENT de la lecture
+    # normale et lu a 95 % par le canal de saturation.
+    try:
+        from PIL import Image                             # noqa: E402
+        vert = Image.new("RGB", (12, 6), (255, 255, 255))
+        for x in range(2, 9):                             # un trait vert vif
+            for y in range(1, 5):
+                vert.putpixel((x, y), (0, 170, 60))
+        canal = lecture._canal_couleur(vert)
+        px = list(canal.getdata())
+        ok("le canal COULEUR rend le texte colore SOMBRE",
+           min(px) < 120, f"min={min(px)}")
+        ok("...et laisse le fond blanc CLAIR", max(px) > 240, f"max={max(px)}")
+        # MUTATION : un gris n'a aucune saturation, il doit rester invisible
+        # pour cette passe -- sinon elle doublerait tout le texte noir.
+        gris_img = Image.new("RGB", (12, 6), (255, 255, 255))
+        for x in range(2, 9):
+            for y in range(1, 5):
+                gris_img.putpixel((x, y), (40, 40, 40))   # noir, non colore
+        ok("MUTATION : un texte NOIR reste invisible pour la passe couleur",
+           min(lecture._canal_couleur(gris_img).getdata()) > 240)
+    except ImportError:
+        pass
+
+    # LA CLE DE LIGNE PORTE SA PASSE. Tesseract numerote `block/par/line` PAR
+    # APPEL : la ligne (21,1,1) de la passe couleur n'a rien a voir avec la
+    # (21,1,1) de la passe normale. Sans distinction, l'alignement leur donne
+    # une baseline commune -- mesure, « SIGNALISATION » (y=352,8) recevait la
+    # baseline 64,56, et le total des defauts passait de 15 a 35.
+    import inspect                                        # noqa: E402
+    src_mb = inspect.getsource(lecture._mots_bruts)
+    ok("la cle de ligne inclut la PASSE dont elle vient",
+       "cle = (passe," in src_mb,
+       "les cles de deux passes peuvent entrer en collision")
+
     # ---- L'INTERLIGNE, RELEVE ET NON CHOISI -----------------------------
     # Une page synthetique dont on CONNAIT l'interligne : 5 lignes posees
     # tous les 16 pt, mots de 11 pt de haut.
