@@ -127,6 +127,18 @@ _ECART_MEME_LIGNE = 4.0
 _FER_DECALE_LIGNE = 1.5
 
 
+#: Épaisseur du trait de cadre dans l'aperçu, en points. Un trait est CENTRÉ
+#: sur le bord : il deborde donc de la moitié de son épaisseur de chaque côté.
+#:
+#: Deux cadres séparés de moins de `_TRAIT` voient leurs traits se toucher à
+#: l'écran, quelles que soient leurs boîtes. Juger la boîte seule laissait
+#: donc passer des défauts parfaitement visibles — l'aperçu et l'audit
+#: doivent parler de la MÊME géométrie, sinon le jugement à l'œil ne vaut rien.
+#:
+#: Doit rester accordé à `apercu._cadre` (0,7 pt pour un bloc retenu).
+_TRAIT = 0.7
+
+
 def _aire(b) -> float:
     return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
 
@@ -350,15 +362,20 @@ def auditer(blocs) -> dict:
                 continue
 
             # ── 2. Se touchent-ils ? (aucun blanc entre eux) ─────────
+            # Le blanc exigé doit rester SUPÉRIEUR à `_TRAIT` : en deçà, les
+            # traits des deux cadres se rejoignent à l'écran et l'utilisateur
+            # voit un défaut que l'audit ne signale pas. C'est exactement ce
+            # qui s'est produit avec la marge de dessin de l'aperçu.
             if hl > 0:
+                exige = max(_BLANC_MIN_LIGNE * hl, _TRAIT)
                 d = _distance(ba, bb)
-                if d < _BLANC_MIN_LIGNE * hl:
+                if d < exige:
                     defauts.append({
                         "type": "blocs_colles",
                         "blocs": (i, j),
                         "mesure": f"{d:.2f} pt de blanc "
                                   f"({d / hl:.2f} x ligne, exigé "
-                                  f"{_BLANC_MIN_LIGNE})",
+                                  f"{exige:.2f} pt)",
                         "texte": (a.get("text") or "")[:30] + " // "
                                  + (b.get("text") or "")[:30],
                     })

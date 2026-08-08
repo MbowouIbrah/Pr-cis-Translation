@@ -517,6 +517,33 @@ def run():
     ok("MUTATION : une ligne COURTE mais au fer n'est PAS un defaut",
        audit.auditer([courte])["comptes"].get("ligne_amputee") is None)
 
+    # ---- L'APERCU ET L'AUDIT PARLENT DE LA MEME GEOMETRIE ----------------
+    # Le defaut qui a coute le plus cher a comprendre : l'apercu dessinait
+    # chaque cadre 1 pt PLUS GRAND que le bloc. Deux blocs separes de 1,5 pt
+    # apparaissaient donc colles a l'ecran, alors que l'audit les voyait
+    # disjoints -- et il avait raison. Mesure : 6 vraies paires en contact,
+    # 14 a l'ecran, soit 8 defauts fabriques par le dessin.
+    #
+    # On teste l'ACCORD entre les deux modules, jamais la valeur d'un cote.
+    import inspect                                        # noqa: E402
+    from engines.ocr import apercu                         # noqa: E402
+    src = inspect.getsource(apercu.dessiner)
+    ok("l'apercu ne GONFLE plus les cadres (aucune marge de dessin)",
+       "marge=" not in src, "une marge de dessin est revenue")
+
+    # Le trait a une epaisseur, CENTREE sur le bord : deux cadres plus proches
+    # que `_TRAIT` se touchent a l'ecran quoi qu'en disent leurs boites. On
+    # verifie l'ACCORD entre l'epaisseur declaree par l'audit et celle que
+    # l'apercu dessine reellement -- deux valeurs qui derivent en silence
+    # rouvrent exactement le defaut qu'on vient de fermer.
+    ok("l'epaisseur du trait connue de l'audit est celle que l'apercu dessine",
+       f"epaisseur={audit._TRAIT}" in src,
+       f"audit._TRAIT={audit._TRAIT}, apercu dessine autre chose")
+    colles = [_bl(0, 0, 100, 10, "a"), _bl(0, 10.5, 100, 20, "b")]
+    ok("MUTATION : deux cadres a 0,5 pt (leurs TRAITS se touchent) sont "
+       "un defaut",
+       audit.auditer(colles)["comptes"].get("blocs_colles") == 1)
+
     print(f"\n== {_ok}/{_ok + _ko} ==")
     return 0 if _ko == 0 else 1
 

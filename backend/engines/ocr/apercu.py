@@ -68,16 +68,29 @@ def dessiner(page, retenus=(), ecartes=(), lignes=(), montrer_lignes=True):
             if bb:
                 _cadre(page, bb, _LIGNE, epaisseur=0.4)
 
+    # AUCUNE MARGE, et c'est un correctif, pas un detail de rendu.
+    #
+    # Les cadres etaient dessines 1 pt PLUS GRANDS que les blocs. A l'ecran,
+    # deux blocs separes de 1,5 pt apparaissaient donc colles, alors que le
+    # calcul les voyait disjoints -- et il avait raison. Mesure sur 3 pages :
+    #
+    #     marge 0,0 pt  ->   6 paires se touchent   (les vraies)
+    #     marge 1,0 pt  ->  14 paires se touchent   (dont 8 fabriquees ici)
+    #
+    # L'utilisateur voyait donc des defauts que l'audit ne signalait pas, pour
+    # la seule raison que l'aperçu et l'audit ne parlaient pas de la meme
+    # geometrie. Un aperçu qui ment sur ce qu'il montre invalide le jugement a
+    # l'oeil, qui est le mode de jugement retenu ici.
     for i, bloc in enumerate(ecartes or (), 1):
         bb = bloc.get("bbox")
         if bb:
-            _cadre(page, bb, _ECARTE, epaisseur=0.5, marge=1.0)
+            _cadre(page, bb, _ECARTE, epaisseur=0.5)
             _etiquette(page, bb, f"x{i}", _ECARTE)
 
     for i, bloc in enumerate(retenus or (), 1):
         bb = bloc.get("bbox")
         if bb:
-            _cadre(page, bb, _RETENU, epaisseur=0.7, marge=1.0)
+            _cadre(page, bb, _RETENU, epaisseur=0.7)
             _etiquette(page, bb, str(i), _RETENU)
 
     return {"retenus": len(retenus or ()), "ecartes": len(ecartes or ()),
