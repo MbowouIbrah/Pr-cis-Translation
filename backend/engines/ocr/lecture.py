@@ -389,6 +389,56 @@ def _boites_de_ligne(mots, tolerance: float = 0.15) -> set[int]:
     return suspects
 
 
+def _plafonds_par_ligne(mots, interligne: float) -> dict:
+    """Le plafond de hauteur, calculé LIGNE PAR LIGNE et non pour la page.
+
+    LA RÉGRESSION QUE CETTE FONCTION RÉPARE
+    -----------------------------------------
+    Plafonner à l'interligne de la PAGE écrase les TITRES : ils dépassent
+    légitimement l'interligne du corps, puisqu'ils sont écrits plus gros.
+    Mesuré page 2 : **78 mots rabotés**, dont
+
+        'LES'  9,84 -> 4,56 pt      'AUTRES'  10,08 -> 4,56 pt
+        'PERMIS'  9,84 -> 4,56      'SOMMAIRE'  9,84 -> 4,56
+
+    — c'est-à-dire tous les titres de la page, ramenés à la taille du corps.
+    Signalé à l'œil : « le paragraphe n'encadre pas bien la hauteur du mot ».
+
+    CE QUI DISTINGUE UN TITRE D'UNE BOÎTE DE LIGNE FAUSSE
+    -------------------------------------------------------
+    Les deux sont plus hauts que l'interligne du corps. Mais :
+
+      · un TITRE est écrit gros, et TOUS les mots de sa ligne le sont ;
+      · une BOÎTE DE LIGNE fausse cohabite sur sa ligne avec des mots
+        correctement mesurés — c'est même la définition du défaut (deux
+        populations sur une même ligne physique).
+
+    On compare donc chaque mot aux AUTRES MOTS DE SA LIGNE, jamais à la page.
+    Le plafond d'une ligne est la MÉDIANE des hauteurs qu'elle porte, majorée
+    d'une marge pour les hampes et jambages. Une ligne de titre a une médiane
+    haute, donc un plafond haut : rien n'y est raboté. Une ligne de corps où
+    trois mots portent la boîte de la ligne a une médiane basse : ceux-là sont
+    ramenés, et c'est le but.
+
+    L'interligne de la page ne sert plus que de GARDE-FOU ABSOLU : aucun
+    plafond ne descend sous lui, sinon une ligne entièrement composée de
+    boîtes fausses se plafonnerait sur sa propre erreur.
+    """
+    par_ligne: dict = {}
+    for i, m in enumerate(mots):
+        h = m["boite"][3] - m["boite"][1]
+        if h > 0:
+            par_ligne.setdefault(m.get("ligne"), []).append(h)
+    out = {}
+    for cle, hs in par_ligne.items():
+        hs = sorted(hs)
+        med = hs[len(hs) // 2]
+        # 1,6 x la médiane de la LIGNE : de quoi loger une capitale à jambage
+        # sans laisser passer une boîte qui vaut deux lignes.
+        out[cle] = max(1.6 * med, interligne)
+    return out
+
+
 def _paires_trop_hautes(mots, interligne: float,
                         tolerance: float = 0.15) -> set[int]:
     """Les PAIRES de mots qui portent la boîte de leur ligne.
@@ -551,10 +601,8 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
     # 2,2 x la médiane : assez pour un mot à hampe ET jambage (« Jg »), qui
     # dépasse largement un mot moyen, mais moins que deux lignes.
     plafond = 2.2 * med_h if med_h > 0 else 0.0
-    # ...MAIS JAMAIS PLUS QUE L'INTERLIGNE DE LA PAGE, et c'est le plafond qui
-    # mord vraiment. Un mot plus haut que l'interligne empiète sur la ligne
-    # voisine PAR CONSTRUCTION : ce n'est pas une question de réglage, c'est
-    # une impossibilité géométrique.
+    # LE PLAFOND QUI MORD : la hauteur d'encre d'une boîte de LIGNE ne peut
+    # pas dépasser ce que porte SA PROPRE LIGNE.
     #
     # Le défaut, mesuré page 1 sur le texte BARRÉ « Après deux ans de permis
     # B... » : la barre traverse la ligne, la mesure d'encre l'attrape et
@@ -562,12 +610,12 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
     # pour un interligne de 6,3 -> leurs boîtes se recouvrent, et les blocs
     # héritent du recouvrement (86,40 x 4,59 pt, mesure de l'audit).
     #
-    # `_interligne` est relevé sur la page elle-même, pas choisi : c'est
-    # l'écart médian entre bas d'encre consécutifs. Mesuré 5,10 / 4,80 / 5,20
-    # sur les 3 pages, et 13 % des mots le dépassaient.
+    # ⚠ PAR LIGNE, ET NON POUR LA PAGE. Un plafond global à l'interligne
+    # écrase les TITRES, qui sont légitimement plus hauts que le corps :
+    # mesuré page 2, **78 mots rabotés**, dont « LES AUTRES PERMIS » et
+    # « SOMMAIRE » ramenés de 9,84 à 4,56 pt. Voir `_plafonds_par_ligne`.
     inter = _interligne(mots)
-    if inter > 0:
-        plafond = min(plafond, inter) if plafond > 0 else inter
+    plafonds = _plafonds_par_ligne(mots, inter)
     # ABAISSER À DEUX MOTS LE SEUIL DE `_boites_de_ligne` (quand la boîte
     # dépasse l'interligne) : ESSAYÉ, MESURÉ, REJETÉ — voir
     # `_paires_trop_hautes`, conservée et documentée mais NON APPELÉE.
@@ -576,7 +624,7 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
     spans = []
     for i, m in enumerate(mots):
         encre = _boite_encre(gris, m["boite"], boite_de_ligne=(i in suspects),
-                             hauteur_max=plafond)
+                             hauteur_max=plafonds.get(m.get("ligne"), plafond))
         if encre is None:
             continue                     # aucune encre : lecture de bruit
         x0, y0, x1, y1 = (v / echelle for v in encre)
