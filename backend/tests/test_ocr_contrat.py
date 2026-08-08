@@ -707,6 +707,40 @@ def run():
        len(lecture._fusionner([], jumeaux)) == 1,
        f"{len(lecture._fusionner([], jumeaux))} mots")
 
+    # ---- LES MOTS COUPES PAR TESSERACT ----------------------------------
+    # Geometries RELEVEES page 2 : l'onglet « Vehicule » ressort en « Vehic »
+    # (conf 91) + « ule » (conf 80), dans DEUX blocs Tesseract differents
+    # (35 et 39), alors que les boites sont jointives a 0,24 pt pres.
+    coupe = [{"texte": "Vehic", "conf": 91.0, "ligne": ("w", 35, 1, 1),
+              "boite": (254.4, 261.4, 283.4, 275.8)},
+             {"texte": "ule", "conf": 80.0, "ligne": ("w", 39, 1, 1),
+              "boite": (283.7, 263.3, 299.8, 273.8)}]
+    r7 = lecture._recoller_mots_coupes([dict(m) for m in coupe])
+    ok("deux moities d'un mot coupe sont RECOLLEES",
+       len(r7) == 1 and r7[0]["texte"] == "Vehicule",
+       f"{[m['texte'] for m in r7]}")
+
+    # MUTATION 1 : deux mots VOISINS de la MEME ligne OCR ne se soudent pas.
+    # Sans cette condition on collerait tous les mots serres d'une ligne --
+    # c'est le garde-fou qui porte toute la regle.
+    voisins = [dict(m) for m in coupe]
+    voisins[1]["ligne"] = voisins[0]["ligne"]
+    ok("MUTATION : deux mots de la MEME ligne OCR ne sont PAS soudes",
+       len(lecture._recoller_mots_coupes(voisins)) == 2)
+
+    # MUTATION 2 : deux mots separes par une vraie espace restent separes.
+    ecartes2 = [dict(m) for m in coupe]
+    ecartes2[1]["boite"] = (290.0, 263.3, 306.0, 273.8)   # +6 pt d'ecart
+    ok("MUTATION : deux mots separes par une ESPACE restent separes",
+       len(lecture._recoller_mots_coupes(ecartes2)) == 2)
+
+    # ...ET LE RECOLLAGE EST BIEN BRANCHE. Tester la fonction seule ne dit
+    # rien de son appel : la debrancher laissait la suite VERTE.
+    import inspect as _insp                               # noqa: E402
+    ok("le recollage des mots coupes est appele par la lecture",
+       "_recoller_mots_coupes(mots" in _insp.getsource(lecture.spans_de_page),
+       "la fonction existe mais n'est pas branchee")
+
     # LA CLE DE LIGNE PORTE SA PASSE. Tesseract numerote `block/par/line` PAR
     # APPEL : la ligne (21,1,1) de la passe couleur n'a rien a voir avec la
     # (21,1,1) de la passe normale. Sans distinction, l'alignement leur donne

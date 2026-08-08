@@ -615,6 +615,70 @@ def _paires_trop_hautes(mots, interligne: float,
     return out
 
 
+#: Écart maximal, en points, entre deux morceaux d'un MÊME mot coupé par
+#: Tesseract. Deux lettres consécutives d'un mot se touchent ; deux mots
+#: distincts sont séparés d'au moins une chasse d'espace.
+#:
+#: 0,4 pt à 300 dpi ≈ 1,7 pixel. C'est le jeu de mesure, pas un espace.
+_ECART_MEME_MOT = 0.4
+
+#: Part de bande verticale commune exigée. Deux morceaux d'un même mot
+#: partagent leur ligne d'écriture presque exactement.
+_BANDE_MEME_MOT = 0.7
+
+
+def _recoller_mots_coupes(mots, echelle: float = 1.0):
+    """Recolle les morceaux d'un mot que Tesseract a coupé en deux.
+
+    LE CAS RÉEL, MESURÉ. L'onglet « Véhicule » (page 2) ressort en « Véhic »
+    (conf 91) + « ule » (conf 80), **dans deux blocs Tesseract différents**
+    (35 et 39) alors que les deux boîtes sont jointives à 0,24 pt près. Rien
+    en aval ne les recolle : le regroupement en lignes travaille sur des
+    boîtes et voit deux mots voisins normaux.
+
+    TROIS CONDITIONS, ET LEUR CONJONCTION EST TRÈS SÉLECTIVE — mesurée sur
+    3 pages et 2 passes de lecture, elle ne désigne **qu'une seule paire**,
+    celle-là :
+
+      1. ADJACENTES : l'écart horizontal est nul à la mesure près. Deux mots
+         distincts sont séparés d'une chasse d'espace, jamais de 0,2 pt ;
+      2. MÊME BANDE : elles partagent leur ligne d'écriture ;
+      3. LIGNES OCR DIFFÉRENTES : c'est le signal qui achève la preuve.
+         Deux mots réellement voisins appartiennent à la MÊME ligne pour
+         Tesseract ; deux morceaux qu'il a mal découpés tombent dans deux
+         blocs, et c'est précisément l'erreur qu'on répare. Sans cette
+         condition, on souderait tous les mots serrés d'une même ligne.
+    """
+    if len(mots) < 2:
+        return mots
+    ordonnes = sorted(mots, key=lambda m: (m["boite"][1], m["boite"][0]))
+    absorbes = set()
+    for i, a in enumerate(ordonnes):
+        if i in absorbes:
+            continue
+        for j, b in enumerate(ordonnes):
+            if j == i or j in absorbes:
+                continue
+            ba, bb = a["boite"], b["boite"]
+            if ba[0] > bb[0]:
+                continue
+            ecart = (bb[0] - ba[2]) / echelle
+            if not (-_ECART_MEME_MOT < ecart < _ECART_MEME_MOT):
+                continue
+            rec = min(ba[3], bb[3]) - max(ba[1], bb[1])
+            court = min(ba[3] - ba[1], bb[3] - bb[1])
+            if court <= 0 or rec / court < _BANDE_MEME_MOT:
+                continue
+            if a["ligne"] == b["ligne"]:
+                continue            # vrais voisins : on ne touche pas
+            a["texte"] = (a.get("texte") or "") + (b.get("texte") or "")
+            a["boite"] = (min(ba[0], bb[0]), min(ba[1], bb[1]),
+                          max(ba[2], bb[2]), max(ba[3], bb[3]))
+            a["conf"] = min(float(a.get("conf", 0)), float(b.get("conf", 0)))
+            absorbes.add(j)
+    return [m for k, m in enumerate(ordonnes) if k not in absorbes]
+
+
 def _interligne(mots) -> float:
     """L'écart médian entre deux lignes d'écriture consécutives, en pixels.
 
@@ -687,20 +751,32 @@ def _fusionner(primaires, secondaires, tolerance: float = 0.5):
                 break
         if rival is None:
             out.append(cand)
-        # REMPLACER LE MOT DÉJÀ RETENU PAR LE « MEILLEUR » (texte plus long, à
-        # défaut confiance plus haute) : ESSAYÉ, MESURÉ, REJETÉ.
-        #
-        # L'idée paraissait sûre : « rs », fragment de « Usagers » vu par la
-        # lecture normale, évince le mot ENTIER lu à 96 % par la passe
-        # distance-au-blanc, au seul motif qu'il est primaire. Substituer
-        # rétablit bien « Usagers »...
-        #
-        # ...et fait passer l'audit de **15 à 34 défauts** (page 1 : 2 -> 17).
-        # Un mot venu d'une autre passe n'apporte pas que son texte : il
-        # apporte sa boîte, sa hauteur et sa clé de ligne. Le substituer
-        # déplace la baseline de toute sa rangée et disloque des blocs
-        # corrects ailleurs. Le premier retenu reste donc en place.
+        elif _prolonge(cand, out[rival]):
+            out[rival] = cand
     return out
+
+
+def _prolonge(cand, vu) -> bool:
+    """Le candidat est-il le mot ENTIER dont `vu` n'est qu'un morceau ?
+
+    LE CAS RÉEL : « rs », fragment de « Usagers » vu par la lecture normale,
+    bloquait le mot entier lu à 96 % par la passe distance-au-blanc — au seul
+    motif qu'il était arrivé le premier. L'onglet ressortait donc en « rs ».
+
+    ⚠ LA RÈGLE EST VOLONTAIREMENT ÉTROITE, et l'avoir élargie a été mesuré.
+    Substituer dès que le candidat est « meilleur » (texte plus long, à défaut
+    confiance plus haute) fait passer l'audit de **15 à 34 défauts** (page 1 :
+    2 -> 17). Un mot venu d'une autre passe n'apporte pas que son texte : il
+    apporte sa boîte, sa hauteur et sa clé de ligne, donc il déplace la
+    baseline de toute sa rangée et disloque des blocs corrects ailleurs.
+
+    On exige donc que le rival soit littéralement CONTENU dans le candidat.
+    C'est ce qui distingue « je lis mieux le même mot » de « je lis autre
+    chose au même endroit ». Coût mesuré ainsi : +1 défaut, pas +19.
+    """
+    tc = (cand.get("texte") or "").strip()
+    tv = (vu.get("texte") or "").strip()
+    return bool(tv) and len(tc) > len(tv) and tv.lower() in tc.lower()
 
 
 def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
@@ -766,6 +842,11 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
                and len((m["texte"] or "").strip()) >= _CARS_MIN_COULEUR]
         if vus:
             mots = _fusionner(mots, vus)
+
+    # APRÈS la fusion des passes : un mot coupé par Tesseract peut avoir ses
+    # deux moitiés dans la MÊME passe (« Véhic » + « ule »), et il faut que
+    # les deux soient présentes pour les reconnaître.
+    mots = _recoller_mots_coupes(mots, echelle)
 
     # Les mots à qui Tesseract a donné la boîte de leur LIGNE. Pour ceux-là, sa
     # boîte n'est pas un repère : on ne s'en sert pas pour borner l'encre.
