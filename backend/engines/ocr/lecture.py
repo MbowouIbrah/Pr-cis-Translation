@@ -679,6 +679,109 @@ def _recoller_mots_coupes(mots, echelle: float = 1.0):
     return [m for k, m in enumerate(ordonnes) if k not in absorbes]
 
 
+#: Hauteur, en multiples de la médiane de la page, au-delà de laquelle un span
+#: n'est plus du corps de texte. Un titre de page atteint 2,5 à 3 x ; au-delà,
+#: c'est presque toujours un morceau de dessin lu comme du texte.
+_GEANT_MEDIANE = 2.5
+
+#: Part de sa hauteur qu'un voisin doit partager pour être « du même corps ».
+_MEME_CORPS = 0.4
+
+
+def _debris_de_dessin(spans) -> list[int]:
+    """Les spans qui sont des morceaux de DESSIN lus comme du texte.
+
+    LE DÉFAUT, VU À L'ÉCRAN. Le bloc « La signalisation — 07 à 52 » s'étendait
+    jusqu'au bord droit de la page parce qu'il avalait « LUS » — en réalité le
+    panneau de signalisation, lu à 60 % de confiance sur 21,9 pt de haut.
+    Même chose pour « 4: » (23,7 pt), « | » (22,4), « Ps » (18,0), et pour les
+    détails du camion (« ar », « ae\\a ») page 1.
+
+    TROIS CONDITIONS, ET IL LES FAUT TOUTES LES TROIS
+    ---------------------------------------------------
+    Aucune ne suffit seule, et chacune protège d'une erreur mesurée :
+
+      1. BIEN PLUS HAUT que le corps de la page. Nécessaire mais très
+         insuffisant : `'2009'`, `'CHAUSSÉES'`, `'PERMIS'` le sont aussi ;
+
+      2. SEUL DE SON CORPS sur sa bande. Un vrai titre a des compagnons de
+         même taille — « CHAUSSÉES SANS MARQUAGE » en compte 4, « Edition
+         2009 TVL » en compte 2. Un morceau de dessin n'en a aucun. Ce
+         critère seul emporterait pourtant « Usagers » et « Véhicule », qui
+         sont de vrais titres isolés dans leur onglet ;
+
+      3. PAS UN MOT. C'est ce qui les sauve : `'Usagers'` et `'Véhicule'`
+         sont alphabétiques et longs, `'4:'`, `'|'`, `'Ps'`, `'ae\\a'` non.
+
+    Mesuré sur 3 pages : la conjonction écarte **5 spans, tous du bruit**, et
+    ne touche aucun mot réel. La confiance n'entre PAS dans la règle — voir
+    `tri.py` : elle dit si un mot est bien LU, pas s'il est du TEXTE, et « | »
+    est lu à 87 %.
+
+    ⚠ IMPASSE MESURÉE — CETTE FONCTION N'EST PAS APPELÉE.
+    Le tri est juste (5 rebuts, 0 vrai mot perdu) et pourtant le résultat est
+    NÉGATIF : **17 -> 20 défauts**, avec `bloc_dans_bloc` qui reparaît. Deux
+    raisons, et elles se cumulent :
+
+      · elle RATE sa cible principale. « LUS » (le panneau de signalisation)
+        est alphabétique et long : l'exception n° 3, écrite pour sauver
+        « Usagers », le sauve lui aussi. Le bloc #6 s'étend toujours jusqu'au
+        bord de la page ;
+
+      · retirer un span change la MÉDIANE des hauteurs et les rangées de
+        baseline. Cinq retraits suffisent à disloquer des blocs corrects
+        ailleurs — le même mécanisme que la substitution de mots (15 -> 34).
+
+    Écarter du bruit ne se paye donc pas seulement en mots perdus : ça se
+    paye en géométrie. Toute reprise doit se mesurer sur l'audit complet, pas
+    sur la qualité du tri.
+
+    AUTRES CRITÈRES ESSAYÉS SUR LE MÊME DÉFAUT, TOUS MESURÉS, TOUS ÉCARTÉS :
+
+      · DENSITÉ D'ENCRE dans la boîte. Ne sépare rien : « Ps » (bruit) donne
+        0,531 et « Index » (vrai mot) 0,354 ;
+      · ÉCART-TYPE des gris. Même conclusion, les deux populations se
+        recouvrent entièrement ;
+      · CONFIANCE de Tesseract. « | » est lu à 87 %, « Véhicule » à 80 % —
+        elle classe à l'envers. C'est la mesure déjà faite dans `tri.py` ;
+      · TITRE COLLÉ À SON TEXTE (« Accidents » + « Les statistiques, ») :
+        chercher une chute de corps DURABLE dans une ligne déjà formée. Le
+        trait vertical « | » (h = 22,4) fausse la mesure et la coupe tombe
+        après lui ; en passant par les médianes de chaque groupe pour le
+        neutraliser, on récolte 2 faux positifs sur 3 (une entrée de sommaire
+        « L'arrêt et le stationnement / 81 à 96 » coupée en deux). Aucun
+        ratio de 1,5 à 2,0 ne fait mieux.
+    """
+    if not spans:
+        return []
+    hs = sorted(s["bbox"][3] - s["bbox"][1] for s in spans)
+    med = hs[len(hs) // 2] if hs else 0.0
+    if med <= 0:
+        return []
+    out = []
+    for i, s in enumerate(spans):
+        b = s["bbox"]
+        h = b[3] - b[1]
+        if h <= _GEANT_MEDIANE * med:
+            continue
+        texte = (s.get("text") or "").strip()
+        if texte.isalpha() and len(texte) >= 3:
+            continue                      # un vrai mot : on n'y touche pas
+        compagnon = False
+        for autre in spans:
+            if autre is s:
+                continue
+            ab = autre["bbox"]
+            ah = ab[3] - ab[1]
+            if (min(b[3], ab[3]) - max(b[1], ab[1]) > 0.5 * ah
+                    and abs(ah - h) < _MEME_CORPS * h):
+                compagnon = True
+                break
+        if not compagnon:
+            out.append(i)
+    return out
+
+
 def _interligne(mots) -> float:
     """L'écart médian entre deux lignes d'écriture consécutives, en pixels.
 
@@ -906,6 +1009,9 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
         s["_ligne_ocr"] = m.get("ligne")
         spans.append(s)
 
+    # ⚠ ÉCARTER LES MORCEAUX DE DESSIN ICI : ESSAYÉ, MESURÉ, REJETÉ.
+    # `_debris_de_dessin` est conservée et documentée mais NON APPELÉE — voir
+    # sa docstring pour le détail de la mesure.
     _aligner_sur_lignes_ocr(spans)
     _brider_les_corps(spans)
     spans.sort(key=lambda s: (round(s["_base"], 1), s["bbox"][0]))
