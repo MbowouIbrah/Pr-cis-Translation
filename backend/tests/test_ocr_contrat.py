@@ -630,6 +630,40 @@ def run():
     except ImportError:
         pass
 
+    # ---- LA GARDE DE LA MESURE D'ENCRE ----------------------------------
+    # `_boite_encre` cherche l'encre dans une fenetre ELARGIE, pour ne pas
+    # couper les jambages. Elle attrape donc aussi l'encre du mot VOISIN, et
+    # la garde borne le resultat a la boite de Tesseract elargie d'une
+    # demi-marge -- EN X AUTANT QU'EN Y.
+    #
+    # L'oubli du X coutait cher : mesure page 2, Tesseract rend 32 paires de
+    # mots qui se chevauchent et notre mesure en produisait 109. Elle
+    # elargissait au lieu de resserrer, d'ou les textes colles
+    # (« permis »+« C » recouverts de 4,80 pt).
+    try:
+        from PIL import Image                             # noqa: E402
+        # Deux traits d'encre nettement separes : on mesure celui de GAUCHE,
+        # mais avec une boite volontairement etroite. Sans garde en x,
+        # l'encre trouvee s'etendrait jusqu'au trait de droite.
+        # Le voisin doit tomber DANS la fenetre elargie, sinon le test ne
+        # discrimine rien -- premiere version ecrite avec des traits trop
+        # ecartes, elle restait verte garde retiree.
+        # Boite (4,6)-(16,14) : hauteur 8, marge = 0,25 x 8 = 2, donc la
+        # fenetre va de x=2 a x=18. Le voisin est pose a x=17, dedans.
+        page_test = Image.new("L", (60, 20), 255)
+        for x in list(range(4, 16)) + list(range(17, 30)):
+            for y in range(6, 14):
+                page_test.putpixel((x, y), 0)
+        enc = lecture._boite_encre(page_test, (4, 6, 16, 14))
+        ok("la mesure d'encre ne DEBORDE pas sur le mot voisin",
+           enc is not None and enc[2] <= 16 + 0.5 * max(1.0, 0.25 * 8),
+           f"x1={enc[2] if enc else None} (attendu <= 17)")
+        ok("...et elle trouve bien l'encre du mot qu'on lui donne",
+           enc is not None and enc[0] <= 5 and enc[2] >= 15,
+           f"{enc}")
+    except ImportError:
+        pass
+
     # ---- LA FUSION DES PASSES -------------------------------------------
     def _m(x0, y0, x1, y1, t, conf=90.0):
         return {"texte": t, "conf": conf, "ligne": ("n", 0, 0, 0),

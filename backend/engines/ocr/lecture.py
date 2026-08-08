@@ -409,14 +409,34 @@ def _boite_encre(img_gris, boite, marge_relative: float = 0.25,
             ey0 = ey1 - hauteur_max      # on garde le BAS, seul repère stable
         else:
             ey0 = max(ey0, y0)
+        # Même garde HORIZONTALE que dans le cas ordinaire : la hauteur de
+        # cette boîte est fausse, sa LARGEUR ne l'est pas — Tesseract sait où
+        # le mot commence et finit. Sans elle, l'encre mordait le voisin.
+        demi = 0.5 * marge
+        ex0 = max(ex0, x0 - demi)
+        ex1 = min(ex1, x1 + demi)
+        if ex1 <= ex0:
+            return None
         return (ex0, ey0, ex1, ey1)
     # La garde : on borne l'encre à la boîte de Tesseract élargie d'une
     # DEMI-marge. Resserrer reste libre ; s'étendre jusqu'à la ligne voisine
     # ne l'est pas.
+    #
+    # ⚠ EN X AUTANT QU'EN Y, et l'oubli coûtait cher. La garde ne bornait que
+    # le vertical : horizontalement l'encre s'étendait librement sur toute la
+    # marge et mordait le mot d'à côté. Mesuré page 2 : Tesseract rend
+    # **32 paires** de mots qui se chevauchent, et notre mesure d'encre en
+    # produisait **109** — elle élargissait au lieu de resserrer.
+    #
+    # C'est l'origine des textes collés qu'on lit dans les blocs
+    # (« permis »+« C » se recouvraient de 4,80 pt, « to »+« MA » de 8,64),
+    # et donc des lignes que le regroupement n'arrivait plus à séparer.
     demi = 0.5 * marge
+    ex0 = max(ex0, x0 - demi)
+    ex1 = min(ex1, x1 + demi)
     ey0 = max(ey0, y0 - demi)
     ey1 = min(ey1, y1 + demi)
-    if ey1 <= ey0:                       # la garde a tout mangé : on renonce
+    if ey1 <= ey0 or ex1 <= ex0:         # la garde a tout mangé : on renonce
         return None
     return (ex0, ey0, ex1, ey1)
 
