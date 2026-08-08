@@ -447,6 +447,51 @@ def run():
        audit.auditer(frole)["comptes"].get("chevauchement") == 1
        and invariants.controler([], frole)["comptes"]["blocs_croises"] == 0)
 
+    # ---- LIGNE PARTAGEE : deux blocs ne peuvent pas se partager une ligne --
+    # Geometries RELEVEES page 3 du Code de la Route : la ligne « 3 mètres et
+    # d'intervalles de » ressort en trois blocs a la meme baseline.
+    def _multi(lignes, txt="p"):
+        ls = [{"bbox": list(b), "text": t,
+               "runs": [{"bbox": list(b), "text": t}]} for b, t in lignes]
+        return {"bbox": [min(b[0] for b, _ in lignes),
+                         min(b[1] for b, _ in lignes),
+                         max(b[2] for b, _ in lignes),
+                         max(b[3] for b, _ in lignes)],
+                "text": txt, "lines": ls}
+
+    dechiree = [
+        _multi([((352.56, 184.08, 437.52, 189.12), "Elles sont composees"),
+                ((361.68, 190.80, 378.24, 194.88), "metres"),
+                ((352.80, 197.52, 378.72, 201.36), "1,33 metre.")], "p"),
+        # `'3'`, le debut de la ligne, expulse a GAUCHE du bloc qui la porte.
+        _multi([((352.32, 191.04, 354.96, 195.12), "3")], "q"),
+    ]
+    r = audit.auditer(dechiree)
+    ok("une LIGNE PARTAGEE entre deux blocs est detectee",
+       r["comptes"].get("ligne_partagee") == 1, str(r["comptes"]))
+
+    # MUTATION la plus importante : deux COLONNES partagent aussi leur bande
+    # verticale. Sans le critere d'ECART, la regle les condamnait toutes --
+    # mesure : 61 « defauts » dont l'immense majorite etaient legitimes.
+    colonnes = [
+        _multi([((40.0, 100.0, 160.0, 105.0), "colonne de gauche")], "g"),
+        _multi([((310.0, 100.0, 430.0, 105.0), "colonne de droite")], "d"),
+    ]
+    ok("MUTATION : deux COLONNES a la meme hauteur ne sont PAS un defaut",
+       audit.auditer(colonnes)["comptes"].get("ligne_partagee") is None)
+
+    # ---- LIGNE AMPUTEE : le FER GAUCHE trahit, pas la longueur -----------
+    ok("une LIGNE AMPUTEE de son debut est detectee",
+       audit.auditer([dechiree[0]])["comptes"].get("ligne_amputee") == 1)
+
+    # MUTATION : une ligne COURTE au fer est normale (fin de phrase, entree
+    # de liste, titre). Juger la longueur signalait 11 blocs corrects sur 17.
+    courte = _multi([((40.0, 100.0, 160.0, 105.0), "une ligne pleine ici"),
+                     ((40.0, 107.0, 160.0, 112.0), "une autre ligne pleine"),
+                     ((40.0, 114.0, 70.0, 119.0), "fin.")], "c")
+    ok("MUTATION : une ligne COURTE mais au fer n'est PAS un defaut",
+       audit.auditer([courte])["comptes"].get("ligne_amputee") is None)
+
     print(f"\n== {_ok}/{_ok + _ko} ==")
     return 0 if _ko == 0 else 1
 

@@ -20,6 +20,34 @@ Trois exigences distinctes, donc trois familles de défauts :
   2. NE PAS SE TOUCHER — il reste un blanc entre eux ;
   3. ÊTRE AJUSTÉ — le cadre colle à l'encre qu'il contient, sans marge morte.
 
+DEUX ANGLES MORTS, SIGNALÉS À L'ŒIL ET AJOUTÉS ENSUITE
+--------------------------------------------------------
+Les trois familles ci-dessus jugent les CADRES, deux à deux. Deux défauts
+réels leur échappaient, tous deux repérés sur une image et non par le compte —
+c'est la troisième fois que cela arrive, et cela vaut d'être écrit.
+
+**4. LIGNE PARTAGÉE.** Mesuré page 3 : la ligne « 3 mètres et d'intervalles
+de » ressort en trois blocs — `'3'` (352,3), `'mètres'` dans #10 (361,7) et
+`"d'intervalles"` (396,0), tous à la même baseline. Aucune règle ne disait que
+**deux blocs ne peuvent pas se partager une ligne de texte**, alors que c'est
+un fait de mise en page et non un réglage : une ligne appartient à un
+paragraphe et à un seul.
+
+C'est le contrôle qui manquait le plus, parce que c'est celui qui remonte à la
+CAUSE. Les chevauchements de cadres en sont la conséquence : le bout de ligne
+expulsé retombe forcément dans le cadre du paragraphe qu'il a quitté.
+
+**5. LIGNE AMPUTÉE.** #10 revendique 352,6 → 437,5, mais sa deuxième ligne ne
+contient que `'mètres'` (361,7 → 378,2). Le cadre est pourtant « ajusté » au
+sens de `cadre_lache`, qui ne regarde que l'enveloppe : il colle bien à l'encre
+de sa PREMIÈRE ligne. Entre les deux il enferme du vide — précisément le vide
+où logent `'3'` et `"d'intervalles"`.
+
+Juger l'enveloppe ne suffit donc pas ; il faut juger LIGNE PAR LIGNE. Mais
+attention à ce qu'on y mesure : la LONGUEUR ne prouve rien (une ligne est
+courte pour vingt raisons légitimes), c'est le FER GAUCHE qui trahit. Voir
+`_FER_DECALE_LIGNE`.
+
 TOLÉRANCE ZÉRO, VRAIMENT
 -------------------------
 `invariants.py` accepte 0,5 pt de recouvrement (pour ne pas rougir sur deux
@@ -50,6 +78,53 @@ _BLANC_MIN_LIGNE = 0.25
 #: il revendique de la place qui n'est pas à lui, et c'est ainsi qu'il finit
 #: par toucher son voisin.
 _MARGE_MORTE_MAX = 0.35
+
+#: Recouvrement vertical à partir duquel deux lignes sont LA MÊME ligne de
+#: texte, en fraction de la plus courte. Ce n'est pas un réglage de
+#: sensibilité : deux lignes successives d'un paragraphe ne se recouvrent
+#: quasiment pas (l'interligne les sépare), tandis que deux morceaux d'une même
+#: ligne se recouvrent presque totalement. Mesuré page 3 : `'3'` et `'mètres'`
+#: se recouvrent à 94 %, deux lignes voisines du même bloc à 0 %.
+_MEME_LIGNE_REC = 0.60
+
+#: Écart horizontal maximal entre deux morceaux d'UNE MÊME ligne, en fraction
+#: de la hauteur de ligne.
+#:
+#: SANS CE SECOND CRITÈRE LA RÈGLE EST FAUSSE, ET C'EST L'ERREUR QUE J'AI
+#: FAITE. Le seul recouvrement vertical attrape aussi toutes les COLONNES : sur
+#: une page à deux colonnes, chaque ligne de gauche partage sa bande avec une
+#: ligne de droite. Mesuré : 61 « défauts » dont l'immense majorité étaient des
+#: colonnes parfaitement légitimes (`'SOMMAIRE' | 'LES AUTRES PERMIS'`).
+#:
+#: Ce qui sépare les deux cas est l'ÉCART, et il ne se recouvre pas :
+#:
+#:     vrais defauts   `'mètres' | '3'`  1,33 x  ·  `"l'appelle"`  1,81 x
+#:     vraies colonnes                   13 x à 55 x
+#:
+#: 4,0 : un blanc de mot vaut ~1 x la hauteur de ligne, une gouttière de
+#: colonne en vaut plus de 10. On se place largement entre les deux.
+_ECART_MEME_LIGNE = 4.0
+
+#: Décalage du FER GAUCHE toléré pour une ligne, en fraction de la hauteur de
+#: ligne.
+#:
+#: C'EST LE FER GAUCHE QUI TRAHIT UN CREUX, PAS LA LONGUEUR — seconde erreur
+#: que j'ai faite ici. Juger la ligne COURTE attrape tout ce qu'un document
+#: contient de légitime : les listes (`'Les voies'` au milieu d'une
+#: énumération), les titres de première ligne, et surtout toute ligne qui
+#: FINIT une phrase (`'des élèves.'`, `'aptitudes des candidats.'`). Mesuré :
+#: 17 signalements, dont 11 parfaitement normaux.
+#:
+#: Une ligne courte commence quand même au FER du paragraphe. Une ligne
+#: AMPUTÉE À GAUCHE, elle, ne le peut pas — il manque son début :
+#:
+#:     amputées   `"l'appelle"` g=16,56  ·  `'mètres'` g=9,12
+#:     normales   fer à g=0,00 à 1,20, toutes lignes de tous les blocs
+#:
+#: 1,5 : au-dessus du bruit de scan (mesuré ≤ 1,2 pt pour hl = 5,04), très en
+#: dessous d'une amputation (≥ 9 pt). Un alinéa de première ligne est plus
+#: grand, mais il ne concerne que la ligne 0 — qu'on exclut pour cela.
+_FER_DECALE_LIGNE = 1.5
 
 
 def _aire(b) -> float:
@@ -101,6 +176,116 @@ def _hauteur_ligne(blocs) -> float:
     return sorted(hs)[len(hs) // 2] if hs else 0.0
 
 
+def _lignes_de(bloc):
+    """Les lignes d'un bloc, avec leur boîte. Ignore celles qui n'en ont pas."""
+    return [l for l in (bloc.get("lines") or []) if l.get("bbox")]
+
+
+def _meme_bande(a, b) -> float:
+    """Part de recouvrement VERTICAL de deux lignes, sur la plus courte.
+
+    C'est le seul critère qui distingue « deux morceaux d'une même ligne » de
+    « deux lignes voisines » sans rien supposer de leur position horizontale :
+    des morceaux côte à côte partagent leur bande, des lignes empilées non.
+    """
+    rec = min(a[3], b[3]) - max(a[1], b[1])
+    court = min(a[3] - a[1], b[3] - b[1])
+    return rec / court if court > 0 and rec > 0 else 0.0
+
+
+def _lignes_partagees(blocs, hl) -> list[dict]:
+    """Les LIGNES de texte revendiquées par deux blocs différents.
+
+    Une ligne appartient à un paragraphe et à un seul. Deux blocs dont une
+    ligne partage la bande verticale — et dont les encres se suivent
+    horizontalement sans qu'un autre bloc s'intercale — sont deux morceaux
+    d'une même ligne déchirée.
+
+    C'est le contrôle qui remonte à la CAUSE : les chevauchements de cadres en
+    découlent, puisque le morceau expulsé retombe dans le cadre qu'il a quitté.
+    """
+    if hl <= 0:
+        return []
+    plafond = _ECART_MEME_LIGNE * hl
+    out = []
+    for i, a in enumerate(blocs):
+        for j in range(i + 1, len(blocs)):
+            b = blocs[j]
+            pire = None
+            for la in _lignes_de(a):
+                for lb in _lignes_de(b):
+                    part = _meme_bande(la["bbox"], lb["bbox"])
+                    if part < _MEME_LIGNE_REC:
+                        continue
+                    # Deux morceaux d'une MÊME ligne sont côte à côte, donc
+                    # disjoints horizontalement. Deux lignes qui se recouvrent
+                    # AUSSI en x sont un autre défaut (chevauchement), déjà
+                    # compté : ne pas le compter deux fois.
+                    ga, gb = la["bbox"], lb["bbox"]
+                    if min(ga[2], gb[2]) - max(ga[0], gb[0]) > 0:
+                        continue
+                    ecart = max(ga[0], gb[0]) - min(ga[2], gb[2])
+                    if ecart > plafond:       # une GOUTTIÈRE, pas un blanc
+                        continue
+                    # On garde le PLUS PETIT écart : c'est le couple le plus
+                    # proche qui décide, pas celui qui se recouvre le mieux.
+                    if pire is None or ecart < pire[1]:
+                        pire = (part, ecart, la, lb)
+            if pire:
+                part, ecart, la, lb = pire
+                out.append({
+                    "type": "ligne_partagee",
+                    "blocs": (i, j),
+                    "mesure": f"{part:.0%} de bande commune, "
+                              f"{ecart:.2f} pt d'ecart "
+                              f"({ecart / hl:.2f} x ligne, max "
+                              f"{_ECART_MEME_LIGNE})",
+                    "texte": (la.get("text") or "")[:30] + " | "
+                             + (lb.get("text") or "")[:30],
+                })
+    return out
+
+
+def _ligne_amputee(bloc, i, hl) -> dict | None:
+    """Une ligne du bloc commence-t-elle APRÈS le fer gauche du paragraphe ?
+
+    `cadre_lache` juge l'ENVELOPPE : il compare le cadre à l'encre totale, et
+    ne peut donc rien dire d'une ligne isolée au milieu. Ici on juge LIGNE PAR
+    LIGNE, et on regarde le FER GAUCHE et lui seul.
+
+    Ce que la longueur ne dit pas : une ligne peut être courte pour vingt
+    raisons légitimes (fin de phrase, entrée de liste, titre). Mais toutes
+    commencent au fer du paragraphe. Une ligne qui démarre en retrait a perdu
+    son début — et ce début est ailleurs, en bloc séparé.
+
+    On exclut la ligne 0 : un alinéa de première ligne est un retrait voulu.
+    """
+    lignes = _lignes_de(bloc)
+    if len(lignes) < 2 or hl <= 0:
+        return None
+    fers = [l["bbox"][0] for l in lignes]
+    # Le fer du paragraphe est le PLUS À GAUCHE : un retrait s'ajoute au fer,
+    # il ne le déplace jamais vers la gauche.
+    fer = min(fers)
+    pire = None
+    for k, lg in enumerate(lignes):
+        if k == 0:                        # alinéa : retrait légitime
+            continue
+        d = lg["bbox"][0] - fer
+        if d > _FER_DECALE_LIGNE * hl and (pire is None or d > pire[0]):
+            pire = (d, k, lg)
+    if not pire:
+        return None
+    d, k, lg = pire
+    return {
+        "type": "ligne_amputee",
+        "blocs": (i,),
+        "mesure": f"ligne {k} commence {d:.2f} pt apres le fer "
+                  f"({d / hl:.2f} x ligne, max {_FER_DECALE_LIGNE})",
+        "texte": (lg.get("text") or "")[:40],
+    }
+
+
 def auditer(blocs) -> dict:
     """Inventaire complet des blocs qui ne respectent pas la consigne.
 
@@ -132,6 +317,11 @@ def auditer(blocs) -> dict:
                               f"({pire / hl:.2f} x ligne)",
                     "texte": (a.get("text") or "")[:40],
                 })
+
+        # ── 5. Une ligne est-elle amputée de son début ? ─────────────────
+        ampute = _ligne_amputee(a, i, hl)
+        if ampute:
+            defauts.append(ampute)
 
         for j in range(i + 1, len(blocs)):
             b = blocs[j]
@@ -172,6 +362,9 @@ def auditer(blocs) -> dict:
                         "texte": (a.get("text") or "")[:30] + " // "
                                  + (b.get("text") or "")[:30],
                     })
+
+    # ── 4. Deux blocs se partagent-ils une LIGNE de texte ? ─────────────
+    defauts.extend(_lignes_partagees(blocs, hl))
 
     comptes: dict = {}
     fautifs: dict = {}
