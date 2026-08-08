@@ -189,21 +189,65 @@ def recoller(lignes, murs=()):
         # On découpe donc la rangée PAR COLONNE ATTESTÉE avant de juger, et on
         # laisse tel quel ce qui n'appartient à aucune.
         restes = list(rangee)
-        for col in cols:
+        # DE LA PLUS ÉTROITE À LA PLUS LARGE, et c'est indispensable.
+        # `cols` sort dans l'ordre où les colonnes ont été rencontrées, qui
+        # n'a aucun sens géométrique. Mesuré page 3 : la rangée « 3 | mètres |
+        # et | d'intervalles | de » (352,3 → 437,5) était jugée contre la
+        # colonne pleine largeur (42,0 → 437,0), qu'elle ne remplit
+        # évidemment pas — puis ses mots étaient consommés, et la colonne
+        # (352,1 → 437,0) qui leur va exactement n'était jamais essayée.
+        #
+        # La plus étroite qui contient les fragments est toujours la bonne :
+        # une colonne large les contient aussi, mais par accident.
+        for col in sorted(cols, key=lambda c: c[1] - c[0]):
             dans = [m for m in restes
                     if m["bbox"][0] >= col[0] - col[2]
                     and m["bbox"][2] <= col[1] + col[2]]
             if len(dans) < 2:
                 continue
+            fusion = _fusionner_si_possible(dans, col, murs, cols)
+            if len(fusion) == len(dans):
+                continue        # refusée : ne PAS consommer les fragments
             restes = [m for m in restes if m not in dans]
-            fusion = _fusionner_si_possible(dans, col, murs)
             out.extend(fusion)
         out.extend(restes)
     out.sort(key=lambda l: (round(l["bbox"][1], 1), l["bbox"][0]))
     return out
 
 
-def _fusionner_si_possible(membres, col, murs):
+def _franchit_une_colonne(membres, col, cols) -> bool:
+    """La fusion enjamberait-elle le FER GAUCHE d'une AUTRE colonne ?
+
+    Le garde-fou qui manquait, et le défaut qu'il ferme est spectaculaire :
+    page 2, la rangée « On | l'appelle | communément | nationale est de 30
+    heures) » mêle trois fragments de la colonne de gauche (39,6 → 124,6) et
+    un fragment de la colonne du milieu, qui commence à 130,8. Fusionnée, elle
+    produisait un bloc chevauchant son voisin sur 178 pt.
+
+    Aucun autre signal ne l'attrapait :
+
+      * il n'y a PAS de gouttière de page entre ces deux colonnes — mesuré,
+        les bandes totalement vides sont ailleurs (219→250, 432→438) ;
+      * l'écart intérieur vaut 3,3 x la largeur de glyphe, et le balayage de
+        `_ECART_MAX_GW` montre que le SERRER DÉGRADE (38 défauts à 2,5 contre
+        23 à 6,0) — il coupe alors de vraies lignes justifiées.
+
+    Ce qui reste est la seule chose qu'on sache vraiment : une AUTRE colonne
+    est attestée, et son fer gauche tombe au milieu de ce qu'on s'apprête à
+    souder. Une ligne n'enjambe pas le début d'une autre colonne.
+    """
+    gx0 = min(m["bbox"][0] for m in membres)
+    gx1 = max(m["bbox"][2] for m in membres)
+    for autre in cols or ():
+        if autre is col:
+            continue
+        fer = autre[0]
+        if gx0 + autre[2] < fer < gx1 - autre[2]:
+            return True
+    return False
+
+
+def _fusionner_si_possible(membres, col, murs, cols=()):
     """Fusionne ces fragments s'ils remplissent la colonne, sinon les rend
     inchangés. Rend TOUJOURS une liste."""
     membres = sorted(membres, key=lambda m: m["bbox"][0])
@@ -225,6 +269,9 @@ def _fusionner_si_possible(membres, col, murs):
     # 3) aucun MUR D'ENCRE ne traverse : seul signal d'une séparation
     #    matérielle (filet de tableau, bord d'image).
     if _mur_entre(gx0, gx1, gy0, gy1, murs):
+        return membres
+    # 4) la fusion n'enjambe pas le FER GAUCHE d'une AUTRE colonne attestée.
+    if _franchit_une_colonne(membres, col, cols):
         return membres
 
     tous = []

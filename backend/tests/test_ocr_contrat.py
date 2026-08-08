@@ -353,6 +353,31 @@ def run():
     ok("MUTATION : un mur d'encre empeche le recollage",
        len(r3) > 3, f"{len(r3)} lignes")
 
+    # GARDE-FOU 4 : une fusion n'ENJAMBE PAS le fer gauche d'une AUTRE
+    # colonne attestee. Geometries RELEVEES page 2 : la rangee « On |
+    # l'appelle | communement » (colonne 39,6 -> 124,6) touchait « nationale
+    # est de 30 heures) », qui appartient a la colonne du milieu (fer 130,8).
+    # Fusionnee, elle produisait un bloc chevauchant son voisin sur 178 pt.
+    #
+    # Ni la gouttiere de page ni l'ecart intérieur ne l'attrapaient : mesure,
+    # aucune bande vide entre ces deux colonnes, et serrer `_ECART_MAX_GW`
+    # DEGRADE (38 defauts a 2,5 contre 23 a 6,0).
+    # On teste le garde-fou DIRECTEMENT, et non a travers `recoller`. Passer
+    # par la chaine complete demanderait de reproduire les colonnes attestees
+    # de la page entiere -- une donnee que le cas isole ne porte pas, et deux
+    # tentatives l'ont montre : le test restait vert garde-fou retire, donc
+    # AVEUGLE. Cf. « un test qui partage la constante est aveugle ».
+    fers = [(39.60, 124.56, 3.11), (130.80, 413.52, 3.46)]
+    gauche = [_frag(40.32, 47.28, 394.6, 399.7, "On", gw=2.4),
+              _frag(89.28, 125.52, 394.6, 399.7, "communement", gw=2.4)]
+    ok("une fusion qui reste DANS sa colonne est autorisee",
+       not justifie._franchit_une_colonne(gauche, fers[0], fers))
+    # Le meme groupe, mais qui deborde sur la colonne du milieu (fer 130,8).
+    a_cheval = gauche + [_frag(133.44, 197.52, 394.6, 399.7, "nationale est de")]
+    ok("MUTATION : une fusion qui ENJAMBE le fer d'une autre colonne est "
+       "refusee",
+       justifie._franchit_une_colonne(a_cheval, fers[0], fers))
+
     # GARDE-FOU 3 : sans colonne attestee (moins de 3 rangees), on ne touche
     # a rien. « Le vide n'est pas une preuve. »
     r4 = justifie.recoller(col[:3])
