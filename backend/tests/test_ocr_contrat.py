@@ -28,6 +28,7 @@ import sys
 import racine  # noqa: F401  -- met backend/ sur le chemin
 
 from engines.ocr import audit                          # noqa: E402
+from engines.ocr import fusion                         # noqa: E402
 from engines.ocr import invariants                     # noqa: E402
 from engines.ocr import justifie                       # noqa: E402
 # `lecture` s'importe SANS Tesseract : ses imports de `pytesseract` sont tous
@@ -434,6 +435,91 @@ def run():
     #
     # Plus dur que les invariants : tolerance ZERO (invariants.py accepte
     # 0,5 pt et n'annonce une inclusion qu'au-dela de 90 %).
+    # ---- LA FUSION DES PARAGRAPHES COUPES -------------------------------
+    # Geometries RELEVEES sur les 3 pages. Sur 15 paires en conflit, 3
+    # seulement sont un paragraphe coupe : les mutations qui suivent gardent
+    # les 12 autres, et ce sont elles qui portent la valeur du test.
+    print("\n-- la fusion des paragraphes coupes --")
+
+    def _par(x0, y0, x1, y1, lignes):
+        ls = [{"bbox": list(bb), "text": t,
+               "runs": [{"bbox": list(bb), "text": t}]} for bb, t in lignes]
+        return {"bbox": [x0, y0, x1, y1], "lines": ls,
+                "text": " ".join(t for _, t in lignes)}
+
+    # CAS REEL page 1 : une seule phrase, coupee en deux blocs qui se
+    # chevauchent. Meme fer gauche (249,1 / 248,9), l'un SOUS l'autre.
+    coupe = [
+        _par(248.88, 541.68, 335.28, 556.80,
+             [((249.12, 541.68, 335.28, 550.08), "Apres deux ans de permis B"),
+              ((248.88, 547.92, 335.28, 556.80), "autorise a conduire une 125")]),
+        _par(248.64, 552.21, 335.28, 578.40,
+             [((248.88, 552.21, 327.84, 562.11), "formation complementaire."),
+              ((248.88, 560.40, 335.28, 564.96), "Si vous desirez conduire"),
+              ((248.64, 573.60, 310.80, 578.40), "devez passer le permis A")]),
+    ]
+    r6 = fusion.fusionner(coupe)
+    ok("un paragraphe coupe en deux est RECOLLE", len(r6) == 1,
+       f"{len(r6)} blocs")
+    ok("...et le texte recolle est dans l'ordre de lecture",
+       "permis B" in (r6[0].get("text") or "")
+       and (r6[0].get("text") or "").index("permis B")
+       < (r6[0].get("text") or "").index("formation"),
+       r6[0].get("text"))
+
+    # MUTATION 1 -- DEUX COLONNES. Le cas le plus dangereux, releve page 3 :
+    # « Le depassement est interdit si... » et « ...est autorise si... » sont
+    # deux legendes OPPOSEES sous deux images. Les souder est un contresens.
+    colonnes2 = [
+        _par(38.40, 608.00, 123.00, 625.00,
+             [((38.40, 608.0, 123.0, 613.0), "Le depassement est interdit si"),
+              ((38.40, 615.0, 123.0, 620.0), "la ligne continue se trouve")]),
+        _par(131.00, 608.00, 217.00, 639.00,
+             [((131.0, 608.0, 217.0, 613.0), "Le depassement est autorise si"),
+              ((131.0, 615.0, 217.0, 620.0), "la ligne discontinue se trouve")]),
+    ]
+    ok("MUTATION : deux COLONNES cote a cote ne sont PAS fusionnees",
+       len(fusion.fusionner(colonnes2)) == 2,
+       " // ".join(x.get("text") or "" for x in fusion.fusionner(colonnes2)))
+
+    # MUTATION 2 -- SOMMAIRE : entree et numero de page, separes par des
+    # points de conduite. Meme bande horizontale, fers differents.
+    sommaire = [
+        _par(310.0, 221.0, 377.0, 225.0,
+             [((310.0, 221.0, 377.0, 225.0), "La nuit et la meteo")]),
+        _par(388.0, 221.0, 427.0, 226.0,
+             [((388.0, 221.0, 427.0, 226.0), "145 a 158")]),
+    ]
+    ok("MUTATION : une entree de sommaire et son numero restent SEPARES",
+       len(fusion.fusionner(sommaire)) == 2)
+
+    # MUTATION 3 -- LA CHAINE. Releve page 2 : l'union de deux blocs AVALE un
+    # troisieme. Sans garde-fou, une liste entiere finirait en un seul bloc.
+    # Le tiers est STRICTEMENT compris dans l'union des deux autres, et lui
+    # meme ne peut pas fusionner (fer decale, il est A COTE). C'est la
+    # configuration relevee page 2 : l'union de 32 et 34 contient 33.
+    # Le tiers est ETROIT et loge dans la zone ou les deux autres se
+    # chevauchent : il est donc STRICTEMENT compris dans leur union, sans
+    # pouvoir fusionner lui-meme (fer decale, largeur sans rapport).
+    chaine = [
+        _par(251.0, 284.0, 355.0, 302.0,
+             [((251.0, 284.0, 355.0, 289.0), "Accidents Les statistiques")]),
+        _par(270.0, 297.0, 290.0, 301.0,
+             [((270.0, 297.0, 290.0, 300.0), "le tiers avale")]),
+        _par(251.0, 300.0, 355.0, 319.0,
+             [((251.0, 300.0, 355.0, 305.0), "pratique et Index 213")]),
+    ]
+    ok("MUTATION : une fusion qui AVALERAIT un tiers est refusee",
+       len(fusion.fusionner(chaine)) == 3,
+       f"{len(fusion.fusionner(chaine))} blocs")
+
+    # Une page SANS le defaut doit ressortir identique -- c'est ce qui rend
+    # l'operation sure.
+    sains = [_par(40, 100, 120, 120, [((40, 100, 120, 105), "un")]),
+             _par(40, 140, 120, 160, [((40, 140, 120, 145), "deux")])]
+    ok("une page sans blocs qui se touchent ressort INCHANGEE",
+       fusion.fusionner(sains) == sains)
+
     print("\n-- l'audit chirurgical --")
 
     def _bl(x0, y0, x1, y1, txt="t", n=1):

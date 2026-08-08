@@ -44,6 +44,7 @@ import os
 import fitz
 
 from engines.ocr import apercu as apercu_debug
+from engines.ocr import fusion
 from engines.ocr import justifie
 from engines.ocr import lecture
 from engines.ocr import tri
@@ -111,6 +112,11 @@ class OCREngine:
         lignes = justifie.recoller(moteur._group_text_lines(spans))
         blocs = moteur._group_paragraphs(lignes)
         retenus, ecartes = tri.trier(blocs)
+        # APRÈS le tri, et c'est délibéré : recoller deux morceaux dont l'un
+        # aurait été écarté comme débris ferait rentrer le débris par la
+        # fenêtre. On ne recolle que ce qui a déjà été jugé digne d'être un
+        # paragraphe.
+        retenus = fusion.fusionner(retenus)
         return {"spans": spans, "lignes": lignes, "blocs": blocs,
                 "retenus": retenus, "ecartes": ecartes,
                 "confiances": RepertoireConfiance(spans)}
