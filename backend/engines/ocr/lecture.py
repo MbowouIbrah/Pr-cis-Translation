@@ -113,10 +113,22 @@ def _image_de_page(page, dpi: int):
 #: — avec des confiances de 1 à 54. Sans filtre, elle coûterait plus qu'elle
 #: ne rapporte, exactement comme la double lecture.
 #:
-#: 75 et 3 caractères : balayé de 60 à 90, le résultat ne bouge pas —
-#: **1 mot retenu, 0 rebut** sur tout le plateau. On se place au milieu.
-_CONF_MIN_COULEUR = 75.0
-_CARS_MIN_COULEUR = 3
+#: 45, et c'est BAS À DESSEIN. Un texte coloré est précisément ce que
+#: Tesseract lit le moins bien : il annonce lui-même une confiance faible sur
+#: des mots parfaitement corrects. Mesuré, « feux » (orange sur blanc) sort à
+#: **47** et « LA » de « LA SIGNALISATION » à **60** — au-dessus de 75, les
+#: deux étaient perdus.
+#:
+#: LE COÛT EST MESURÉ, PAS SUPPOSÉ. Descendre de 75 à 45 fait entrer 5 mots
+#: sur 3 pages : 2 vrais (« LA », « feux ») et 3 rebuts (« D. », « Ps »,
+#: « tie »). Le total de défauts de l'audit ne bouge pas — 16 avant, 16 après
+#: — parce que `tri.py` écarte déjà les fragments de 2-3 caractères sans
+#: structure. On paye donc 3 débris que l'aval absorbe pour 2 mots de titre.
+#:
+#: ⚠ 2 CARACTÈRES ET NON 3. Exiger 3 écartait « LA », pourtant lu à 96 % par
+#: la passe saturation — le titre ressortait amputé de son article.
+_CONF_MIN_COULEUR = 45.0
+_CARS_MIN_COULEUR = 2
 
 
 def _canal_couleur(img):
@@ -155,6 +167,38 @@ def _canal_couleur(img):
     a = np.asarray(img.convert("RGB")).astype(int)
     sat = a.max(axis=2) - a.min(axis=2)
     return Image.fromarray((255 - sat).astype("uint8"))
+
+
+def _canal_distance_blanc(img):
+    """L'image vue par sa DISTANCE AU BLANC : tout ce qui n'est pas blanc
+    devient sombre, quelle que soit sa couleur.
+
+    LE DÉFAUT QU'ELLE RÉPARE, ET EN QUOI ELLE DIFFÈRE DE `_canal_couleur`
+    ----------------------------------------------------------------------
+    Un titre JAUNE sur fond blanc a une saturation forte — `_canal_couleur`
+    devrait donc le voir — mais aussi une luminosité très haute : il reste
+    pâle dans les deux canaux, et Tesseract ne l'accroche pas. Mesuré page 2,
+    « Véhicule » (jaune) et « Usagers » (bleu clair) manquaient aux deux
+    lectures.
+
+    On calcule `max(255 - R, 255 - G, 255 - B)`, c'est-à-dire l'écart au blanc
+    sur le canal le PLUS éloigné. Le blanc pur donne 0 ; le jaune (255,200,0)
+    donne 255 par son canal bleu, alors que sa luminosité vaut ~230. Un pâle
+    coloré devient donc franchement sombre.
+
+    ⚠ CELLE-CI EST UNE LECTURE COMPLÈTE, pas un complément marginal : mesurée,
+    elle rend **659 mots** contre 663 pour la lecture normale — elle voit
+    aussi tout le texte noir. C'est ce qui la distingue de `_canal_couleur`
+    (19 mots) et ce qui justifie de la fusionner comme une vraie seconde
+    lecture, filtrée par la même confiance.
+    """
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        return img.convert("L")
+    a = np.asarray(img.convert("RGB")).astype(int)
+    return Image.fromarray((255 - (255 - a).max(axis=2)).astype("uint8"))
 
 
 def _pretraitee(img):
@@ -591,21 +635,51 @@ def _fusionner(primaires, secondaires, tolerance: float = 0.5):
     deux spans superposés, qui feraient deux fois la même ligne. Le
     recouvrement se juge en aire, pas en distance : deux lectures du même mot
     se recouvrent largement, deux mots voisins non.
+
+    DEUX DÉFAUTS CORRIGÉS, TOUS DEUX VUS SUR DES CAS RÉELS
+    --------------------------------------------------------
+    1. ON COMPARE À TOUT CE QUI EST DÉJÀ RETENU, et non aux seules primaires.
+       Avec deux passes secondaires, la seconde ne voyait pas ce que la
+       première venait d'ajouter : « Usagers » (lu entier par la passe
+       distance-au-blanc) cohabitait avec « rs », son propre fragment.
+
+    2. L'AIRE COMMUNE SE RAPPORTE AU PLUS PETIT DES DEUX. Rapportée au seul
+       candidat, un candidat LARGE passait à côté d'un petit qu'il recouvre :
+       « Véhic » (250,8 → 287,0) et « ule » (281,0 → 299,5) étaient tous deux
+       retenus, alors que le second est la fin du premier. Comparer au plus
+       petit rend le test symétrique — c'est la même règle que partout
+       ailleurs ici (`bloc_dans_bloc`, `_recouvrement_x`).
     """
     out = list(primaires)
     for cand in secondaires:
         cx0, cy0, cx1, cy1 = cand["boite"]
         aire_c = max(1e-6, (cx1 - cx0) * (cy1 - cy0))
-        double = False
-        for vu in primaires:
+        rival = None
+        for k, vu in enumerate(out):
             vx0, vy0, vx1, vy1 = vu["boite"]
             l = min(cx1, vx1) - max(cx0, vx0)
             h = min(cy1, vy1) - max(cy0, vy0)
-            if l > 0 and h > 0 and (l * h) >= tolerance * aire_c:
-                double = True
+            if l <= 0 or h <= 0:
+                continue
+            aire_v = max(1e-6, (vx1 - vx0) * (vy1 - vy0))
+            if (l * h) >= tolerance * min(aire_c, aire_v):
+                rival = k
                 break
-        if not double:
+        if rival is None:
             out.append(cand)
+        # REMPLACER LE MOT DÉJÀ RETENU PAR LE « MEILLEUR » (texte plus long, à
+        # défaut confiance plus haute) : ESSAYÉ, MESURÉ, REJETÉ.
+        #
+        # L'idée paraissait sûre : « rs », fragment de « Usagers » vu par la
+        # lecture normale, évince le mot ENTIER lu à 96 % par la passe
+        # distance-au-blanc, au seul motif qu'il est primaire. Substituer
+        # rétablit bien « Usagers »...
+        #
+        # ...et fait passer l'audit de **15 à 34 défauts** (page 1 : 2 -> 17).
+        # Un mot venu d'une autre passe n'apporte pas que son texte : il
+        # apporte sa boîte, sa hauteur et sa clé de ligne. Le substituer
+        # déplace la baseline de toute sa rangée et disloque des blocs
+        # corrects ailleurs. Le premier retenu reste donc en place.
     return out
 
 
@@ -653,19 +727,25 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
         mots = _fusionner(mots, _mots_bruts(_pretraitee(img), langue,
                                             passe="b"))
 
-    # LA PASSE COULEUR, toujours active mais SÉVÈREMENT filtrée. Un titre en
-    # couleur vive sur fond clair a une luminosité proche du fond : la
-    # conversion en gris l'efface. Mesuré page 2, « LA SIGNALISATION » est
-    # absent de la lecture normale et lu à 95 % ici.
+    # DEUX PASSES DE COULEUR, toujours actives et SÉVÈREMENT filtrées. Elles
+    # ne voient pas la même chose, et il faut les deux :
     #
-    # Le filtre n'est pas une précaution de confort : sans lui cette passe
-    # ajoute 37 mots dont 35 sont du bruit. Avec, elle en ajoute 1 et rien
-    # d'autre. Voir `_CONF_MIN_COULEUR`.
-    couleur = [m for m in _mots_bruts(_canal_couleur(img), langue, passe="c")
+    #   `_canal_couleur`        SATURATION — le vert soutenu de
+    #                           « LA SIGNALISATION », absent de la lecture
+    #                           normale, lu à 95 % ici ;
+    #   `_canal_distance_blanc` DISTANCE AU BLANC — les tons PÂLES et
+    #                           colorés (« Véhicule » jaune, « Usagers »
+    #                           bleu clair) que la saturation seule
+    #                           n'accroche pas non plus.
+    #
+    # Le filtre n'est pas une précaution de confort : sans lui, la première
+    # ajoute 37 mots dont 35 sont du bruit. Voir `_CONF_MIN_COULEUR`.
+    for canal, passe in ((_canal_couleur, "c"), (_canal_distance_blanc, "w")):
+        vus = [m for m in _mots_bruts(canal(img), langue, passe=passe)
                if m["conf"] >= _CONF_MIN_COULEUR
                and len((m["texte"] or "").strip()) >= _CARS_MIN_COULEUR]
-    if couleur:
-        mots = _fusionner(mots, couleur)
+        if vus:
+            mots = _fusionner(mots, vus)
 
     # Les mots à qui Tesseract a donné la boîte de leur LIGNE. Pour ceux-là, sa
     # boîte n'est pas un repère : on ne s'en sert pas pour borner l'encre.

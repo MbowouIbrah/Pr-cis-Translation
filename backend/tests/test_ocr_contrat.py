@@ -630,6 +630,49 @@ def run():
     except ImportError:
         pass
 
+    # ---- LA FUSION DES PASSES -------------------------------------------
+    def _m(x0, y0, x1, y1, t, conf=90.0):
+        return {"texte": t, "conf": conf, "ligne": ("n", 0, 0, 0),
+                "boite": (x0, y0, x1, y1)}
+
+    # Un candidat qui recouvre un mot deja retenu ne doit pas s'ajouter.
+    base = [_m(100, 100, 160, 120, "Usagers")]
+    ok("un doublon evident n'est PAS ajoute",
+       len(lecture._fusionner(base, [_m(102, 101, 158, 119, "Usagers")])) == 1)
+    ok("un mot AILLEURS est bien ajoute",
+       len(lecture._fusionner(base, [_m(300, 100, 360, 120, "Vehicule")])) == 2)
+
+    # L'aire commune se rapporte au PLUS PETIT des deux. Rapportee au seul
+    # candidat, un candidat LARGE passait a cote d'un petit qu'il recouvre
+    # presque entierement -- il suffisait qu'il soit assez grand pour que le
+    # rapport tombe sous la tolerance.
+    # Le sens qui DISCRIMINE : c'est le GRAND qui est candidat. L'aire commune
+    # vaut 100 % du petit mais seulement 29 % du grand -- rapportee au seul
+    # candidat, elle passe sous la tolerance et le doublon s'ajoute.
+    deja_vu = [_m(280.0, 262.0, 298.0, 278.0, "ule")]
+    candidat = [_m(250.0, 260.0, 300.0, 280.0, "Vehicule")]
+    ok("un grand mot qui ENGLOBE un fragment deja vu est un doublon",
+       len(lecture._fusionner(deja_vu, candidat)) == 1,
+       f"{len(lecture._fusionner(deja_vu, candidat))} mots")
+    # MUTATION : deux fragments COTE A COTE qui se frolent ne sont PAS des
+    # doublons. Mesure sur le cas reel « Vehic » / « ule » : 32 % de
+    # recouvrement seulement -- les garder tous les deux est le bon choix,
+    # sinon on perdrait la fin du mot.
+    a_cote = [_m(281.0, 262.0, 299.5, 272.6, "ule")]
+    ok("MUTATION : deux fragments qui se FROLENT sont tous deux gardes",
+       len(lecture._fusionner([_m(250.8, 261.4, 287.0, 279.4, "Vehic")],
+                              a_cote)) == 2)
+
+    # On compare a TOUT ce qui est deja retenu, y compris aux mots AJOUTES
+    # pendant cet appel -- pas aux seules primaires. Le cas discriminant tient
+    # en un seul appel : deux candidats identiques, dont le second doit etre
+    # rejete a cause du PREMIER, qui n'etait pas primaire.
+    jumeaux = [_m(100, 100, 160, 120, "Usagers"),
+               _m(102, 101, 158, 119, "Usagers")]
+    ok("deux candidats identiques ne s'ajoutent pas deux fois",
+       len(lecture._fusionner([], jumeaux)) == 1,
+       f"{len(lecture._fusionner([], jumeaux))} mots")
+
     # LA CLE DE LIGNE PORTE SA PASSE. Tesseract numerote `block/par/line` PAR
     # APPEL : la ligne (21,1,1) de la passe couleur n'a rien a voir avec la
     # (21,1,1) de la passe normale. Sans distinction, l'alignement leur donne
