@@ -517,6 +517,26 @@ def run():
     ok("MUTATION : une ligne COURTE mais au fer n'est PAS un defaut",
        audit.auditer([courte])["comptes"].get("ligne_amputee") is None)
 
+    # ---- L'INTERLIGNE, RELEVE ET NON CHOISI -----------------------------
+    # Une page synthetique dont on CONNAIT l'interligne : 5 lignes posees
+    # tous les 16 pt, mots de 11 pt de haut.
+    faux = [{"boite": (50 + 40 * j, 100 + 16 * i, 80 + 40 * j, 111 + 16 * i)}
+            for i in range(5) for j in range(3)]
+    ok("l'interligne mesure est celui de la page (16 pt)",
+       abs(lecture._interligne(faux) - 16.0) < 1e-6,
+       f"{lecture._interligne(faux)}")
+    # MUTATION : des mots tous sur la MEME ligne n'ont pas d'interligne, et
+    # rendre leur hauteur serait pire que rendre zero -- l'appelant
+    # n'applique alors aucun plafond.
+    ok("MUTATION : sans plusieurs lignes, l'interligne est nul (aucun plafond)",
+       lecture._interligne([{"boite": (50, 100, 80, 111)}] * 4) == 0.0)
+    # Le plafond garde le BAS : c'est le repere stable, le haut porte la
+    # barre, la hampe, ou l'encre de la ligne du dessus.
+    import inspect                                        # noqa: E402
+    ok("le plafond de hauteur conserve le BAS de l'encre",
+       "on garde le BAS" in inspect.getsource(lecture._boite_encre),
+       "le plafond ne dit plus quel bord il conserve")
+
     # ---- L'APERCU ET L'AUDIT PARLENT DE LA MEME GEOMETRIE ----------------
     # Le defaut qui a coute le plus cher a comprendre : l'apercu dessinait
     # chaque cadre 1 pt PLUS GRAND que le bloc. Deux blocs separes de 1,5 pt

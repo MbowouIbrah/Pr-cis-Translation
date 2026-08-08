@@ -349,6 +349,10 @@ def _boites_de_ligne(mots, tolerance: float = 0.15) -> set[int]:
     """
     suspects: set[int] = set()
     par_cle: dict[tuple, list[int]] = {}
+    par_bas: dict[tuple, list[int]] = {}
+    hauteurs = sorted(m["boite"][3] - m["boite"][1] for m in mots
+                      if m["boite"][3] > m["boite"][1])
+    med = hauteurs[len(hauteurs) // 2] if hauteurs else 0.0
     for i, m in enumerate(mots):
         _, y0, _, y1 = m["boite"]
         h = y1 - y0
@@ -358,10 +362,110 @@ def _boites_de_ligne(mots, tolerance: float = 0.15) -> set[int]:
         # dans la même case sans exiger l'égalité stricte des flottants.
         pas = max(1.0, tolerance * h)
         par_cle.setdefault((round(y0 / pas), round(y1 / pas)), []).append(i)
+        # LE BORD BAS SEUL SUFFIT QUAND LA BOÎTE EST TROP HAUTE, et c'est le
+        # cas que la règle des DEUX bords laissait passer. Mesuré page 1 sur
+        # le texte BARRÉ « Après deux ans de permis B, vous êtes / autorisé à
+        # conduire une 125 avec une » :
+        #
+        #     bas partagé  550,08 · 550,08 · 550,08 · 550,08   (identique)
+        #     haut         541,68 · 541,92 · 542,64 · 542,88   (variable)
+        #
+        # La barre traverse la ligne : Tesseract l'inclut et gonfle la boîte
+        # VERS LE HAUT, de façon inégale selon les glyphes rencontrés. Le bas,
+        # lui, reste posé sur la ligne — c'est le repère qui tient, et c'est
+        # déjà la leçon retenue pour les baselines.
+        #
+        # On n'accepte ce signal affaibli QUE pour les boîtes manifestement
+        # trop hautes (> 1,5 x la médiane) : sinon trois mots ordinaires sans
+        # jambage, alignés sur leur ligne, seraient tous suspects.
+        if med > 0 and h > 1.5 * med:
+            par_bas.setdefault((round(y1 / pas),), []).append(i)
     for idx in par_cle.values():
         if len(idx) >= 3:
             suspects.update(idx)
+    for idx in par_bas.values():
+        if len(idx) >= 3:
+            suspects.update(idx)
     return suspects
+
+
+def _paires_trop_hautes(mots, interligne: float,
+                        tolerance: float = 0.15) -> set[int]:
+    """Les PAIRES de mots qui portent la boîte de leur ligne.
+
+    `_boites_de_ligne` exige trois mots partageant leurs bords, et cette
+    exigence est juste : deux mots voisins sans hampe ni jambage (« du » et
+    « la ») les partagent légitimement, et les marquer suspects abîmerait des
+    mesures correctes.
+
+    Mais un second fait lève l'ambiguïté sans rien supposer : une boîte plus
+    haute que l'INTERLIGNE ne peut pas être celle d'un mot, parce qu'elle
+    empiéterait sur la ligne voisine. Deux mots aux bords identiques ET plus
+    hauts que l'interligne portent donc la boîte de leur ligne — la condition
+    est plus forte que celle des trois mots, pas plus faible.
+
+    Mesuré page 1 : `'pratique'` et `'complémentaire.'`, 9,90 pt pour un
+    interligne de 6,3. Jamais marqués faute d'un troisième mot, et à eux seuls
+    la cause du chevauchement de 86,40 x 4,59 pt entre les blocs 18 et 20.
+
+    ⚠ IMPASSE MESURÉE — CETTE FONCTION N'EST PAS APPELÉE.
+    Le raisonnement ci-dessus est juste sur le cas qui l'a inspiré et FAUX en
+    général : page 1 passe de 4 à 6 défauts, total 17 -> 19. Deux mots aux
+    bords identiques restent trop peu — même plus hauts que l'interligne, ils
+    se produisent par hasard sur une page dense, et les rectifier décale des
+    baselines correctes.
+
+    Conservée ici avec sa mesure, pour ne pas la refaire. Cf. la règle
+    « tout correctif se prouve sur du synthétique, et on écrit les impasses ».
+    """
+    if interligne <= 0:
+        return set()
+    par_cle: dict[tuple, list[int]] = {}
+    for i, m in enumerate(mots):
+        _, y0, _, y1 = m["boite"]
+        h = y1 - y0
+        if h <= interligne:
+            continue
+        pas = max(1.0, tolerance * h)
+        par_cle.setdefault((round(y0 / pas), round(y1 / pas)), []).append(i)
+    out: set[int] = set()
+    for idx in par_cle.values():
+        if len(idx) >= 2:
+            out.update(idx)
+    return out
+
+
+def _interligne(mots) -> float:
+    """L'écart médian entre deux lignes d'écriture consécutives, en pixels.
+
+    RELEVÉ SUR LA PAGE, JAMAIS CHOISI. C'est ce qui en fait un repère et non
+    un réglage : l'interligne est une propriété du document qu'on lit, pas une
+    valeur qu'on ajuste jusqu'à ce que le résultat plaise.
+
+    On mesure sur le BAS des boîtes, pour la raison déjà retenue partout
+    ici : le bas repose sur la ligne d'écriture, le haut dépend des glyphes
+    rencontrés (et, sur du texte barré, de la barre elle-même).
+
+    Médiane et non moyenne : une page mêle du corps de texte et des titres,
+    et quelques grands écarts de titre ne doivent pas déplacer le repère du
+    corps courant.
+
+    Rend 0,0 si la page n'a pas assez de lignes pour conclure — l'appelant
+    n'applique alors aucun plafond, ce qui est le comportement d'avant.
+    """
+    bas = sorted({round(m["boite"][3], 1) for m in mots})
+    if len(bas) < 3:
+        return 0.0
+    # On ne retient que les écarts PLAUSIBLES pour un interligne. Deux mots de
+    # la même ligne donnent un écart quasi nul (bruit de mesure), deux blocs
+    # éloignés un écart énorme : ni l'un ni l'autre n'est un interligne.
+    hauteurs = sorted(m["boite"][3] - m["boite"][1] for m in mots)
+    med_h = hauteurs[len(hauteurs) // 2] if hauteurs else 0.0
+    if med_h <= 0:
+        return 0.0
+    ecarts = sorted(b - a for a, b in zip(bas, bas[1:])
+                    if 0.5 * med_h < b - a < 5.0 * med_h)
+    return float(ecarts[len(ecarts) // 2]) if ecarts else 0.0
 
 
 def _fusionner(primaires, secondaires, tolerance: float = 0.5):
@@ -447,6 +551,27 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
     # 2,2 x la médiane : assez pour un mot à hampe ET jambage (« Jg »), qui
     # dépasse largement un mot moyen, mais moins que deux lignes.
     plafond = 2.2 * med_h if med_h > 0 else 0.0
+    # ...MAIS JAMAIS PLUS QUE L'INTERLIGNE DE LA PAGE, et c'est le plafond qui
+    # mord vraiment. Un mot plus haut que l'interligne empiète sur la ligne
+    # voisine PAR CONSTRUCTION : ce n'est pas une question de réglage, c'est
+    # une impossibilité géométrique.
+    #
+    # Le défaut, mesuré page 1 sur le texte BARRÉ « Après deux ans de permis
+    # B... » : la barre traverse la ligne, la mesure d'encre l'attrape et
+    # remonte jusqu'à la ligne du dessus. Trois lignes de 8,4 / 9,0 / 9,9 pt
+    # pour un interligne de 6,3 -> leurs boîtes se recouvrent, et les blocs
+    # héritent du recouvrement (86,40 x 4,59 pt, mesure de l'audit).
+    #
+    # `_interligne` est relevé sur la page elle-même, pas choisi : c'est
+    # l'écart médian entre bas d'encre consécutifs. Mesuré 5,10 / 4,80 / 5,20
+    # sur les 3 pages, et 13 % des mots le dépassaient.
+    inter = _interligne(mots)
+    if inter > 0:
+        plafond = min(plafond, inter) if plafond > 0 else inter
+    # ABAISSER À DEUX MOTS LE SEUIL DE `_boites_de_ligne` (quand la boîte
+    # dépasse l'interligne) : ESSAYÉ, MESURÉ, REJETÉ — voir
+    # `_paires_trop_hautes`, conservée et documentée mais NON APPELÉE.
+    # Mesuré : page 1 passe de 4 à 6 défauts, total 17 -> 19.
 
     spans = []
     for i, m in enumerate(mots):
@@ -457,6 +582,15 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
         x0, y0, x1, y1 = (v / echelle for v in encre)
         if x1 <= x0 or y1 <= y0:
             continue
+        # PLAFONNER **TOUS** LES MOTS À L'INTERLIGNE : ESSAYÉ, MESURÉ, REJETÉ.
+        #
+        # L'argument semblait imparable — un mot plus haut que l'interligne
+        # empiète sur la ligne voisine par construction. Il est faux dans un
+        # cas fréquent : une capitale suivie d'un jambage (« Jg », « À »)
+        # occupe légitimement plus que l'interligne, et la raboter décale sa
+        # baseline. Mesuré : 17 -> 20 défauts, et `bloc_dans_bloc` reparaît
+        # (0 -> 2). Le plafond reste donc réservé aux boîtes de LIGNE, où l'on
+        # sait que la hauteur est fausse.
         s = span_depuis_mot(m["texte"], (x0, y0, x1, y1),
                             confiance=m["conf"])
         s["_ligne_ocr"] = m.get("ligne")
