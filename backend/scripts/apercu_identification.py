@@ -91,7 +91,8 @@ def main():
             blocs = mise_en_page._group_paragraphs(lignes)
             # Aucun tri a cette etape : on montre la detection BRUTE.
             compte = apercu_debug.dessiner(page, blocs, [], lignes,
-                                           montrer_lignes=not args.sans_lignes)
+                                           montrer_lignes=not args.sans_lignes,
+                                           mise_en_page=mise_en_page)
             apercu_debug.legende(page)
             rep = RepertoireConfiance(spans)
             confs = rep.confiances_du_bloc(blocs[0]) if blocs else []

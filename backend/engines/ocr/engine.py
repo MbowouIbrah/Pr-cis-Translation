@@ -140,7 +140,8 @@ class OCREngine:
                 vu = self.analyser_page(page, double_lecture=double_lecture)
                 compte = apercu_debug.dessiner(
                     page, vu["retenus"], vu["ecartes"], vu["lignes"],
-                    montrer_lignes=montrer_lignes)
+                    montrer_lignes=montrer_lignes,
+                    mise_en_page=self.mise_en_page)
                 apercu_debug.legende(page)
                 compte["page"] = i + 1
                 compte["mots"] = len(vu["spans"])

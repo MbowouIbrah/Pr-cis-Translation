@@ -46,6 +46,52 @@ def _cadre(page, bbox, couleur, epaisseur=0.5, marge=0.0):
     page.draw_rect(r, color=couleur, width=epaisseur)
 
 
+def _lignes_du_bloc(bloc):
+    """Les boîtes des lignes d'un paragraphe, dans l'ordre de lecture."""
+    out = []
+    for ligne in (bloc.get("lines") or []):
+        bb = ligne.get("bbox")
+        if bb and len(bb) >= 4 and bb[2] > bb[0] and bb[3] > bb[1]:
+            out.append(list(bb[:4]))
+    return out
+
+
+def _contour(page, bloc, couleur, epaisseur, mise_en_page=None):
+    """Le contour du paragraphe, EN ESCALIER plutôt qu'en rectangle.
+
+    POURQUOI L'ESCALIER
+    --------------------
+    Un rectangle englobant revendique du vide : la dernière ligne d'un
+    paragraphe est presque toujours plus courte que les autres, et le cadre
+    couvre pourtant la largeur entière. À l'écran, deux paragraphes voisins
+    semblent alors se toucher là où leur ENCRE ne se touche pas — c'est
+    précisément la confusion signalée sur l'aperçu.
+
+    Le contour en escalier passe par les sommets de chaque ligne : il épouse
+    l'étendue réelle du texte, exactement comme le fait le moteur PDF pour ses
+    conteneurs élargis.
+
+    ON RÉUTILISE `_draw_stair_outline` DU MOTEUR PDF, on ne le recopie pas.
+    Il gère déjà la frontière au milieu de l'écart entre deux lignes, sans
+    quoi le tracé se recouvre et s'auto-intersecte. Le dupliquer donnerait
+    deux implémentations qui divergent — c'est la règle du moteur-bibliothèque.
+
+    Repli sur le rectangle si le bloc n'a pas de lignes exploitables : mieux
+    vaut un cadre grossier que pas de cadre.
+    """
+    lignes = _lignes_du_bloc(bloc)
+    if mise_en_page is not None and len(lignes) >= 2:
+        try:
+            mise_en_page._draw_stair_outline(page, lignes, couleur,
+                                             width=epaisseur)
+            return
+        except Exception:
+            pass                      # repli : le rectangle vaut mieux que rien
+    bb = bloc.get("bbox")
+    if bb:
+        _cadre(page, bb, couleur, epaisseur=epaisseur)
+
+
 def _etiquette(page, bbox, texte, couleur):
     """Un petit numéro au coin du bloc, posé SUR un fond plein.
 
@@ -60,8 +106,14 @@ def _etiquette(page, bbox, texte, couleur):
                      fontname="helv", color=(1, 1, 1))
 
 
-def dessiner(page, retenus=(), ecartes=(), lignes=(), montrer_lignes=True):
-    """Dessine la détection sur la page. Rend le compte de ce qui a été posé."""
+def dessiner(page, retenus=(), ecartes=(), lignes=(), montrer_lignes=True,
+             mise_en_page=None):
+    """Dessine la détection sur la page. Rend le compte de ce qui a été posé.
+
+    `mise_en_page` est le moteur PDF, prêté pour tracer les contours en
+    ESCALIER. Absent, on retombe sur des rectangles — l'aperçu reste lisible,
+    il est seulement moins précis.
+    """
     if montrer_lignes:
         for ln in lignes or ():
             bb = ln.get("bbox")
@@ -84,13 +136,13 @@ def dessiner(page, retenus=(), ecartes=(), lignes=(), montrer_lignes=True):
     for i, bloc in enumerate(ecartes or (), 1):
         bb = bloc.get("bbox")
         if bb:
-            _cadre(page, bb, _ECARTE, epaisseur=0.5)
+            _contour(page, bloc, _ECARTE, 0.5, mise_en_page)
             _etiquette(page, bb, f"x{i}", _ECARTE)
 
     for i, bloc in enumerate(retenus or (), 1):
         bb = bloc.get("bbox")
         if bb:
-            _cadre(page, bb, _RETENU, epaisseur=0.7)
+            _contour(page, bloc, _RETENU, 0.7, mise_en_page)
             _etiquette(page, bb, str(i), _RETENU)
 
     return {"retenus": len(retenus or ()), "ecartes": len(ecartes or ()),

@@ -791,9 +791,69 @@ def run():
     # verifie l'ACCORD entre l'epaisseur declaree par l'audit et celle que
     # l'apercu dessine reellement -- deux valeurs qui derivent en silence
     # rouvrent exactement le defaut qu'on vient de fermer.
-    ok("l'epaisseur du trait connue de l'audit est celle que l'apercu dessine",
-       f"epaisseur={audit._TRAIT}" in src,
-       f"audit._TRAIT={audit._TRAIT}, apercu dessine autre chose")
+    # On DESSINE vraiment et on relit le trait pose, plutot que de chercher
+    # une chaine dans le code source : la premiere version cherchait
+    # « epaisseur=0.7 » et rougissait des que l'appel changeait de forme,
+    # alors que l'epaisseur, elle, n'avait pas bouge.
+    try:
+        import fitz as _fitz                              # noqa: E402
+        doc = _fitz.open()
+        pg = doc.new_page(width=200, height=100)
+        apercu.dessiner(pg, [_bl(20, 20, 120, 40, "x")], [], [],
+                        montrer_lignes=False)
+        traits = {round(d.get("width") or 0, 3) for d in pg.get_drawings()}
+        doc.close()
+        ok("l'epaisseur du trait connue de l'audit est celle que l'apercu pose",
+           audit._TRAIT in traits,
+           f"audit._TRAIT={audit._TRAIT}, apercu pose {sorted(traits)}")
+    except ImportError:
+        pass
+    # ---- LE CONTOUR EN ESCALIER -----------------------------------------
+    # Un rectangle englobant revendique du VIDE : la derniere ligne d'un
+    # paragraphe est presque toujours plus courte, et le cadre couvre pourtant
+    # la largeur entiere. Deux paragraphes voisins semblent alors se toucher
+    # la ou leur ENCRE ne se touche pas.
+    try:
+        import fitz as _fitz                              # noqa: E402
+        escalier = {"bbox": [20, 20, 160, 50], "text": "p", "lines": [
+            {"bbox": [20, 20, 160, 30], "text": "ligne pleine",
+             "runs": [{"bbox": [20, 20, 160, 30], "text": "ligne pleine"}]},
+            {"bbox": [20, 35, 60, 45], "text": "fin.",
+             "runs": [{"bbox": [20, 35, 60, 45], "text": "fin."}]}]}
+        doc = _fitz.open()
+        pg = doc.new_page(width=200, height=100)
+        apercu.dessiner(pg, [escalier], [], [], montrer_lignes=False,
+                        mise_en_page=moteur)
+        # Le trace ne doit PAS couvrir le coin bas-DROIT : la 2e ligne
+        # s'arrete a x=60, l'escalier s'y retracte, le rectangle non. On juge
+        # sur la meme mesure que le repli ci-dessous, pour que les deux tests
+        # soient comparables -- et parce qu'une premiere version qui cherchait
+        # des sommets `Point` ne trouvait rien dans AUCUN des deux cas, donc
+        # restait verte escalier desactive.
+        couvre_tout = [d for d in pg.get_drawings()
+                       if d.get("rect") and d["rect"].x1 >= 159
+                       and d["rect"].y1 >= 49]
+        doc.close()
+        ok("le contour EPOUSE la ligne courte (escalier, pas rectangle)",
+           not couvre_tout,
+           f"{len(couvre_tout)} traces couvrent toute la bbox")
+
+        # MUTATION : sans moteur prete, on retombe sur le RECTANGLE englobant
+        # -- l'apercu reste lisible, il est seulement moins precis. Le repli
+        # produit un item `re` (et non une polyligne de `Point`), qui couvre
+        # toute la bbox, ligne courte comprise.
+        doc2 = _fitz.open()
+        pg2 = doc2.new_page(width=200, height=100)
+        apercu.dessiner(pg2, [escalier], [], [], montrer_lignes=False)
+        couvre = [d for d in pg2.get_drawings()
+                  if d.get("rect") and d["rect"].x1 >= 159
+                  and d["rect"].y1 >= 49]
+        doc2.close()
+        ok("MUTATION : sans moteur prete, le repli RECTANGLE dessine quand meme",
+           bool(couvre))
+    except ImportError:
+        pass
+
     colles = [_bl(0, 0, 100, 10, "a"), _bl(0, 10.5, 100, 20, "b")]
     ok("MUTATION : deux cadres a 0,5 pt (leurs TRAITS se touchent) sont "
        "un defaut",
