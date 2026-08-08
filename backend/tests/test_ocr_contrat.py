@@ -27,6 +27,7 @@ import sys
 
 import racine  # noqa: F401  -- met backend/ sur le chemin
 
+from engines.ocr import audit                          # noqa: E402
 from engines.ocr import invariants                     # noqa: E402
 from engines.ocr import justifie                       # noqa: E402
 # `lecture` s'importe SANS Tesseract : ses imports de `pytesseract` sont tous
@@ -400,6 +401,51 @@ def run():
        f"{corps[-1]['size']:.2f} au lieu de {lecture._CORPS_MAX_MEDIANE * med:.2f}")
     ok("un corps normal n'est PAS touche",
        abs(corps[0]["size"] - 4.0) < 1e-6, f"{corps[0]['size']:.2f}")
+
+    # ── 8. L'audit CHIRURGICAL ───────────────────────────────────────────
+    # Regle demandee : « chaque bloc doit delimiter au millimetre pres
+    # uniquement le paragraphe concerne, sans empieter ni toucher un autre
+    # bloc, ni etre inscrit dans un paragraphe ».
+    #
+    # Plus dur que les invariants : tolerance ZERO (invariants.py accepte
+    # 0,5 pt et n'annonce une inclusion qu'au-dela de 90 %).
+    print("\n-- l'audit chirurgical --")
+
+    def _bl(x0, y0, x1, y1, txt="t", n=1):
+        ln = {"bbox": [x0, y0, x1, y1],
+              "runs": [{"bbox": [x0, y0, x1, y1], "text": txt}]}
+        return {"bbox": [x0, y0, x1, y1], "text": txt, "lines": [ln] * n}
+
+    r = audit.auditer([_bl(0, 0, 100, 10, "a"), _bl(0, 20, 100, 30, "b")])
+    ok("deux blocs bien SEPARES sont conformes", r["conforme"], str(r["comptes"]))
+
+    r = audit.auditer([_bl(0, 0, 100, 20, "a"), _bl(0, 15, 100, 35, "b")])
+    ok("un CHEVAUCHEMENT est detecte", r["comptes"].get("chevauchement") == 1)
+
+    r = audit.auditer([_bl(0, 0, 100, 100, "g"), _bl(10, 10, 20, 20, "p")])
+    ok("un bloc INSCRIT dans un autre est detecte",
+       r["comptes"].get("bloc_dans_bloc") == 1)
+
+    r = audit.auditer([_bl(0, 0, 100, 10, "a"), _bl(0, 11, 100, 21, "b")])
+    ok("deux blocs qui se TOUCHENT (0,1 x ligne) sont detectes",
+       r["comptes"].get("blocs_colles") == 1)
+
+    # Le cadre doit coller a son encre : un cadre qui revendique du vide
+    # finira par toucher son voisin.
+    lache = {"bbox": [0, 0, 100, 40], "text": "x",
+             "lines": [{"bbox": [0, 0, 100, 10],
+                        "runs": [{"bbox": [0, 0, 100, 10], "text": "x"}]}]}
+    r = audit.auditer([lache])
+    ok("un cadre LACHE (vide sous l'encre) est detecte",
+       r["comptes"].get("cadre_lache") == 1, str(r["comptes"]))
+
+    # MUTATION : la tolerance ZERO doit attraper ce que les invariants
+    # laissent passer -- 0,4 pt de recouvrement, sous leur seuil de 0,5.
+    frole = [_bl(0, 0, 100, 10, "a"), _bl(0, 9.6, 100, 20, "b")]
+    ok("MUTATION : un recouvrement de 0,4 pt (invisible pour les invariants) "
+       "est bien un defaut ici",
+       audit.auditer(frole)["comptes"].get("chevauchement") == 1
+       and invariants.controler([], frole)["comptes"]["blocs_croises"] == 0)
 
     print(f"\n== {_ok}/{_ok + _ko} ==")
     return 0 if _ko == 0 else 1
