@@ -591,6 +591,52 @@ def run():
     ok("MUTATION : deux COLONNES a la meme hauteur ne sont PAS un defaut",
        audit.auditer(colonnes)["comptes"].get("ligne_partagee") is None)
 
+    # LE SEUIL D'ECART S'EST PERIME, LE GARDE-FOU SANS SEUIL PREND LE RELAIS.
+    #
+    # `_ECART_MEME_LIGNE = 4.0` avait ete calibre sur des gouttieres mesurees
+    # a 13-55 x la hauteur de ligne. Les correctifs suivants (alignement des
+    # lignes OCR, bridage des corps, recollage justifie) ont RESSERRE la
+    # geometrie : les memes gouttieres sont retombees a 0,5-2,6 x, donc SOUS
+    # le seuil, et 9 colonnes legitimes etaient accusees (mesure du 08/08,
+    # 3 pages du Code de la Route : 17 defauts dont 9 faux).
+    #
+    # Le garde-fou qui decide desormais ne se regle pas : deux blocs dont les
+    # CADRES SONT DISJOINTS ne peuvent pas se dechirer une ligne. Les trois
+    # cas ci-dessous passent tous SOUS l'ancien seuil -- ils echouent donc si
+    # on retire le garde-fou, ce qui est exactement ce qu'un test doit faire.
+    def _col(x0, x1, n, etiq):
+        return _multi([((x0, 10.0 + i * 8.0, x1, 15.0 + i * 8.0),
+                        f"{etiq}{i}") for i in range(n)], etiq)
+
+    serrees = [_col(40.0, 140.0, 6, "g"), _col(142.0, 250.0, 6, "d")]
+    ok("MUTATION : colonnes a gouttiere SERREE (2 pt, sous l'ancien seuil) "
+       "ne sont PAS un defaut",
+       audit.auditer(serrees)["comptes"].get("ligne_partagee") is None,
+       str(audit.auditer(serrees)["comptes"]))
+
+    # Le cas reel « Usagers | Le conducteur » : un titre court en regard
+    # d'une colonne longue. C'est lui qui condamne le discriminant par
+    # APPARIEMENT des lignes (0,33 rapporte au bloc le plus long).
+    inegales = [_col(40.0, 140.0, 6, "g"), _col(149.0, 250.0, 2, "d")]
+    ok("MUTATION : colonnes de hauteurs INEGALES ne sont PAS un defaut",
+       audit.auditer(inegales)["comptes"].get("ligne_partagee") is None,
+       str(audit.auditer(inegales)["comptes"]))
+
+    # ET LE GARDE-FOU NE DOIT PAS TOUT ETEINDRE. Une ligne dechiree laisse
+    # forcement une trace dans les cadres : le morceau expulse retombe dans
+    # l'emprise du bloc qu'il a quitte. Ici la ligne 2 s'arrete a x=120 (elle
+    # a perdu sa fin) et le morceau 130..190 la PROLONGE -- il ne la recouvre
+    # pas, sans quoi ce serait un `chevauchement`, deja compte ailleurs.
+    corps = _multi([((40.0, 10.0, 200.0, 15.0), "l0"),
+                    ((40.0, 18.0, 200.0, 23.0), "l1"),
+                    ((40.0, 26.0, 120.0, 31.0), "debut"),
+                    ((40.0, 34.0, 200.0, 39.0), "l3"),
+                    ((40.0, 42.0, 200.0, 47.0), "l4")], "corps")
+    bout = _multi([((130.0, 26.0, 190.0, 31.0), "fin arrachee")], "bout")
+    ok("MUTATION : le garde-fou n'eteint PAS la vraie ligne dechiree",
+       audit.auditer([corps, bout])["comptes"].get("ligne_partagee") == 1,
+       str(audit.auditer([corps, bout])["comptes"]))
+
     # ---- LIGNE AMPUTEE : le FER GAUCHE trahit, pas la longueur -----------
     ok("une LIGNE AMPUTEE de son debut est detectee",
        audit.auditer([dechiree[0]])["comptes"].get("ligne_amputee") == 1)

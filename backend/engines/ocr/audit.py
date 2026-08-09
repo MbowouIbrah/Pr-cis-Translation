@@ -103,6 +103,17 @@ _MEME_LIGNE_REC = 0.60
 #:
 #: 4,0 : un blanc de mot vaut ~1 x la hauteur de ligne, une gouttière de
 #: colonne en vaut plus de 10. On se place largement entre les deux.
+#:
+#: ⚠ CE SEUIL S'EST PÉRIMÉ, ET C'EST LA LEÇON DE LA MESURE DU 08/08.
+#: Les correctifs suivants (alignement des lignes OCR, bridage des corps,
+#: recollage justifié) ont RESSERRÉ la géométrie. Les gouttières mesurées à
+#: 13-55 x la hauteur de ligne sont retombées à 0,5-2,6 x — sous le seuil.
+#: Les deux populations qui « ne se recouvraient pas » se recouvrent
+#: désormais entièrement, et 9 colonnes légitimes étaient accusées.
+#:
+#: **Un seuil calibré sur une mesure survit rarement au correctif suivant.**
+#: C'est pourquoi le garde-fou qui décide vraiment est en dessous, et qu'il
+#: est SANS SEUIL : voir `_lignes_partagees`.
 _ECART_MEME_LIGNE = 4.0
 
 #: Décalage du FER GAUCHE toléré pour une ligne, en fraction de la hauteur de
@@ -215,6 +226,33 @@ def _lignes_partagees(blocs, hl) -> list[dict]:
 
     C'est le contrôle qui remonte à la CAUSE : les chevauchements de cadres en
     découlent, puisque le morceau expulsé retombe dans le cadre qu'il a quitté.
+
+    LE GARDE-FOU QUI DÉCIDE VRAIMENT, ET IL EST SANS SEUIL
+    --------------------------------------------------------
+    Deux blocs dont les CADRES SONT DISJOINTS ne peuvent pas se déchirer une
+    ligne : chacun contient entièrement la sienne, aucun mot n'est revendiqué
+    deux fois. Une ligne déchirée laisse forcément une trace dans les cadres —
+    c'est le mécanisme même décrit plus haut, le morceau expulsé retombant
+    dans le cadre qu'il a quitté.
+
+    Mesuré sur 3 pages : les 9 couples signalés avaient **tous** leurs cadres
+    disjoints (recouvrement en x de -2,4 à -12,96 pt) et **zéro mot commun**.
+    C'étaient neuf colonnes correctement séparées, accusées à tort parce que
+    `_ECART_MEME_LIGNE` s'était périmé sous elles.
+
+    POURQUOI PAS UN AUTRE DISCRIMINANT — MESURÉ ET REJETÉ. L'idée suivante
+    était de compter les lignes APPARIÉES côte à côte : deux colonnes
+    s'apparient sur toute leur hauteur, une ligne déchirée est un accident
+    isolé. Éprouvé sur des cas synthétiques dont la vérité est connue :
+
+      · rapporté au bloc le plus COURT  -> 1,00 dans les 4 cas, discrimine rien ;
+      · rapporté au plus LONG           -> sépare bien la ligne arrachée (0,17)
+        des colonnes égales (1,00), mais condamne les colonnes de hauteurs
+        INÉGALES (0,33) — or c'est exactement `'Usagers' | 'Le conducteur'`,
+        un titre court en regard d'une colonne longue. Cas réel, pas d'école.
+
+    Le critère des cadres disjoints n'a pas ce défaut, et ne coûte aucun
+    réglage.
     """
     if hl <= 0:
         return []
@@ -223,6 +261,11 @@ def _lignes_partagees(blocs, hl) -> list[dict]:
     for i, a in enumerate(blocs):
         for j in range(i + 1, len(blocs)):
             b = blocs[j]
+            # CADRES DISJOINTS -> rien à partager. Voir plus haut.
+            ba, bb = a.get("bbox"), b.get("bbox")
+            if ba and bb and not (min(ba[2], bb[2]) - max(ba[0], bb[0]) > 0
+                                  and min(ba[3], bb[3]) - max(ba[1], bb[1]) > 0):
+                continue
             pire = None
             for la in _lignes_de(a):
                 for lb in _lignes_de(b):

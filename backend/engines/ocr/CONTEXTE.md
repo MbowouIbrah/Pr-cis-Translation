@@ -22,7 +22,7 @@ tags `archive/ocr-v1-*` / `archive/ocr-v2-*`).
 ## Où on en est : **75 %** (note de l'utilisateur, 08/08)
 
 L'essentiel est détecté. La première partie de l'identification est faite,
-elle n'est pas finie — restent 15 défauts mesurés (voir plus bas), puis
+elle n'est pas finie — restent 8 défauts mesurés (voir plus bas), puis
 d'autres problèmes de détection à traiter ensuite.
 
 ## La chaîne
@@ -85,12 +85,50 @@ cadre qu'il a quitté.
 |---|---|
 | mot dans deux lignes | **0** |
 | mot dans deux paragraphes | **0** |
-| défauts de l'audit | **15** (était 27) |
+| défauts de l'audit | **8** (était 27) |
 
 Les deux premières à zéro depuis le début : le regroupement ne duplique jamais
-un mot — c'est ce qui a rendu la fusion licite. Détail des 15 : 7
-`ligne_partagee`, 3 `chevauchement`, 3 `ligne_amputee`, 2 `blocs_colles`.
-Répartition 2 / 12 / 1 : **la page 2 concentre tout**.
+un mot — c'est ce qui a rendu la fusion licite. Détail des 8 : 3
+`chevauchement`, 3 `ligne_amputee`, 2 `blocs_colles`. Répartition
+**0 / 8 / 0** : les pages 1 et 3 sont propres, la page 2 concentre tout.
+
+### ⚠ UN SEUIL SURVIT RAREMENT AU CORRECTIF SUIVANT (09/08)
+
+**9 des 17 défauts n'en étaient pas.** `_ECART_MEME_LIGNE = 4.0` avait été
+calibré sur une mesure honnête : gouttières de colonnes à 13-55 × la hauteur
+de ligne, vrais défauts à 1,3-1,8 ×, deux populations sans recouvrement.
+
+Les correctifs suivants — alignement des lignes OCR, bridage des corps,
+recollage justifié — ont **resserré la géométrie**. Les mêmes gouttières sont
+retombées à 0,5-2,6 ×, donc **sous le seuil**. Les deux populations se
+recouvraient désormais entièrement, et l'audit accusait neuf colonnes
+parfaitement séparées :
+
+```
+'Usagers | Le conducteur'                      cadres disjoints de 12,96 pt
+'Le dépassement est interdit si | ...autorisé' cadres disjoints de  8,16 pt
+'Les panneaux de stationnement | Les bornes'   cadres disjoints de 10,80 pt
+```
+
+Les 9 avaient **zéro mot commun** et des **cadres disjoints**. Je chassais un
+chiffre qui comptait du bon travail comme des erreurs.
+
+Le garde-fou qui décide désormais **ne se règle pas** : deux blocs dont les
+cadres sont disjoints ne peuvent pas se déchirer une ligne — le morceau
+expulsé retombe forcément dans le cadre qu'il a quitté.
+
+**Le discriminant qui semblait meilleur, mesuré et rejeté.** Compter les
+lignes APPARIÉES côte à côte : deux colonnes s'apparient sur toute leur
+hauteur, une ligne déchirée est un accident isolé. Éprouvé sur du synthétique
+à vérité connue — rapporté au bloc le plus court, il vaut 1,00 dans les
+4 cas (ne discrimine rien) ; rapporté au plus long, il sépare bien la ligne
+arrachée (0,17) des colonnes égales (1,00) mais **condamne les colonnes de
+hauteurs inégales (0,33)** — c'est-à-dire `'Usagers' | 'Le conducteur'`.
+
+**Le PDF ne sait rien de ses images** (sondé le 09/08) : deux images
+plein-cadre par page (moitié haute, moitié basse du scan), `get_drawings()`
+vide, zéro mot natif. La piste « demander au PDF où sont les dessins » est
+close — mesurée en 30 secondes plutôt qu'en une journée.
 
 ## Les correctifs qui ont payé
 
@@ -213,17 +251,27 @@ Les deux dernières méritent un mot, parce qu'elles semblaient évidentes :
   plus de 4 mots) : même conclusion, aucun seuil ne fait mieux que l'absence
   de découpe.
 
-## Ce qui reste (15 défauts) — la suite du travail
+## Ce qui reste (8 défauts) — la suite du travail
 
-Répartition **2 / 12 / 1** : la page 2 concentre tout, et c'est la page à
+Répartition **0 / 8 / 0** : pages 1 et 3 propres. Tout est page 2, celle à
 l'interligne le plus serré, avec du texte enroulé autour d'une image.
 
 | famille | n | ce que c'est |
 |---|---|---|
-| `ligne_partagee` | 7 | deux blocs voisins se partagent une ligne |
-| `chevauchement` | 3 | tous page 2, zone du texte à contour |
+| `chevauchement` | 3 | zone du texte à contour + sommaire |
 | `ligne_amputee` | 3 | un début de ligne parti dans un autre bloc |
 | `blocs_colles` | 2 | cadres qui se frôlent (0,27 et 0,48 pt) |
+
+Ils se concentrent sur **deux causes**, et non huit :
+
+* le **sommaire** (`'| Accidents Les statistiques,'` chevauche
+  `"l'assurance, le constat"` sur 45,60 × 4,80 pt, et frôle
+  `'e pratique et Index'` à 0,27 pt) — le titre reste soudé à son corps de
+  texte, défaut déjà analysé et dont les 4 pistes sont mesurées dans
+  `_debris_de_dessin` ;
+* le **texte à contour** autour de l'image (`'Le permisC'` /
+  `'MA transportdemarchandises'`), où les lignes restent mal découpées en
+  amont — signature visible : les mots collés sans espace.
 
 Le texte de ces blocs porte la signature du défaut : des mots collés sans
 espace (`'AprèsdeuxansdepermisB'`, `'MA transportdemarchandises'`) trahissent
@@ -272,6 +320,6 @@ Le banc minimal (~2 min de construction contre ~15 pour l'image complète)
 installe le **même** binaire et les **mêmes** paquets Python ; il en retire
 seulement ce que l'OCR n'appelle pas.
 
-**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 95/95) : le
+**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 115/115) : le
 contrat de spans permet d'injecter des mots dont on connaît la vérité. Un test
 qu'on ne peut pas lancer chez soi ne protège rien.
