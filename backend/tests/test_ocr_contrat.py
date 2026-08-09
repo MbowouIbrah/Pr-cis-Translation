@@ -823,6 +823,41 @@ def run():
        "cle = (passe," in src_mb,
        "les cles de deux passes peuvent entrer en collision")
 
+    # ---- LA MEILLEURE LECTURE GAGNE, MAIS PAS A N'IMPORTE QUEL PRIX ------
+    #
+    # Defaut signale A L'OEIL sur le sommaire (09/08) : la colonne des
+    # paginations ressortait en 'md sis' et 'min' au lieu de '187 a 200' et
+    # '201 a 212', alors que la passe distance-au-blanc les lit a 75-95 %.
+    # Ce ne sont pas des fragments -- '201' ne CONTIENT pas 'min' -- donc la
+    # regle du contenu ne pouvait rien.
+    #
+    # ⚠ L'AUDIT NE VOIT PAS CE DEFAUT : il juge la geometrie, et rend 5
+    # defauts pour tout ecart de 0 a 60. La mesure qui fait foi est le TEXTE,
+    # contre les 24 nombres du sommaire releves a l'oeil : 13/24 sans la
+    # regle, 17/24 avec.
+    def _mot(t, conf):
+        return {"texte": t, "conf": conf, "boite": (0, 0, 10, 5)}
+
+    ok("une lecture NETTEMENT plus sure remplace la moins sure",
+       lecture._prolonge(_mot("201", 95.0), _mot("min", 37.0)))
+
+    # LES DEUX GARDE-FOUS, chacun impose par une REGRESSION mesuree parmi les
+    # 9 substitutions des 3 pages.
+    ok("MUTATION : on ne remplace pas par PLUS COURT ('59a80' -> '69a')",
+       not lecture._prolonge(_mot("69a", 89.0), _mot("59a80", 58.0)))
+    ok("MUTATION : on ne remplace pas par MOINS LISIBLE ('Il' -> '||')",
+       not lecture._prolonge(_mot("||", 55.0), _mot("Il", 30.0)))
+
+    # ET L'ECART DOIT ETRE FRANC : une confiance a peine meilleure ne suffit
+    # pas, sinon on substitue au bruit de mesure.
+    ok("MUTATION : un ecart de confiance FAIBLE ne substitue pas",
+       not lecture._prolonge(_mot("201", 50.0), _mot("min", 37.0)))
+
+    # La regle du CONTENU reste prioritaire, ecart de confiance ou non :
+    # « rs », fragment de « Usagers », ne doit jamais bloquer le mot entier.
+    ok("la regle du CONTENU tient toujours ('rs' -> 'Usagers')",
+       lecture._prolonge(_mot("Usagers", 96.0), _mot("rs", 96.0)))
+
     # ---- L'INTERLIGNE, RELEVE ET NON CHOISI -----------------------------
     # Une page synthetique dont on CONNAIT l'interligne : 5 lignes posees
     # tous les 16 pt, mots de 11 pt de haut.

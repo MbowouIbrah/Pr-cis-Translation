@@ -132,6 +132,23 @@ close — mesurée en 30 secondes plutôt qu'en une journée.
 
 ## Les correctifs qui ont payé
 
+**LA MEILLEURE LECTURE GAGNE** (`_prolonge`, seconde porte, 09/08). Signalé à
+l'œil sur le sommaire : la colonne des paginations ressortait en `'md sis'` et
+`'min'` au lieu de `'187 à 200'` et `'201 à 212'` — alors que la passe
+distance-au-blanc les lit à **75-95 %**. Ce ne sont pas des fragments
+(`'201'` ne contient pas `'min'`), donc la règle du contenu ne pouvait rien.
+
+⚠ **L'AUDIT NE VOIT PAS CE DÉFAUT** : il juge la géométrie, et les cadres sont
+corrects. Balayé de 0 à 60, il rend 5 défauts partout. La mesure qui fait foi
+est donc le **TEXTE**, contre une vérité relevée à l'œil (les 24 nombres des
+paginations) : **13/24 → 17/24**.
+
+Deux garde-fous, chacun imposé par une régression parmi les 9 substitutions
+mesurées : ne pas remplacer par plus **court** (`'59à80'` → `'69à'`) ni par
+moins **lisible** (`'Il'` → `'||'`, deux traits lus avec assurance). Résultat :
+7 substitutions, 4 gains nets, **aucune régression**.
+
+
 **L'alignement sur les lignes de Tesseract** (`_aligner_sur_lignes_ocr`). On
 jette sa segmentation en PARAGRAPHES (`par_num`, fausse en multi-colonnes),
 mais `line_num` est un autre signal, et il est **bon** : mesuré sur « Les
@@ -346,6 +363,6 @@ Le banc minimal (~2 min de construction contre ~15 pour l'image complète)
 installe le **même** binaire et les **mêmes** paquets Python ; il en retire
 seulement ce que l'OCR n'appelle pas.
 
-**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 116/116) : le
+**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 121/121) : le
 contrat de spans permet d'injecter des mots dont on connaît la vérité. Un test
 qu'on ne peut pas lancer chez soi ne protège rien.

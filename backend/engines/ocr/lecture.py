@@ -815,6 +815,38 @@ def _interligne(mots) -> float:
     return float(ecarts[len(ecarts) // 2]) if ecarts else 0.0
 
 
+#: Écart de confiance à partir duquel une passe couleur peut REMPLACER la
+#: lecture normale, et non seulement la compléter.
+#:
+#: Balayé contre le TEXTE — l'audit ne voit pas ce défaut, il juge la
+#: géométrie et rend 5 défauts pour tout écart de 0 à 60. La vérité est
+#: relevée à l'œil : les 24 nombres des paginations du sommaire, page 2.
+#:
+#:     écart   0 (règle du contenu seule)   13 / 24
+#:     écart  10 à 20                       **17 / 24**   <- palier
+#:     écart  25 à 40                       16 / 24
+#:     écart  60                            13 / 24
+#:
+#: 20, le HAUT du palier : la substitution la plus prudente qui garde le plein
+#: gain. Voir `_prolonge` pour les deux garde-fous qui l'accompagnent.
+_ECART_CONF_FRANC = 20.0
+
+
+def _part_lisible(texte: str) -> float:
+    """Proportion de caractères qui sont des lettres ou des chiffres.
+
+    Même mesure que `tri._part_lisible`, et pour la même raison : un trait de
+    dessin lu par Tesseract donne `'||'`, `'|_-,'`, `'—>'`. On ne la partage
+    pas par import — `tri.py` juge des BLOCS déjà formés, `lecture.py` des
+    mots bruts ; les deux modules n'ont aucune autre dépendance et se lisent
+    séparément.
+    """
+    utiles = [c for c in texte if not c.isspace()]
+    if not utiles:
+        return 0.0
+    return sum(1 for c in utiles if c.isalnum()) / len(utiles)
+
+
 def _fusionner(primaires, secondaires, tolerance: float = 0.5):
     """Union des deux lectures : les mots vus par l'un et pas par l'autre.
 
@@ -876,10 +908,53 @@ def _prolonge(cand, vu) -> bool:
     On exige donc que le rival soit littéralement CONTENU dans le candidat.
     C'est ce qui distingue « je lis mieux le même mot » de « je lis autre
     chose au même endroit ». Coût mesuré ainsi : +1 défaut, pas +19.
+
+    SECONDE PORTE : L'ÉCART DE CONFIANCE FRANC (09/08)
+    ----------------------------------------------------
+    La règle du contenu ne couvre pas le cas signalé à l'œil sur le sommaire :
+    la colonne des paginations ressortait en `'md sis'` et `'min'` au lieu de
+    `'187 à 200'` et `'201 à 212'`. Or la passe distance-au-blanc les lit à
+    75-95 % — ce ne sont pas des fragments, ce sont deux lectures DIFFÉRENTES
+    du même endroit, et `'201'` ne contient pas `'min'`.
+
+    ⚠ L'AUDIT NE VOIT PAS CE DÉFAUT : il juge la géométrie, et les cadres sont
+    corrects. Balayé de 0 à 60, il rend 5 défauts partout. La mesure qui fait
+    foi ici est donc le TEXTE, contre une vérité relevée à l'œil (les 24
+    nombres des paginations du sommaire) :
+
+        écart   0 (règle seule)   13 / 24
+        écart  10 à 20            **17 / 24**   <- palier
+        écart  25 à 40            16 / 24
+        écart  60                 13 / 24
+
+    On prend 20, le HAUT du palier : la substitution la plus prudente qui
+    garde le plein gain.
+
+    DEUX GARDE-FOUS, CHACUN IMPOSÉ PAR UNE RÉGRESSION MESURÉE. Sans eux, les
+    9 substitutions des 3 pages contiennent 2 dégradations :
+
+      · NE PAS PERDRE DE MATIÈRE — `'59à80'` (58 %) était remplacé par
+        `'69à'` (89 %), plus sûr mais amputé. Le candidat ne doit pas être
+        plus court que le rival ;
+      · NE PAS DEVENIR MOINS LISIBLE — `'Il'` (30 %) était remplacé par
+        `'||'` (55 %), deux traits de dessin lus avec assurance. C'est la
+        mesure déjà faite dans `tri.py` : la confiance dit si un mot est bien
+        LU, pas s'il est du TEXTE.
+
+    Résultat : 7 substitutions sur 3 pages, dont 4 gains nets
+    (`'md'`->`'187'`, `'sis'`->`'200'`, `'min'`->`'201'`, `'L'`->`'Voiture'`),
+    2 neutres (même texte mieux lu) et **aucune régression**.
     """
     tc = (cand.get("texte") or "").strip()
     tv = (vu.get("texte") or "").strip()
-    return bool(tv) and len(tc) > len(tv) and tv.lower() in tc.lower()
+    if not tv or not tc:
+        return False
+    if len(tc) > len(tv) and tv.lower() in tc.lower():
+        return True
+    if cand.get("conf", 0.0) - vu.get("conf", 0.0) < _ECART_CONF_FRANC:
+        return False
+    # Ne pas perdre de matière, ne pas devenir moins lisible. Voir plus haut.
+    return len(tc) >= len(tv) and _part_lisible(tc) >= _part_lisible(tv)
 
 
 def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
