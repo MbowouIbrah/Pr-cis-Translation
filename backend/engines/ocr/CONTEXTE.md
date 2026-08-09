@@ -22,7 +22,7 @@ tags `archive/ocr-v1-*` / `archive/ocr-v2-*`).
 ## Où on en est : **75 %** (note de l'utilisateur, 08/08)
 
 L'essentiel est détecté. La première partie de l'identification est faite,
-elle n'est pas finie — restent 8 défauts mesurés (voir plus bas), puis
+elle n'est pas finie — restent 5 défauts mesurés (voir plus bas), puis
 d'autres problèmes de détection à traiter ensuite.
 
 ## La chaîne
@@ -72,7 +72,7 @@ défaut. Six familles :
 | `blocs_colles` | aucun blanc entre eux (< 0,25 × ligne, jamais moins que le trait) |
 | `cadre_lache` | le cadre revendique du vide au-delà de son encre |
 | `ligne_partagee` | **une LIGNE de texte revendiquée par deux blocs** |
-| `ligne_amputee` | une ligne qui commence après le fer du paragraphe |
+| `ligne_amputee` | une ligne qui commence après le fer **et dont le début est ailleurs** |
 
 Les deux dernières ont été ajoutées après coup, **signalées à l'œil** et non
 par le compte. `ligne_partagee` est celle qui remonte à la CAUSE : les
@@ -85,12 +85,12 @@ cadre qu'il a quitté.
 |---|---|
 | mot dans deux lignes | **0** |
 | mot dans deux paragraphes | **0** |
-| défauts de l'audit | **8** (était 27) |
+| défauts de l'audit | **5** (était 27) |
 
 Les deux premières à zéro depuis le début : le regroupement ne duplique jamais
-un mot — c'est ce qui a rendu la fusion licite. Détail des 8 : 3
-`chevauchement`, 3 `ligne_amputee`, 2 `blocs_colles`. Répartition
-**0 / 8 / 0** : les pages 1 et 3 sont propres, la page 2 concentre tout.
+un mot — c'est ce qui a rendu la fusion licite. Détail des 5 : 3
+`chevauchement`, 2 `blocs_colles`. Répartition **0 / 5 / 0** : les pages 1 et
+3 sont propres, la page 2 concentre tout.
 
 ### ⚠ UN SEUIL SURVIT RAREMENT AU CORRECTIF SUIVANT (09/08)
 
@@ -251,27 +251,53 @@ Les deux dernières méritent un mot, parce qu'elles semblaient évidentes :
   plus de 4 mots) : même conclusion, aucun seuil ne fait mieux que l'absence
   de découpe.
 
-## Ce qui reste (8 défauts) — la suite du travail
+## Le TEXTE ENROULÉ autour d'une image n'est pas un défaut (09/08)
 
-Répartition **0 / 8 / 0** : pages 1 et 3 propres. Tout est page 2, celle à
-l'interligne le plus serré, avec du texte enroulé autour d'une image.
+**3 des 8 défauts restants n'en étaient pas** — le même piège que les colonnes,
+une semaine plus tard. `_ligne_amputee` prend `min(fers)` comme fer du
+paragraphe. Mais un texte qui contourne une image descend en marches puis
+**revient au fer plein** une fois l'image passée :
+
+```
+bloc #12   L0 fer=94,6   L1 97,2   L2 97,7   L3 98,6   L4 38,6
+                    (le camion)                      (image finie)
+```
+
+`min(fers)` vaut alors 38,6 et accuse L1-L3 de commencer 60 pt trop loin —
+alors que leur texte est **parfaitement lu** (`'Il permet de conduire les
+ensembles de véhicules'`).
+
+Le discriminant ne se règle pas : une ligne réellement amputée a perdu son
+début **au profit d'un autre bloc**, sur sa bande, à sa gauche. Mesuré :
+
+| cas | voisin à gauche |
+|---|---|
+| vraie amputation (`'3'` expulsé de `'mètres'`) | **le bloc `'3'`** |
+| lignes enroulées (#7, #12, #50) | **aucun** |
+
+C'est la leçon de `ligne_partagee`, reprise mot pour mot : **le VIDE n'est pas
+une preuve**. Seule la présence du début ailleurs en est une.
+
+## Ce qui reste (5 défauts) — la suite du travail
+
+Répartition **0 / 5 / 0** : pages 1 et 3 propres. Tout est page 2.
 
 | famille | n | ce que c'est |
 |---|---|---|
-| `chevauchement` | 3 | zone du texte à contour + sommaire |
-| `ligne_amputee` | 3 | un début de ligne parti dans un autre bloc |
+| `chevauchement` | 3 | sommaire + texte à contour |
 | `blocs_colles` | 2 | cadres qui se frôlent (0,27 et 0,48 pt) |
 
-Ils se concentrent sur **deux causes**, et non huit :
+Ils se concentrent sur **deux causes**, et non cinq :
 
 * le **sommaire** (`'| Accidents Les statistiques,'` chevauche
   `"l'assurance, le constat"` sur 45,60 × 4,80 pt, et frôle
   `'e pratique et Index'` à 0,27 pt) — le titre reste soudé à son corps de
-  texte, défaut déjà analysé et dont les 4 pistes sont mesurées dans
-  `_debris_de_dessin` ;
-* le **texte à contour** autour de l'image (`'Le permisC'` /
-  `'MA transportdemarchandises'`), où les lignes restent mal découpées en
-  amont — signature visible : les mots collés sans espace.
+  texte. **Quatre pistes mesurées, quatre échecs**, détaillées dans
+  `_debris_de_dessin` : le seul signal est la taille (9,12 vs 4,32) et aucun
+  seuil ne survit au faux positif `L'arrêt et le stationnement / 81 à 96` ;
+* le **texte à contour** (`'Le permisC'` chevauche `'Il permet de conduire'`
+  sur 1,35 pt, et `'La signalisation verticale'` frôle ses voisins) — un titre
+  et son corps que le regroupement laisse se toucher.
 
 Le texte de ces blocs porte la signature du défaut : des mots collés sans
 espace (`'AprèsdeuxansdepermisB'`, `'MA transportdemarchandises'`) trahissent
@@ -320,6 +346,6 @@ Le banc minimal (~2 min de construction contre ~15 pour l'image complète)
 installe le **même** binaire et les **mêmes** paquets Python ; il en retire
 seulement ce que l'OCR n'appelle pas.
 
-**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 115/115) : le
+**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 116/116) : le
 contrat de spans permet d'injecter des mots dont on connaît la vérité. Un test
 qu'on ne peut pas lancer chez soi ne protège rien.

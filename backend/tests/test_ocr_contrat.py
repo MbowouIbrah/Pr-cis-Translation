@@ -638,8 +638,33 @@ def run():
        str(audit.auditer([corps, bout])["comptes"]))
 
     # ---- LIGNE AMPUTEE : le FER GAUCHE trahit, pas la longueur -----------
+    #
+    # ON PASSE LES DEUX BLOCS, et c'est le fond de la regle : une ligne
+    # amputee a perdu son debut AU PROFIT D'UN AUTRE BLOC. Ici `'3'` porte le
+    # debut de `'metres'`, sur sa bande et a sa gauche.
     ok("une LIGNE AMPUTEE de son debut est detectee",
-       audit.auditer([dechiree[0]])["comptes"].get("ligne_amputee") == 1)
+       audit.auditer(dechiree)["comptes"].get("ligne_amputee") == 1,
+       str(audit.auditer(dechiree)["comptes"]))
+
+    # MUTATION : LE TEXTE ENROULE AUTOUR D'UNE IMAGE N'EST PAS UN DEFAUT.
+    #
+    # Mesure du 09/08, page 2 : les blocs #7, #12 et #50 contournent un
+    # camion. Leur fer gauche descend en marches puis revient au fer plein une
+    # fois l'image passee -- `min(fers)` accusait alors les lignes enroulees
+    # de commencer jusqu'a 60 pt trop loin, alors que leur texte est
+    # parfaitement lu. 3 des 8 defauts restants n'en etaient pas.
+    #
+    # Ce cas echoue si l'on retire l'exigence « le debut manquant existe
+    # ailleurs » : le decalage seul (55,9 a 60,0 pt pour hl = 5,04) est tres
+    # au-dessus du seuil.
+    enroule = _multi([((94.6, 109.9, 217.9, 114.7), "Il permet de conduire"),
+                      ((97.2, 116.4, 217.7, 121.2), "affectes au transport"),
+                      ((98.6, 129.4, 217.7, 133.4), "18 ans minimum."),
+                      ((38.6, 135.4, 216.5, 140.9), "maniere que le permis C")],
+                     "contourne l'image")
+    ok("MUTATION : le texte ENROULE autour d'une image n'est PAS ampute",
+       audit.auditer([enroule])["comptes"].get("ligne_amputee") is None,
+       str(audit.auditer([enroule])["comptes"]))
 
     # MUTATION : une ligne COURTE au fer est normale (fin de phrase, entree
     # de liste, titre). Juger la longueur signalait 11 blocs corrects sur 17.

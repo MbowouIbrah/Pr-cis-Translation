@@ -301,7 +301,26 @@ def _lignes_partagees(blocs, hl) -> list[dict]:
     return out
 
 
-def _ligne_amputee(bloc, i, hl) -> dict | None:
+def _porte_le_debut(bbox_ligne, i, blocs) -> bool:
+    """Un AUTRE bloc porte-t-il le début manquant de cette ligne ?
+
+    C'est la question qui décide, et elle ne se règle pas : une ligne
+    réellement amputée a perdu son début AU PROFIT D'UN AUTRE BLOC — ce début
+    existe, il est sur la même bande, et il est à gauche. S'il n'y a personne,
+    rien n'a été perdu.
+    """
+    for j, autre in enumerate(blocs):
+        if j == i:
+            continue
+        for lo in _lignes_de(autre):
+            bo = lo["bbox"]
+            if (_meme_bande(bbox_ligne, bo) >= _MEME_LIGNE_REC
+                    and bo[2] <= bbox_ligne[0]):
+                return True
+    return False
+
+
+def _ligne_amputee(bloc, i, hl, blocs=()) -> dict | None:
     """Une ligne du bloc commence-t-elle APRÈS le fer gauche du paragraphe ?
 
     `cadre_lache` juge l'ENVELOPPE : il compare le cadre à l'encre totale, et
@@ -314,6 +333,27 @@ def _ligne_amputee(bloc, i, hl) -> dict | None:
     son début — et ce début est ailleurs, en bloc séparé.
 
     On exclut la ligne 0 : un alinéa de première ligne est un retrait voulu.
+
+    ⚠ ET ON EXIGE QUE LE DÉBUT MANQUANT EXISTE QUELQUE PART — sans quoi la
+    règle condamne le TEXTE ENROULÉ AUTOUR D'UNE IMAGE, qui est une mise en
+    page parfaitement légitime. Mesuré page 2 (09/08) : les blocs #7, #12 et
+    #50 contournent un camion, leur fer gauche descend en marches puis revient
+    au fer plein une fois l'image passée :
+
+        bloc #12   L0 fer=94,6  L1 97,2  L2 97,7  L3 98,6  L4 38,6
+                              (le camion)              (image finie)
+
+    `min(fers)` vaut alors 38,6 et accuse L1-L3 de commencer 60 pt trop loin,
+    alors qu'elles sont normales et leur texte parfaitement lu.
+
+    Le discriminant ne se règle pas : une ligne réellement amputée a perdu son
+    début AU PROFIT D'UN AUTRE BLOC, sur sa bande, à sa gauche. Mesuré :
+
+        vraie amputation (`'3'` expulsé)   voisin à gauche = le bloc `'3'`
+        lignes enroulées (#7, #12, #50)    voisin à gauche = AUCUN
+
+    C'est la même leçon que pour `ligne_partagee` : le VIDE à gauche n'est pas
+    une preuve d'amputation, seule la présence du début ailleurs en est une.
     """
     lignes = _lignes_de(bloc)
     if len(lignes) < 2 or hl <= 0:
@@ -327,7 +367,12 @@ def _ligne_amputee(bloc, i, hl) -> dict | None:
         if k == 0:                        # alinéa : retrait légitime
             continue
         d = lg["bbox"][0] - fer
-        if d > _FER_DECALE_LIGNE * hl and (pire is None or d > pire[0]):
+        if d <= _FER_DECALE_LIGNE * hl:
+            continue
+        # Le début manquant doit EXISTER ailleurs. Voir plus haut.
+        if not _porte_le_debut(lg["bbox"], i, blocs):
+            continue
+        if pire is None or d > pire[0]:
             pire = (d, k, lg)
     if not pire:
         return None
@@ -374,7 +419,7 @@ def auditer(blocs) -> dict:
                 })
 
         # ── 5. Une ligne est-elle amputée de son début ? ─────────────────
-        ampute = _ligne_amputee(a, i, hl)
+        ampute = _ligne_amputee(a, i, hl, blocs)
         if ampute:
             defauts.append(ampute)
 
