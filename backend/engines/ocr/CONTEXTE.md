@@ -132,6 +132,30 @@ close — mesurée en 30 secondes plutôt qu'en une journée.
 
 ## Les correctifs qui ont payé
 
+**LES FLÈCHES NE SONT PAS DES MOTS** (`_sans_traits_de_dessin`, 10/08).
+Signalé à l'œil sur le sommaire : les flèches et filets de conduite (`'—'`,
+`'——'`, `'—>'`, `'—+—'`, `'=='`) étaient encadrés comme des mots — **onze**
+sur la seule page 2.
+
+⚠ `tri.py` ne pouvait pas les attraper, et ce n'est pas un oubli : **il juge
+des BLOCS**. Une flèche seule est bien écartée ; celle qui a été absorbée dans
+un bloc portant du vrai texte le rend lisible à 80 %, donc le bloc est retenu
+avec sa flèche. Le filtre manquait au niveau du **mot**.
+
+Le discriminant est la **largeur par caractère**, rapportée à la largeur de
+glyphe de la page (jamais en points absolus — un document au corps double
+aurait une ponctuation double). Mesuré sur 54 spans sans caractère lisible,
+deux populations **sans recouvrement** :
+
+| | ratio largeur / gw |
+|---|---|
+| ponctuation réelle `':'` `'-'` `'+'` | 0,24 à **2,42** |
+| traits et flèches `'—'` `'——'` `'=='` | **3,01** à 12,27 |
+
+Ni la distance au mot voisin (0 à 4 pt dans les deux cas) ni la confiance
+(`'|'` lu à 87 %) ne séparent quoi que ce soit.
+
+
 **LA MEILLEURE LECTURE GAGNE** (`_prolonge`, seconde porte, 09/08). Signalé à
 l'œil sur le sommaire : la colonne des paginations ressortait en `'md sis'` et
 `'min'` au lieu de `'187 à 200'` et `'201 à 212'` — alors que la passe
@@ -379,6 +403,6 @@ Le banc minimal (~2 min de construction contre ~15 pour l'image complète)
 installe le **même** binaire et les **mêmes** paquets Python ; il en retire
 seulement ce que l'OCR n'appelle pas.
 
-**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 121/121) : le
+**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 124/124) : le
 contrat de spans permet d'injecter des mots dont on connaît la vérité. Un test
 qu'on ne peut pas lancer chez soi ne protège rien.

@@ -858,6 +858,52 @@ def run():
     ok("la regle du CONTENU tient toujours ('rs' -> 'Usagers')",
        lecture._prolonge(_mot("Usagers", 96.0), _mot("rs", 96.0)))
 
+    # ---- LES FLECHES NE SONT PAS DES MOTS -------------------------------
+    #
+    # Signale A L'OEIL sur le sommaire : les fleches et les filets de conduite
+    # ('—', '——', '—>', '—+—', '==') etaient encadres comme des mots, onze
+    # fois sur la seule page 2.
+    #
+    # `tri.py` NE PEUT PAS les attraper : il juge des BLOCS. Une fleche SEULE
+    # est bien ecartee, mais celle qui a ete absorbee dans un bloc portant du
+    # vrai texte le rend lisible a 80 % -- le bloc est retenu, sa fleche avec.
+    #
+    # Le discriminant est la LARGEUR PAR CARACTERE, rapportee a la largeur de
+    # glyphe de la page. Mesure sur 3 pages, 54 spans sans caractere lisible,
+    # deux populations qui NE SE RECOUVRENT PAS :
+    #
+    #     ponctuation reelle  ':' '-' '+'         0,24 a 2,42 x gw
+    #     traits et fleches   '—' '——' '—>' '=='  3,01 a 12,27 x gw
+    def _sp(t, x0, x1):
+        return {"text": t, "bbox": (x0, 100.0, x1, 105.0),
+                "origin": (x0, 105.0), "font": "f", "size": 5.0, "color": 0,
+                "flags": 0, "bold": False, "italic": False, "dir": (1, 0),
+                "_gw": 2.5, "_base": 105.0, "_ink_x0": x0, "_ink_x1": x1}
+
+    # Des mots reels donnent l'echelle : 2,5 pt par caractere.
+    echelle = [_sp("signalisation", 10.0, 42.5), _sp("priorite", 50.0, 70.0),
+               _sp("stationnement", 80.0, 112.5)]
+    garde = lecture._sans_traits_de_dessin(
+        echelle + [_sp("—", 120.0, 130.0)])          # 10 pt pour 1 caractere
+    ok("une FLECHE large n'est pas un mot",
+       all((s.get("text") or "") != "—" for s in garde),
+       str([s["text"] for s in garde]))
+
+    # MUTATION : LA PONCTUATION REELLE SURVIT. C'est elle qui interdit de se
+    # contenter du critere « aucun caractere lisible » -- ':' et '-' sont
+    # mesures 43 fois sur 3 pages ("Le permis C :", "semi-").
+    garde2 = lecture._sans_traits_de_dessin(
+        echelle + [_sp(":", 120.0, 121.0), _sp("-", 125.0, 126.3)])
+    ok("MUTATION : la PONCTUATION etroite est conservee",
+       sum(1 for s in garde2 if (s.get("text") or "") in (":", "-")) == 2,
+       str([s["text"] for s in garde2]))
+
+    # ...ET LE FILTRE EST BIEN BRANCHE. Tester la fonction seule ne dit rien
+    # de son appel -- la debrancher laisserait les deux checks ci-dessus VERTS.
+    ok("le filtre des traits est appele par la lecture",
+       "_sans_traits_de_dessin(spans)" in _insp.getsource(lecture.spans_de_page),
+       "la fonction existe mais n'est pas branchee")
+
     # ---- L'INTERLIGNE, RELEVE ET NON CHOISI -----------------------------
     # Une page synthetique dont on CONNAIT l'interligne : 5 lignes posees
     # tous les 16 pt, mots de 11 pt de haut.

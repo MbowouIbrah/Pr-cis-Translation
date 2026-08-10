@@ -1157,8 +1157,75 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
     # sa docstring pour le détail de la mesure.
     _aligner_sur_lignes_ocr(spans)
     _brider_les_corps(spans)
+    spans = _sans_traits_de_dessin(spans)
     spans.sort(key=lambda s: (round(s["_base"], 1), s["bbox"][0]))
     return spans
+
+
+#: Largeur PAR CARACTÈRE, en multiple de la largeur de glyphe de la page,
+#: au-delà de laquelle un span sans lettre ni chiffre est un trait de dessin.
+#:
+#: Mesuré sur 3 pages, sur les 54 spans qui ne portent AUCUN caractère
+#: lisible. Les deux populations ne se recouvrent pas :
+#:
+#:     ponctuation réelle   ':' '-' '+'        0,24 à **2,42** x gw
+#:     traits et flèches    '—' '——' '—>' '==' **3,01** à 12,27 x gw
+#:
+#: 2,5, entre les deux. Un signe de ponctuation est étroit par nature ; une
+#: flèche de sommaire est large parce qu'elle traverse la colonne.
+#:
+#: RAPPORTÉ À LA LARGEUR DE GLYPHE DE LA PAGE, jamais en points absolus : un
+#: document au corps deux fois plus gros aurait une ponctuation deux fois plus
+#: large, et un seuil fixe l'écarterait.
+_TRAIT_LARGEUR_GW = 2.5
+
+
+def _sans_traits_de_dessin(spans):
+    """Retire les spans qui sont des TRAITS, pas des mots.
+
+    LE DÉFAUT, SIGNALÉ À L'ŒIL sur le sommaire : les flèches et les filets de
+    conduite (`'—'`, `'——'`, `'—>'`, `'—+—'`, `'=='`) étaient encadrés comme
+    des mots. Onze d'entre eux sur la seule page 2.
+
+    ⚠ `tri.py` NE PEUT PAS LES ATTRAPER, et ce n'est pas un oubli : il juge
+    des BLOCS déjà formés. Une flèche SEULE est bien écartée (« une ligne de
+    1 caractère »), mais celle qui a été absorbée dans un bloc portant du vrai
+    texte le rend lisible à 80 % — le bloc est retenu, sa flèche avec. Le
+    filtre manquait donc au niveau du MOT.
+
+    DEUX CONDITIONS, ET LA SECONDE FAIT TOUT LE TRAVAIL :
+
+      1. aucun caractère lisible (ni lettre ni chiffre) — nécessaire, très
+         insuffisant : `':'`, `'-'` et `'+'` sont de la ponctuation réelle,
+         mesurés 43 fois sur 3 pages (`'Le permis C :'`, `'semi-'`) ;
+      2. LARGE POUR CE QU'IL PORTE. Voir `_TRAIT_LARGEUR_GW` : les deux
+         populations sont franchement séparées (2,42 contre 3,01).
+
+    On ne juge PAS sur la distance au mot voisin : mesurée, elle vaut 0 à 4 pt
+    dans les deux cas — une flèche colle à son numéro de page autant qu'une
+    virgule à son mot. Et pas non plus sur la confiance : `'|'` est lu à 87 %,
+    c'est la mesure déjà faite dans `tri.py`.
+    """
+    if not spans:
+        return spans
+    largeurs = sorted(
+        (s["bbox"][2] - s["bbox"][0]) / len((s.get("text") or "").strip())
+        for s in spans
+        if len((s.get("text") or "").strip()) >= 3
+        and any(c.isalnum() for c in (s.get("text") or "")))
+    if not largeurs:
+        return spans
+    gw = largeurs[len(largeurs) // 2]
+    if gw <= 0:
+        return spans
+    garde = []
+    for s in spans:
+        t = (s.get("text") or "").strip()
+        if t and not any(c.isalnum() for c in t):
+            if (s["bbox"][2] - s["bbox"][0]) / len(t) > _TRAIT_LARGEUR_GW * gw:
+                continue                      # un trait, pas un mot
+        garde.append(s)
+    return garde
 
 
 #: Plafond du corps d'un span, en multiple de la MÉDIANE de la page.
