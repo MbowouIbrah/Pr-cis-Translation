@@ -882,16 +882,70 @@ def _fusionner(primaires, secondaires, tolerance: float = 0.5):
                 continue
             aire_v = max(1e-6, (vx1 - vx0) * (vy1 - vy0))
             if (l * h) >= tolerance * min(aire_c, aire_v):
+                # UN SPAN QUI A DÉJÀ CÉDÉ NE BLOQUE PLUS. Sa boîte est celle
+                # d'une lecture reconnue mauvaise ; elle peut couvrir
+                # plusieurs mots que la bonne passe a su séparer. Le suivant
+                # s'ajoute donc à côté au lieu d'être écarté — voir `_cede`.
+                if vu.get("_cede") and not _contient(cand, vu):
+                    continue
                 rival = k
                 break
         if rival is None:
             out.append(cand)
-        elif _prolonge(cand, out[rival]):
+        elif _contient(cand, out[rival]):
+            # FRAGMENT -> MOT ENTIER : on prend tout du candidat, boîte
+            # comprise. Le rival n'était qu'un morceau (« rs » de
+            # « Usagers ») ; sa boîte est trop petite par construction.
             out[rival] = cand
+        elif _mieux_lu(cand, out[rival]):
+            # MÊME MOT, MIEUX LU : on prend le TEXTE et **on garde la BOÎTE**.
+            #
+            # ⚠ C'EST LE CŒUR DU CORRECTIF, et il vient d'une régression que
+            # l'aperçu a montrée alors que tous les compteurs étaient bons.
+            # Les deux passes ne découpent pas au même endroit : `'min'`
+            # (lecture normale) couvre 389 -> 427, toute la pagination, tandis
+            # que `'201'` (distance-au-blanc) ne couvre que 389 -> 398.
+            # Substituer la boîte perdait **29 pt de largeur** :
+            #
+            #     'md'  -> '187'   la boîte rétrécit de  5,76 pt
+            #     'min' -> '201'   la boîte rétrécit de 29,04 pt
+            #
+            # Résultat à l'écran : la ligne se disloquait, `'201 à 212'`
+            # ressortait en DEUX blocs et `'187 à 200'` se faisait absorber
+            # par le paragraphe voisin, qui perdait son cadre propre.
+            #
+            # La boîte du rival est la bonne : c'est celle de la lecture qui a
+            # vu le mot ENTIER. On ne lui emprunte que ce qu'on est venu
+            # chercher — une meilleure lecture des caractères.
+            garde = dict(out[rival])
+            garde["texte"] = cand["texte"]
+            garde["conf"] = cand["conf"]
+            # LA BOÎTE SE RESSERRE EN X SUR LE CANDIDAT, mais garde la HAUTEUR
+            # du rival. C'est le partage exact de ce que chaque passe sait :
+            #
+            #   · en X, c'est le candidat qui a raison — il a su séparer
+            #     `'201'`, `'à'` et `'212'` là où la lecture normale voyait un
+            #     seul `'min'` large de 38 pt. Garder la largeur du rival
+            #     faisait contenir `'212'` par `'201'` (`bloc_dans_bloc`) ;
+            #   · en Y, c'est le rival — sa hauteur et sa clé de ligne portent
+            #     la baseline de toute sa rangée, et c'est en la déplaçant que
+            #     la substitution disloquait des blocs corrects (15 -> 34).
+            vb, cb = out[rival]["boite"], cand["boite"]
+            garde["boite"] = (cb[0], vb[1], cb[2], vb[3])
+            # ⚠ ON RETIENT QUELLE BOÎTE A DÉJÀ CÉDÉ, et pourquoi : un rival mal
+            # lu peut couvrir PLUSIEURS mots bien lus. Mesuré sur la ligne
+            # `'201 à 212'` : la lecture normale rend UN seul mot `'min'`
+            # (389 -> 427, 37 %), la passe distance-au-blanc en rend TROIS —
+            # `'201'`, `'à'`, `'212'` (86-95 %). Sans cette marque, `'201'`
+            # prenait la place et sa boîte héritée couvrait toute la bande,
+            # si bien que `'à'` et `'212'` étaient bloqués à leur tour : un
+            # mot faux en avalait trois justes (16/24 au lieu de 17/24).
+            garde["_cede"] = True
+            out[rival] = garde
     return out
 
 
-def _prolonge(cand, vu) -> bool:
+def _contient(cand, vu) -> bool:
     """Le candidat est-il le mot ENTIER dont `vu` n'est qu'un morceau ?
 
     LE CAS RÉEL : « rs », fragment de « Usagers » vu par la lecture normale,
@@ -906,55 +960,69 @@ def _prolonge(cand, vu) -> bool:
     baseline de toute sa rangée et disloque des blocs corrects ailleurs.
 
     On exige donc que le rival soit littéralement CONTENU dans le candidat.
-    C'est ce qui distingue « je lis mieux le même mot » de « je lis autre
-    chose au même endroit ». Coût mesuré ainsi : +1 défaut, pas +19.
+    C'est le seul cas où l'on prend AUSSI la boîte du candidat : le rival
+    n'étant qu'un morceau, sa boîte est trop petite par construction.
+    """
+    tc = (cand.get("texte") or "").strip()
+    tv = (vu.get("texte") or "").strip()
+    return bool(tv and tc) and len(tc) > len(tv) and tv.lower() in tc.lower()
 
-    SECONDE PORTE : L'ÉCART DE CONFIANCE FRANC (09/08)
-    ----------------------------------------------------
-    La règle du contenu ne couvre pas le cas signalé à l'œil sur le sommaire :
-    la colonne des paginations ressortait en `'md sis'` et `'min'` au lieu de
-    `'187 à 200'` et `'201 à 212'`. Or la passe distance-au-blanc les lit à
-    75-95 % — ce ne sont pas des fragments, ce sont deux lectures DIFFÉRENTES
-    du même endroit, et `'201'` ne contient pas `'min'`.
 
-    ⚠ L'AUDIT NE VOIT PAS CE DÉFAUT : il juge la géométrie, et les cadres sont
-    corrects. Balayé de 0 à 60, il rend 5 défauts partout. La mesure qui fait
-    foi ici est donc le TEXTE, contre une vérité relevée à l'œil (les 24
+def _mieux_lu(cand, vu) -> bool:
+    """Est-ce le MÊME mot, simplement mieux lu par une autre passe ?
+
+    Signalé à l'œil sur le sommaire : la colonne des paginations ressortait en
+    `'md sis'` et `'min'` au lieu de `'187 à 200'` et `'201 à 212'`. Or la
+    passe distance-au-blanc les lit à 75-95 %. Ce ne sont pas des fragments —
+    `'201'` ne contient pas `'min'` — donc `_contient` ne pouvait rien : ce
+    sont deux lectures DIFFÉRENTES du même endroit.
+
+    ⚠ L'AUDIT NE VOIT PAS CE DÉFAUT : il juge la géométrie, et les cadres
+    étaient corrects. Balayé de 0 à 60, il rend 5 défauts partout. La mesure
+    qui fait foi ici est le TEXTE, contre une vérité relevée à l'œil (les 24
     nombres des paginations du sommaire) :
 
-        écart   0 (règle seule)   13 / 24
-        écart  10 à 20            **17 / 24**   <- palier
-        écart  25 à 40            16 / 24
-        écart  60                 13 / 24
+        écart   0 (`_contient` seule)   13 / 24
+        écart  10 à 20                  **17 / 24**   <- palier
+        écart  25 à 40                  16 / 24
+        écart  60                       13 / 24
 
     On prend 20, le HAUT du palier : la substitution la plus prudente qui
     garde le plein gain.
+
+    ⚠ ON NE PREND QUE LE TEXTE — VOIR `_fusionner`. Les deux passes ne
+    découpent pas au même endroit, et emprunter la boîte du candidat coûtait
+    jusqu'à 29 pt de largeur. C'est la régression que l'aperçu a montrée alors
+    que tous les compteurs étaient bons.
 
     DEUX GARDE-FOUS, CHACUN IMPOSÉ PAR UNE RÉGRESSION MESURÉE. Sans eux, les
     9 substitutions des 3 pages contiennent 2 dégradations :
 
       · NE PAS PERDRE DE MATIÈRE — `'59à80'` (58 %) était remplacé par
-        `'69à'` (89 %), plus sûr mais amputé. Le candidat ne doit pas être
-        plus court que le rival ;
+        `'69à'` (89 %), plus sûr mais amputé ;
       · NE PAS DEVENIR MOINS LISIBLE — `'Il'` (30 %) était remplacé par
         `'||'` (55 %), deux traits de dessin lus avec assurance. C'est la
         mesure déjà faite dans `tri.py` : la confiance dit si un mot est bien
         LU, pas s'il est du TEXTE.
-
-    Résultat : 7 substitutions sur 3 pages, dont 4 gains nets
-    (`'md'`->`'187'`, `'sis'`->`'200'`, `'min'`->`'201'`, `'L'`->`'Voiture'`),
-    2 neutres (même texte mieux lu) et **aucune régression**.
     """
     tc = (cand.get("texte") or "").strip()
     tv = (vu.get("texte") or "").strip()
     if not tv or not tc:
         return False
-    if len(tc) > len(tv) and tv.lower() in tc.lower():
-        return True
     if cand.get("conf", 0.0) - vu.get("conf", 0.0) < _ECART_CONF_FRANC:
         return False
     # Ne pas perdre de matière, ne pas devenir moins lisible. Voir plus haut.
     return len(tc) >= len(tv) and _part_lisible(tc) >= _part_lisible(tv)
+
+
+def _prolonge(cand, vu) -> bool:
+    """Le candidat remplace-t-il le rival, d'une façon ou d'une autre ?
+
+    Conservée parce que l'un ou l'autre cas suffit à décider d'une
+    substitution ; `_fusionner` les distingue pour savoir s'il faut prendre
+    la boîte ou seulement le texte.
+    """
+    return _contient(cand, vu) or _mieux_lu(cand, vu)
 
 
 def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,

@@ -143,6 +143,21 @@ corrects. Balayé de 0 à 60, il rend 5 défauts partout. La mesure qui fait foi
 est donc le **TEXTE**, contre une vérité relevée à l'œil (les 24 nombres des
 paginations) : **13/24 → 17/24**.
 
+⚠ **ON NE PREND QUE LE TEXTE, JAMAIS LA BOÎTE EN Y.** Première version :
+la boîte du candidat était substituée aussi — et l'aperçu a montré une
+régression que TOUS les compteurs manquaient (audit 5, texte 17/24). Les deux
+passes ne découpent pas au même endroit : `'min'` couvre 389→427 (toute la
+pagination), `'201'` seulement 389→398. On perdait **29 pt de largeur**,
+`'201 à 212'` ressortait en deux blocs et `'187 à 200'` se faisait absorber
+par le paragraphe voisin, qui perdait son cadre.
+
+Le partage exact de ce que chaque passe sait : **en X le candidat** (il a su
+séparer `'201'`, `'à'`, `'212'` là où l'autre voyait un mot large de 38 pt),
+**en Y le rival** (sa hauteur et sa clé de ligne portent la baseline de toute
+la rangée — c'est en la déplaçant que la substitution disloquait des blocs,
+15 → 34). Un span qui a cédé ne bloque plus les suivants (`_cede`), sans quoi
+un mot faux en avalait trois justes.
+
 Deux garde-fous, chacun imposé par une régression parmi les 9 substitutions
 mesurées : ne pas remplacer par plus **court** (`'59à80'` → `'69à'`) ni par
 moins **lisible** (`'Il'` → `'||'`, deux traits lus avec assurance). Résultat :
@@ -243,6 +258,7 @@ concerné.
 | augmenter le DPI de lecture | 300 → 600 | 22/25/24/24 — **300 est déjà le meilleur** |
 | serrer `_ECART_MAX_GW` (recollage justifié) | 2,5 → 6,0 | 38/36/29/25/23/23 — **serrer DÉGRADE** |
 | plafonner **tous** les mots à l'interligne | — | 17 → 20, `bloc_dans_bloc` reparaît (0 → 2) |
+| abaisser `_CARS_MIN_COULEUR` 2 → 1 (pour le « à » de « 201 à 212 ») | — | audit **5 → 16**, et **aucun** nombre gagné |
 | accepter **2** mots pour une boîte de ligne | — | 17 → 19 ; `_paires_trop_hautes` conservée, **non appelée** |
 
 Les trois dernières méritent un mot :
