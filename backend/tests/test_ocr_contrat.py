@@ -904,6 +904,117 @@ def run():
        "_sans_traits_de_dessin(spans)" in _insp.getsource(lecture.spans_de_page),
        "la fonction existe mais n'est pas branchee")
 
+    # ---- DEFAIRE LES MOTS FONDUS (relecture par ligne) -------------------
+    #
+    # Signale A L'OEIL : la colonne des paginations ressortait en '532',
+    # '59a80', '81a96' -- plusieurs nombres soudes en un seul « mot ». Donner
+    # la bande SEULE a Tesseract (--psm 7) les separe a 93-96 %.
+    #
+    # Teste SANS Tesseract : on injecte la relecture qu'on aurait obtenue, ce
+    # que le contrat de spans rend possible. Un test qu'on ne peut pas lancer
+    # chez soi ne protege rien.
+    from engines.ocr import relecture as _rel               # noqa: E402
+
+    def _span(t, x0, x1, conf, base=105.0):
+        s = _sp(t, x0, x1)
+        s["_conf"] = conf
+        s["_base"] = base
+        return s
+
+    def _faux_relire(mots):
+        """Remplace l'appel Tesseract par une lecture connue."""
+        return lambda *a, **k: mots
+
+    _vrai = _rel._mots_relus
+    try:
+        # CAS 1 : MEME CONTENU, mieux decoupe. '81a96' lu a 80 %, la relecture
+        # rend '81' 'a' '96' a 93-96 %. L'ecart (13-16) ne suffirait PAS --
+        # c'est le DECOUPAGE qui prouve, pas la confiance.
+        fondu = _span("81à96", 393.4, 412.3, 80.0)
+        ligne = {"bbox": (310.0, 100.0, 413.0, 105.0)}
+        _rel._mots_relus = _faux_relire([
+            (393.1, 398.9, "81", 93.0), (401.0, 404.4, "à", 96.0),
+            (406.1, 412.6, "96", 96.0)])
+        out = _rel.defaire_les_mots_fondus([fondu], [ligne], object(), 4.17)
+        ok("un mot FONDU est defait par la relecture de sa ligne",
+           [s["text"] for s in out] == ["81", "à", "96"],
+           str([s["text"] for s in out]))
+
+        # LA GEOMETRIE VERTICALE EST CELLE DE L'ANCIEN, jamais celle du relu.
+        # C'est la lecon payee deux fois : un mot venu d'une autre lecture
+        # apporte sa boite et sa cle de ligne, donc deplace la baseline de
+        # toute sa rangee et disloque des blocs corrects ailleurs (15 -> 34).
+        ok("MUTATION : les mots defaits gardent la BASELINE de l'ancien",
+           all(s["_base"] == fondu["_base"] and s["bbox"][1] == fondu["bbox"][1]
+               and s["bbox"][3] == fondu["bbox"][3] for s in out),
+           str([(s["_base"], s["bbox"][1], s["bbox"][3]) for s in out]))
+
+        # ...et la geometrie HORIZONTALE est celle du RELU : c'est lui qui a
+        # su separer ce que l'autre voyait fondu.
+        ok("les mots defaits prennent la position X de la relecture",
+           [round(s["bbox"][0], 1) for s in out] == [393.1, 401.0, 406.1],
+           str([s["bbox"][0] for s in out]))
+
+        # CAS 2 : CONTENU DIFFERENT ('532' -> '53 a 68'). Le decoupage ne
+        # prouve plus rien puisque le texte change : on exige un ecart FRANC.
+        _rel._mots_relus = _faux_relire([
+            (393.1, 398.9, "53", 95.0), (401.0, 404.4, "à", 95.0),
+            (406.1, 412.6, "68", 95.0)])
+        sur = _rel.defaire_les_mots_fondus(
+            [_span("532", 393.4, 412.3, 64.0)], [ligne], object(), 4.17)
+        ok("un contenu DIFFERENT est accepte si la relecture est bien plus sure",
+           [s["text"] for s in sur] == ["53", "à", "68"],
+           str([s["text"] for s in sur]))
+
+        # MUTATION : le meme cas, mais la relecture n'est PAS plus sure --
+        # on ne remplace pas le texte sur un ecart de bruit.
+        tiede = _rel.defaire_les_mots_fondus(
+            [_span("532", 393.4, 412.3, 90.0)], [ligne], object(), 4.17)
+        ok("MUTATION : contenu different SANS ecart franc n'est pas remplace",
+           [s["text"] for s in tiede] == ["532"],
+           str([s["text"] for s in tiede]))
+
+        # MUTATION : une relecture PEU SURE ne defait rien, meme a contenu
+        # identique -- on remplacerait un decoupage douteux par un autre.
+        _rel._mots_relus = _faux_relire([
+            (393.1, 398.9, "81", 70.0), (401.0, 404.4, "à", 70.0),
+            (406.1, 412.6, "96", 70.0)])
+        doux = _rel.defaire_les_mots_fondus(
+            [_span("81à96", 393.4, 412.3, 80.0)], [ligne], object(), 4.17)
+        ok("MUTATION : une relecture PEU SURE ne defait rien",
+           [s["text"] for s in doux] == ["81à96"],
+           str([s["text"] for s in doux]))
+
+        # MUTATION : UN SEUL mot relu DANS LE SPAN n'est pas un mot fondu.
+        # Sans cette garde, la relecture remplacerait un span parfaitement
+        # lu des qu'elle le lit un peu mieux -- ce qui est un AUTRE sujet
+        # (voir `_mieux_lu`), traite sans toucher aux boites.
+        #
+        # ⚠ Le cas doit fournir DEUX mots relus sur la ligne pour franchir le
+        # `len(relus) < 2` d'entree, mais UN SEUL qui tombe dans le span
+        # juge. Sinon le test reste VERT quand on neutralise la garde, et il
+        # ne protege rien -- verifie par mutation.
+        # Le mot relu porte un texte DIFFERENT et une confiance tres
+        # superieure : sans la garde, il passerait par la seconde porte et
+        # remplacerait le span. C'est ce qui rend la mutation visible.
+        _rel._mots_relus = _faux_relire([
+            (393.1, 412.3, "AUTRE", 99.0),      # couvre tout le span
+            (330.0, 340.0, "et", 96.0)])        # hors du span, sur la ligne
+        seul = _rel.defaire_les_mots_fondus(
+            [_span("81à96", 393.4, 412.3, 40.0)], [ligne], object(), 4.17)
+        ok("MUTATION : un seul mot relu ne declenche pas l'eclatement",
+           [s["text"] for s in seul] == ["81à96"],
+           str([s["text"] for s in seul]))
+    finally:
+        _rel._mots_relus = _vrai
+
+    # ...ET LA RELECTURE EST BIEN BRANCHEE. La debrancher laisserait tous les
+    # checks ci-dessus VERTS.
+    from engines.ocr.engine import OCREngine as _Moteur      # noqa: E402
+    ok("la relecture est appelee par l'analyse de page",
+       "defaire_les_mots_fondus" in _insp.getsource(_Moteur.analyser_page),
+       "le module existe mais n'est pas branche")
+
     # ---- L'INTERLIGNE, RELEVE ET NON CHOISI -----------------------------
     # Une page synthetique dont on CONNAIT l'interligne : 5 lignes posees
     # tous les 16 pt, mots de 11 pt de haut.

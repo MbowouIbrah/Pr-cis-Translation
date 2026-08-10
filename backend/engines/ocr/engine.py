@@ -47,6 +47,7 @@ from engines.ocr import apercu as apercu_debug
 from engines.ocr import fusion
 from engines.ocr import justifie
 from engines.ocr import lecture
+from engines.ocr import relecture
 from engines.ocr import tri
 from engines.ocr.spans import RepertoireConfiance, valider_spans
 
@@ -93,8 +94,10 @@ class OCREngine:
         résultat, avec leur raison : un tri qu'on ne peut pas inspecter ne se
         règle pas.
         """
+        rendu = {}
         spans = lecture.spans_de_page(page, langue=self.langue, dpi=self.dpi,
-                                      double_lecture=double_lecture)
+                                      double_lecture=double_lecture,
+                                      rendu=rendu)
         vide = {"spans": [], "lignes": [], "blocs": [], "retenus": [],
                 "ecartes": [], "confiances": None}
         if not spans:
@@ -109,7 +112,17 @@ class OCREngine:
             return vide
 
         moteur = self.mise_en_page
-        lignes = justifie.recoller(moteur._group_text_lines(spans))
+        # DÉFAIRE LES MOTS FONDUS, une fois les lignes connues et avant tout
+        # regroupement en paragraphes. L'ordre est imposé par la méthode :
+        # `--psm 7` a besoin d'une ligne DÉJÀ délimitée, et les paragraphes
+        # doivent se former sur les spans définitifs. Voir `relecture.py`.
+        lignes = moteur._group_text_lines(spans)
+        if rendu.get("image") is not None:
+            spans = relecture.defaire_les_mots_fondus(
+                spans, lignes, rendu["image"], rendu["echelle"],
+                langue=self.langue)
+            lignes = moteur._group_text_lines(spans)
+        lignes = justifie.recoller(lignes)
         blocs = moteur._group_paragraphs(lignes)
         retenus, ecartes = tri.trier(blocs)
         # APRÈS le tri, et c'est délibéré : recoller deux morceaux dont l'un

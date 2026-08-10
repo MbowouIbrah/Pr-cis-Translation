@@ -1026,11 +1026,18 @@ def _prolonge(cand, vu) -> bool:
 
 
 def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
-                  double_lecture: bool = False) -> list[dict]:
+                  double_lecture: bool = False, rendu=None) -> list[dict]:
     """Lit une page scannée et rend des spans conformes au contrat.
 
     Les coordonnées rendues sont en POINTS de la page (pas en pixels) : c'est
     l'unité du moteur PDF, et celle où les cadres se dessineront.
+
+    `rendu`, s'il est fourni, reçoit `{"image": ..., "echelle": ...}` — l'image
+    déjà produite ici. La RELECTURE PAR LIGNE en a besoin (`relecture.py`) et
+    la refabriquer coûterait un second rendu de la page à 300 dpi pour un
+    résultat identique. On la prête plutôt que de la rendre : la signature
+    reste celle d'une fonction qui rend des spans, et les appelants qui n'en
+    veulent pas ne changent pas.
 
     LA DOUBLE LECTURE EST DÉSORMAIS OPTIONNELLE, ET ÉTEINTE PAR DÉFAUT
     -------------------------------------------------------------------
@@ -1062,6 +1069,8 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
     ne le paye plus par défaut.
     """
     img, echelle = _image_de_page(page, dpi)
+    if rendu is not None:
+        rendu["image"], rendu["echelle"] = img, echelle
     gris = img.convert("L")
 
     mots = _mots_bruts(img, langue)

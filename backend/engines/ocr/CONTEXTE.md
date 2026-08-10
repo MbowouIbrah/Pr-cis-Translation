@@ -28,7 +28,7 @@ d'autres problèmes de détection à traiter ensuite.
 ## La chaîne
 
 ```
-scan ─▶ lecture.py ─▶ spans ─▶ _group_text_lines ─▶ _group_paragraphs ─▶ tri.py ─▶ fusion.py ─▶ apercu.py
+scan ─▶ lecture.py ─▶ spans ─▶ _group_text_lines ─▶ relecture.py ─▶ _group_paragraphs ─▶ tri.py ─▶ fusion.py ─▶ apercu.py
                         │       + justifie.py         (moteur PDF)                    │
                         │        (moteur PDF)                                         └── audit.py juge
                         └── contrat de 14 champs : spans.py
@@ -131,6 +131,30 @@ vide, zéro mot natif. La piste « demander au PDF où sont les dessins » est
 close — mesurée en 30 secondes plutôt qu'en une journée.
 
 ## Les correctifs qui ont payé
+
+**RELIRE LA LIGNE POUR DÉFAIRE LES MOTS FONDUS** (`relecture.py`, 10/08).
+Signalé à l'œil : la colonne des paginations ressortait en `'532'`,
+`'59à80'`, `'81à96'`, `'(07à52'` — plusieurs nombres soudés en un seul
+« mot ». Or ces lignes sont parfaitement lisibles : c'est la **segmentation
+de la page entière** qui échoue, pas la reconnaissance.
+
+Donner la bande SEULE à Tesseract (`--psm 7`, sur une ligne déjà délimitée
+par le regroupement) les sépare à 93-96 %. Mesuré : **8/12 → 9/12**
+paginations correctes, **audit inchangé à 5**.
+
+⚠ **On ne remplace que le DÉCOUPAGE** : chaque mot relu est reposé dans la
+hauteur et sur la baseline du span qu'il remplace — **en X le relu, en Y
+l'ancien**. C'est la leçon payée deux fois le même jour.
+
+Deux portes, et il en faut deux : **même contenu mieux découpé**
+(`'81à96'` → `'81' 'à' '96'`, lu à 80 % contre 93-96 % — l'écart de 13-16 ne
+suffirait pas, **la confiance n'est pas le bon signal**, un span fondu peut
+être lu avec assurance) ; **contenu différent** (`'532'` → `'53 à 68'`, où le
+découpage ne prouve plus rien et où l'on exige un écart franc).
+
+Coût : un appel Tesseract par ligne (~300 sur 3 pages). À généraliser, le
+réserver aux lignes suspectes.
+
 
 **LES FLÈCHES NE SONT PAS DES MOTS** (`_sans_traits_de_dessin`, 10/08).
 Signalé à l'œil sur le sommaire : les flèches et filets de conduite (`'—'`,
@@ -403,6 +427,6 @@ Le banc minimal (~2 min de construction contre ~15 pour l'image complète)
 installe le **même** binaire et les **mêmes** paquets Python ; il en retire
 seulement ce que l'OCR n'appelle pas.
 
-**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 124/124) : le
+**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 132/132) : le
 contrat de spans permet d'injecter des mots dont on connaît la vérité. Un test
 qu'on ne peut pas lancer chez soi ne protège rien.
