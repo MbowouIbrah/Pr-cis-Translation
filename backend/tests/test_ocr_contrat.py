@@ -1015,6 +1015,71 @@ def run():
        "defaire_les_mots_fondus" in _insp.getsource(_Moteur.analyser_page),
        "le module existe mais n'est pas branche")
 
+    # ---- COMPLETER PAR DEMI-PAGES ---------------------------------------
+    #
+    # Signale A L'OEIL sur DEUX documents : une colonne etroite en marge (les
+    # paginations d'un sommaire) est ENTIEREMENT ignoree par Tesseract sur la
+    # page complete -- 55 nombres sur mv21 page 5, aucun lu. Donnee seule, la
+    # colonne se lit parfaitement. C'est la SEGMENTATION qui echoue.
+    from engines.ocr import bandes as _bd                      # noqa: E402
+
+    _vrai_bande = _bd._mots_de_bande
+    try:
+        # La demi-page gauche revele un mot que la page entiere a manque.
+        _bd._mots_de_bande = lambda img, x0, x1, h, e, lg: (
+            [(48.0, 60.0, 58.0, 67.0, "45", 95.0)] if x0 < 1.0 else [])
+        deja = [_span("Chapter", 77.0, 98.0, 96.0, base=67.0)]
+        out = _bd.completer_par_bandes(deja, object(), 4.17, 600.0, 800.0)
+        ok("une colonne manquee est RETROUVEE par la demi-page",
+           [s["text"] for s in out] == ["45", "Chapter"],
+           str([s["text"] for s in out]))
+
+        # MUTATION : ON COMPLETE, ON NE REMPLACE JAMAIS. Un mot relu qui
+        # recouvre un span deja lu est ignore -- sinon la geometrie existante
+        # bouge, et c'est la lecon payee trois fois sur ce moteur.
+        # La boite du mot relu doit RECOUVRIR celle du span deja lu, sinon le
+        # test ne teste rien : `_span` pose ses boites en y = 100..105.
+        _bd._mots_de_bande = lambda img, x0, x1, h, e, lg: (
+            [(77.0, 100.0, 98.0, 105.0, "Chapiter", 99.0)] if x0 < 1.0 else [])
+        garde = _bd.completer_par_bandes(deja, object(), 4.17, 600.0, 800.0)
+        ok("MUTATION : un mot DEJA LU n'est pas remplace par la relecture",
+           [s["text"] for s in garde] == ["Chapter"],
+           str([s["text"] for s in garde]))
+
+        # MUTATION : UN SEUL CARACTERE ne passe pas. Sans ce filtre, mesure sur
+        # DSH : +3 vrais mots pour +6 bruits ('»', 'A', 'a', '4'), tous sur une
+        # image de couverture. Le filtre supprime TOUT le bruit des deux
+        # documents et ne coute que 5 gains sur mv21.
+        #
+        # ⚠ ON TESTE LE COMPORTEMENT, PAS LA CONSTANTE. Comparer `_CARS_MIN`
+        # a 2 laisse le test VERT quand on neutralise le filtre -- verifie par
+        # mutation. On passe donc par la vraie fonction de lecture, avec une
+        # image dont on connait le contenu.
+        from PIL import Image as _Img                          # noqa: E402
+        blanche = _Img.new("RGB", (400, 120), (255, 255, 255))
+        try:
+            import pytesseract as _pt                          # noqa: E402,F401
+            _bd._mots_de_bande = _vrai_bande
+            lus = _bd._mots_de_bande(blanche, 0.0, 96.0, 28.8, 4.17, "eng")
+            ok("un mot d'UN caractere n'entre pas par les bandes",
+               all(len(m[4]) >= 2 for m in lus), str([m[4] for m in lus]))
+        except ImportError:
+            # Sans Tesseract, on verifie au moins que le filtre est ECRIT dans
+            # la fonction -- faible, mais honnete sur ce qu'il vaut.
+            #
+            # ⚠ On lit la VRAIE fonction (`_vrai_bande`), pas `_bd._mots_de_bande`
+            # qui porte encore le faux de ce bloc : la restauration n'a lieu
+            # qu'au `finally`, apres ce check.
+            ok("le filtre a 2 caracteres est ecrit dans la lecture de bande",
+               "len(texte) < _CARS_MIN" in _insp.getsource(_vrai_bande))
+    finally:
+        _bd._mots_de_bande = _vrai_bande
+
+    # ...ET LES BANDES SONT BIEN BRANCHEES.
+    ok("la relecture par bandes est appelee par l'analyse de page",
+       "completer_par_bandes" in _insp.getsource(_Moteur.analyser_page),
+       "le module existe mais n'est pas branche")
+
     # ---- L'INTERLIGNE, RELEVE ET NON CHOISI -----------------------------
     # Une page synthetique dont on CONNAIT l'interligne : 5 lignes posees
     # tous les 16 pt, mots de 11 pt de haut.

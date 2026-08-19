@@ -44,6 +44,7 @@ import os
 import fitz
 
 from engines.ocr import apercu as apercu_debug
+from engines.ocr import bandes
 from engines.ocr import fusion
 from engines.ocr import justifie
 from engines.ocr import lecture
@@ -112,6 +113,15 @@ class OCREngine:
             return vide
 
         moteur = self.mise_en_page
+        # COMPLÉTER PAR DEMI-PAGES, avant tout regroupement. Une colonne
+        # étroite en marge (les paginations d'un sommaire) est ignorée par
+        # Tesseract sur la page entière et parfaitement lue sur une moitié.
+        # On ajoute seulement ce qui manque — voir `bandes.py`.
+        if rendu.get("image") is not None:
+            spans = bandes.completer_par_bandes(
+                spans, rendu["image"], rendu["echelle"],
+                page.rect.width, page.rect.height, langue=self.langue)
+
         # DÉFAIRE LES MOTS FONDUS, une fois les lignes connues et avant tout
         # regroupement en paragraphes. L'ordre est imposé par la méthode :
         # `--psm 7` a besoin d'une ligne DÉJÀ délimitée, et les paragraphes

@@ -28,7 +28,7 @@ d'autres problèmes de détection à traiter ensuite.
 ## La chaîne
 
 ```
-scan ─▶ lecture.py ─▶ spans ─▶ _group_text_lines ─▶ relecture.py ─▶ _group_paragraphs ─▶ tri.py ─▶ fusion.py ─▶ apercu.py
+scan ─▶ lecture.py ─▶ bandes.py ─▶ spans ─▶ _group_text_lines ─▶ relecture.py ─▶ _group_paragraphs ─▶ tri.py ─▶ fusion.py ─▶ apercu.py
                         │       + justifie.py         (moteur PDF)                    │
                         │        (moteur PDF)                                         └── audit.py juge
                         └── contrat de 14 champs : spans.py
@@ -131,6 +131,31 @@ vide, zéro mot natif. La piste « demander au PDF où sont les dessins » est
 close — mesurée en 30 secondes plutôt qu'en une journée.
 
 ## Les correctifs qui ont payé
+
+**COMPLÉTER PAR DEMI-PAGES** (`bandes.py`, 10/08). Une colonne étroite en
+marge — les paginations d'un sommaire — est **entièrement ignorée** par
+Tesseract sur la page complète : 55 nombres sur mv21 page 5, **aucun lu**, et
+le même défaut sur le Code de la Route. Ce n'est ni la reconnaissance ni la
+ligne : donnée seule, la colonne se lit parfaitement (`--psm 6` rend
+`'45 45 45 46 47…'`). C'est la SEGMENTATION de la page qui décide qu'une
+colonne étroite n'est pas du texte.
+
+On lui donne donc moins de page à la fois. Mesuré sur 20 pages (2 documents,
+5687 mots de vérité) :
+
+| | mots jamais lus | audit |
+|---|---|---|
+| mv21 | 75 → **25** (page 5 : 55 → 5) | 20 → 20 |
+| DSH | 27 → **26** | 7 → 7 |
+
+⚠ **On complète, on ne remplace jamais** : tout mot relu qui recouvre un span
+existant est ignoré, donc la géométrie ne bouge pas d'un point.
+
+⚠ **Un seul caractère ne passe pas**, et c'est mesuré : sans ce filtre, DSH
+gagnait 3 vrais mots pour **6 bruits** (`'»'`, `'A'`, `'a'`, `'4'`), tous sur
+une image de couverture. Le filtre coûte 5 gains sur mv21 et supprime **tout**
+le bruit des deux documents.
+
 
 **RELIRE LA LIGNE POUR DÉFAIRE LES MOTS FONDUS** (`relecture.py`, 10/08).
 Signalé à l'œil : la colonne des paginations ressortait en `'532'`,
@@ -427,6 +452,6 @@ Le banc minimal (~2 min de construction contre ~15 pour l'image complète)
 installe le **même** binaire et les **mêmes** paquets Python ; il en retire
 seulement ce que l'OCR n'appelle pas.
 
-**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 132/132) : le
+**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 136/136) : le
 contrat de spans permet d'injecter des mots dont on connaît la vérité. Un test
 qu'on ne peut pas lancer chez soi ne protège rien.
