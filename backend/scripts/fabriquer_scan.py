@@ -62,6 +62,27 @@ def verite_de_page(page) -> list[dict]:
                 if (s.get("text") or "").strip():
                     spans.append(s)
 
+    #: Ce qui, dans un NOM de police, annonce une graisse.
+    #:
+    #: ⚠ `flags & 16` NE SUFFIT PAS, et c'est mesuré : mv21 porte des titres
+    #: en `ProximaNovaCond-Extrabld` que PyMuPDF rend avec `gras=False`. Le
+    #: drapeau ne voit que le gras SYNTHETIQUE ; une police dont la graisse
+    #: est dans la fonte y echappe. Une verite qui les compte comme maigres
+    #: accuse la detection a tort -- 187 « faux positifs » sur mv21 etaient
+    #: du vrai gras.
+    #: ⚠ `medium` N'EN EST PAS. Mesure : l'inclure fait passer la verite de
+    #: DSH de 133 a 519 gras (`AvenirLTStd-Medium` est le corps de texte du
+    #: document), et la detection tombe de 74 % a 20 % -- contre un moteur
+    #: qui n'avait pas change. Une verite trop large accuse a tort.
+    GRAISSES = ("bold", "black", "heavy", "extrabld", "extrabold",
+                "semibold", "demibold", "-bd")
+
+    def est_gras(s):
+        if s.get("flags", 0) & 16:
+            return True
+        nom = (s.get("font") or "").lower()
+        return any(g in nom for g in GRAISSES)
+
     def mise_en_forme(bb):
         """Le span qui recouvre le mieux cette boite de mot."""
         best, score = None, 0.0
@@ -88,7 +109,7 @@ def verite_de_page(page) -> list[dict]:
             "bbox": bb,
             "police": s.get("font", "") if s else "",
             "corps": round(s.get("size", 0.0), 2) if s else 0.0,
-            "gras": bool(s.get("flags", 0) & 16) if s else False,
+            "gras": est_gras(s) if s else False,
             "italique": bool(s.get("flags", 0) & 2) if s else False,
             "couleur": s.get("color", 0) if s else 0,
         })

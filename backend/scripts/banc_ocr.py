@@ -98,7 +98,7 @@ def mesurer_page(attendus, lus) -> dict:
             d_corps.append(abs(estime - a["corps"]) / a["corps"])
         if a["gras"]:
             gras_total += 1
-            if lu.get("bold"):
+            if lu.get("_gras") or lu.get("bold"):
                 gras_vus += 1
     return {
         "attendus": len(attendus), "lus": len(lus),

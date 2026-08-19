@@ -1080,6 +1080,61 @@ def run():
        "completer_par_bandes" in _insp.getsource(_Moteur.analyser_page),
        "le module existe mais n'est pas branche")
 
+    # ---- LA GRAISSE : l'EPAISSEUR DU TRAIT, pas la densite ---------------
+    #
+    # La v1 avait essaye la DENSITE D'ENCRE et s'etait trompee (0,340 contre
+    # 0,337). Trois mesures eprouvees contre 509 mots gras de verite :
+    #
+    #     densite d'encre     0,373 / 0,268   mal
+    #     NOIRCEUR            0,878 / 0,878   pas du tout
+    #     EPAISSEUR DE TRAIT  4,368 / 2,042   franchement
+    from engines.ocr import graisse as _gr                     # noqa: E402
+    import numpy as _np                                        # noqa: E402
+
+    # Une image SYNTHETIQUE dont on connait la verite : deux traits fins et
+    # un trait EPAIS, sur fond blanc.
+    tableau = _np.full((40, 120), 255, dtype=_np.uint8)
+    tableau[10:30, 10:12] = 0        # trait de 2 px
+    tableau[10:30, 30:32] = 0        # trait de 2 px
+    tableau[10:30, 50:58] = 0        # trait de 8 px -- le gras
+
+    class _FausseImage:
+        def convert(self, mode):
+            class _G:
+                def __array__(self, dtype=None):
+                    return tableau
+            return _G()
+
+    def _sg(x0, x1):
+        sp = _sp("mot", x0, x1)
+        sp["bbox"] = (x0, 10.0, x1, 30.0)
+        return sp
+
+    trio = [_sg(9.0, 13.0), _sg(29.0, 33.0), _sg(49.0, 59.0)]
+    # 8 spans minimum pour qu'une mediane ait un sens : on complete avec des
+    # copies des traits fins.
+    trio += [_sg(9.0, 13.0) for _ in range(6)]
+    _gr.marquer_le_gras(trio, _FausseImage(), 1.0)
+    ok("le TRAIT EPAIS est reconnu comme gras",
+       trio[2].get("_gras") is True, str([t.get("_gras") for t in trio[:3]]))
+    ok("MUTATION : les traits FINS ne sont pas marques gras",
+       not trio[0].get("_gras") and not trio[1].get("_gras"),
+       str([t.get("_gras") for t in trio[:3]]))
+
+    # ⚠ ON POSE `_gras`, JAMAIS `bold` NI `flags`. `_group_paragraphs` du
+    # moteur PDF COUPE un paragraphe quand `bold` change (« titre gras vs
+    # corps ») : marquer le gras faisait passer la reference de 5 a 7 defauts
+    # et `blocs_colles` de 2 a 5. La graisse est une propriete de RENDU, pas
+    # de structure -- elle vit a cote, comme `_corps`.
+    ok("MUTATION : la graisse ne touche NI bold NI flags (le regroupement "
+       "coupe dessus)",
+       trio[2].get("bold") is False and not (trio[2].get("flags", 0) & 16),
+       f"bold={trio[2].get('bold')} flags={trio[2].get('flags')}")
+
+    ok("la graisse est appelee par la lecture",
+       "marquer_le_gras" in _insp.getsource(lecture.spans_de_page),
+       "le module existe mais n'est pas branche")
+
     # ---- L'INTERLIGNE, RELEVE ET NON CHOISI -----------------------------
     # Une page synthetique dont on CONNAIT l'interligne : 5 lignes posees
     # tous les 16 pt, mots de 11 pt de haut.

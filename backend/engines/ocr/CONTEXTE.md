@@ -132,6 +132,40 @@ close — mesurée en 30 secondes plutôt qu'en une journée.
 
 ## Les correctifs qui ont payé
 
+**LA GRAISSE, PAR L'ÉPAISSEUR DU TRAIT** (`graisse.py`, 10/08). La v1 avait
+essayé la **densité d'encre** et s'était trompée (0,340 contre 0,337). Trois
+mesures éprouvées contre 509 mots gras de vérité, deux documents :
+
+| mesure | gras | maigre | sépare ? |
+|---|---|---|---|
+| densité d'encre | 0,373 | 0,268 | mal |
+| noirceur | 0,878 | 0,878 | **pas du tout** |
+| **épaisseur de trait** | 4,368 | 2,042 | **franchement** |
+
+La densité échoue parce qu'un mot maigre SERRÉ remplit autant sa boîte ; la
+noirceur parce qu'un scan binarise. L'épaisseur (`aire d'encre / pixels de
+bord`) mesure ce qu'est le gras, et rien ne l'imite.
+
+⚠ **Rapportée à la page**, jamais en absolu : les deux documents donnent
+4,368 et 1,795 pour du gras. Rapportée à la médiane, la mesure **converge** —
+1,485 et 1,520 pour le gras, 0,998 et 0,991 pour le maigre.
+
+⚠ **On pose `_gras`, jamais `bold` ni `flags`.** `_group_paragraphs` COUPE un
+paragraphe quand `bold` change (« titre gras vs corps ») : marquer le gras
+faisait passer la référence de 5 à 7 défauts. La graisse est une propriété de
+**rendu**, pas de structure — elle vit à côté, comme `_corps`.
+
+Mesuré : **0 % → 74 %** (DSH) et **82 %** (mv21), pour 1,2 % et 4,2 % de faux
+positifs.
+
+⚠ **Et la VÉRITÉ était fausse.** `flags & 16` ne voit que le gras
+*synthétique* : mv21 porte des titres en `ProximaNovaCond-Extrabld` que
+PyMuPDF rend `gras=False`. 187 « faux positifs » étaient du vrai gras. Mais
+élargir aux noms de police demande de la mesure aussi — inclure `medium`
+faisait passer la vérité de DSH de 133 à 519 gras et la détection de 74 % à
+20 %, contre un moteur inchangé. **Une vérité trop large accuse à tort.**
+
+
 **COMPLÉTER PAR DEMI-PAGES** (`bandes.py`, 10/08). Une colonne étroite en
 marge — les paginations d'un sommaire — est **entièrement ignorée** par
 Tesseract sur la page complète : 55 nombres sur mv21 page 5, **aucun lu**, et
@@ -452,6 +486,6 @@ Le banc minimal (~2 min de construction contre ~15 pour l'image complète)
 installe le **même** binaire et les **mêmes** paquets Python ; il en retire
 seulement ce que l'OCR n'appelle pas.
 
-**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 136/136) : le
+**Les tests tournent SANS Tesseract** (`test_ocr_contrat.py`, 140/140) : le
 contrat de spans permet d'injecter des mots dont on connaît la vérité. Un test
 qu'on ne peut pas lancer chez soi ne protège rien.

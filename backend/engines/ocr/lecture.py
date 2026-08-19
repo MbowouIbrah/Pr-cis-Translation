@@ -1167,6 +1167,10 @@ def spans_de_page(page, langue: str = "fra", dpi: int = DPI_LECTURE,
     _aligner_sur_lignes_ocr(spans)
     _brider_les_corps(spans)
     spans = _sans_traits_de_dessin(spans)
+    # LA GRAISSE, sur les boîtes définitives : elle se lit dans les PIXELS, et
+    # `_boite_encre` vient de les cadrer au plus près. Voir `graisse.py`.
+    from engines.ocr import graisse
+    graisse.marquer_le_gras(spans, img, echelle)
     spans.sort(key=lambda s: (round(s["_base"], 1), s["bbox"][0]))
     return spans
 
