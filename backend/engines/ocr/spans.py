@@ -110,6 +110,55 @@ def _a_jambage(texte: str) -> bool:
     return any(c in _JAMBAGES for c in (texte or ""))
 
 
+#: Part du CORPS qu'occupe l'encre d'un mot, selon ce qu'il contient.
+#:
+#: Relevé sur deux documents indépendants (banc du 10/08, 2411 mots appariés
+#: à leur vérité typographique) :
+#:
+#:     mot contenant                    DSH      mv21
+#:     ─────────────────────────────────────────────────
+#:     ni hampe ni jambage              0,510    0,510
+#:     une hampe ou une capitale        0,735    0,686
+#:     un jambage                         —      0,690
+#:     les deux                         0,918    0,828
+#:
+#: On prend le MILIEU des deux mesures quand elles diffèrent : 0,71 pour une
+#: hampe, 0,87 pour les deux. La x-height, elle, vaut 0,510 sur les DEUX
+#: documents à trois décimales — c'est une constante typographique, pas un
+#: réglage.
+#:
+#: ⚠ CES VALEURS NE SONT PAS DES SEUILS. Aucune décision binaire n'en dépend :
+#: ce sont des facteurs d'échelle, et une erreur de 5 % sur l'un donne 5 %
+#: d'erreur sur le corps, jamais un mot classé du mauvais côté.
+_PART_X_HEIGHT = 0.51
+_PART_UNE_EXTREMITE = 0.71
+_PART_DEUX_EXTREMITES = 0.87
+
+#: Ce qui monte au-dessus de la hauteur d'x, et ce qui descend en dessous.
+#: Les chiffres montent : dans presque toutes les polices ils sont alignés sur
+#: les capitales.
+_MONTE = set("ABCDEFGHIJKLMNOPQRSTUVWXYZbdfhklt0123456789ÀÂÄÉÈÊËÎÏÔÖÙÛÜÇ")
+_DESCEND = set("gjpqy")
+
+
+def _part_occupee(texte: str) -> float:
+    """Quelle fraction du corps l'encre de ce mot occupe-t-elle ?
+
+    C'est la question que la hauteur seule ne pose pas : « nom » et « Jgq »
+    au même corps ne laissent pas la même trace. Voir `_PART_X_HEIGHT`.
+    """
+    t = (texte or "").strip()
+    if not t:
+        return _PART_X_HEIGHT
+    monte = any(c in _MONTE for c in t)
+    descend = any(c in _DESCEND for c in t)
+    if monte and descend:
+        return _PART_DEUX_EXTREMITES
+    if monte or descend:
+        return _PART_UNE_EXTREMITE
+    return _PART_X_HEIGHT
+
+
 def span_depuis_mot(texte: str, bbox, *, confiance: float = 100.0,
                     taille: float | None = None,
                     police: str | None = None,
@@ -131,15 +180,31 @@ def span_depuis_mot(texte: str, bbox, *, confiance: float = 100.0,
     On la déduit de la boîte et du nombre de caractères, exactement comme le
     moteur PDF. Un mot de 5 lettres large de 50 pt donne 10 pt par glyphe.
 
-    POURQUOI LA TAILLE SE DÉDUIT DE LA HAUTEUR
-    -------------------------------------------
-    Un scan n'a pas de « corps de police » : il a des pixels. La hauteur de la
-    boîte d'encre en est la meilleure approximation disponible, et elle suffit
-    au regroupement, qui ne s'en sert que pour des comparaisons relatives
-    (tolérance de baseline, écart de paragraphe).
+    LA TAILLE SE DÉDUIT DE LA HAUTEUR **ET DES CARACTÈRES DU MOT**
+    ----------------------------------------------------------------
+    Un scan n'a pas de « corps de police » : il a des pixels. Mais la hauteur
+    d'encre seule N'EST PAS le corps, et l'écart n'est pas du bruit — c'est un
+    rapport typographique, mesuré sur deux documents INDÉPENDANTS (banc du
+    10/08, 2411 mots appariés à leur vérité) :
 
-    On ne prétend PAS mesurer le corps typographique réel. La v1 a essayé d'en
-    déduire la graisse et s'est trompée (densité d'encre 0,340 contre 0,337).
+        mot contenant                    DSH      mv21
+        ─────────────────────────────────────────────────
+        ni hampe ni jambage (« nom »)    0,510    0,510
+        une hampe ou capitale            0,735    0,686
+        un jambage                         —      0,690
+        les deux (« Jg »)                0,918    0,828
+
+    **0,510 sur les deux documents, à trois décimales.** Ce n'est pas une
+    coïncidence : un mot sans hampe ni jambage n'occupe que la hauteur d'x,
+    qui vaut environ la moitié du corps dans toute typographie latine.
+
+    On divise donc la hauteur d'encre par ce que le mot OCCUPE réellement.
+    Sans cette correction, le corps était sous-estimé de 23,5 % en médiane, et
+    un titre rendu à 13,7 pt au lieu de 18.
+
+    ⚠ CE QU'ON NE PRÉTEND TOUJOURS PAS FAIRE : déduire la GRAISSE de l'encre.
+    La v1 a essayé et s'est trompée (densité 0,340 contre 0,337). La graisse
+    demande une autre mesure, pas un autre seuil.
     """
     x0, y0, x1, y1 = (float(v) for v in bbox)
     texte = texte or ""
@@ -147,6 +212,15 @@ def span_depuis_mot(texte: str, bbox, *, confiance: float = 100.0,
     # largeur de glyphe si l'on compte l'espace.
     nchar = max(1, len(texte.strip()))
     hauteur = max(1.0, y1 - y0)
+    # `size` RESTE LA HAUTEUR D'ENCRE, et c'est délibéré : le regroupement
+    # s'en sert comme d'une échelle RELATIVE (tolérance de rangée à
+    # 0,45 x size). Y mettre le corps réel élargit cette tolérance pour les
+    # mots sans hampe et soude des blocs voisins — mesuré sur le document de
+    # référence : 5 -> 7 défauts, et 6 checks du contrat tombent.
+    #
+    # Le corps typographique va donc dans `_corps`, à côté. Deux usages
+    # distincts, deux champs : le rendu veut le corps réel, le regroupement
+    # veut une échelle stable.
     corps = float(taille) if taille else hauteur
     # LA LIGNE DE BASE SE DÉDUIT DU HAUT, JAMAIS DU BAS.
     #
@@ -208,6 +282,20 @@ def span_depuis_mot(texte: str, bbox, *, confiance: float = 100.0,
         # cellule).
         "_ink_x0": x0,
         "_ink_x1": x1,
+        # LE CORPS TYPOGRAPHIQUE, à côté de `size` et non à sa place.
+        #
+        # `size` est la hauteur d'encre : une échelle RELATIVE, stable, dont
+        # le regroupement se sert pour ses tolérances. `_corps` est le corps
+        # réel estimé, celui qu'un rendu doit reproduire pour qu'un titre
+        # reste un titre.
+        #
+        # Mesuré (banc du 10/08, 2411 mots appariés à leur vérité sur deux
+        # documents indépendants) : la hauteur d'encre seule sous-estimait le
+        # corps de 23,5 % en médiane — un titre de 18 pt rendu à 13,7. En
+        # divisant par ce que le mot OCCUPE, l'écart tombe à 3,4 % (mv21) et
+        # 9,9 % (DSH). Voir `_part_occupee`.
+        "_corps": (float(taille) if taille
+                   else hauteur / _part_occupee(texte)),
         CHAMP_CONFIANCE: float(confiance),
     }
 
