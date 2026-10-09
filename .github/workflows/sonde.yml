@@ -1,9 +1,0 @@
-name: Sonde
-on:
-  push:
-    branches: [chore/mise-en-production-v1.1.0]
-jobs:
-  sonde:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo ok
