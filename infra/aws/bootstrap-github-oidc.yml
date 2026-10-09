@@ -1,0 +1,489 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  L'AMORÇAGE — à déployer UNE SEULE FOIS, à la main
+#
+#      aws cloudformation deploy \
+#        --stack-name precis-translator-bootstrap \
+#        --template-file infra/aws/bootstrap-github-oidc.yml \
+#        --capabilities CAPABILITY_NAMED_IAM \
+#        --parameter-overrides AlertEmail=vous@domaine.com
+#
+#  Cette pile crée les rôles que les workflows ASSUMENT. Elle ne peut donc pas
+#  être déployée par eux : c'est la définition même d'un amorçage. Un poste
+#  authentifié la pose une fois, et plus personne n'y revient.
+#
+#  CE QU'ELLE GARANTIT : aucune clé AWS n'existe nulle part — ni sur le poste,
+#  ni dans les secrets GitHub. GitHub présente un jeton signé par son propre
+#  fournisseur d'identité, AWS le vérifie et accorde un rôle pour une heure. Il
+#  n'y a pas de secret à voler, ni à faire tourner.
+# ═════════════════════════════════════════════════════════════════════════════
+
+Description: >-
+  Precis Translator - role GitHub Actions par OIDC (aucune cle stockee), role
+  d'execution CloudFormation, et alerte de budget.
+
+Parameters:
+
+  GitHubOrg:
+    Type: String
+    Default: MbowouIbrah
+    Description: Proprietaire du depot GitHub.
+
+  GitHubRepo:
+    Type: String
+    Default: Pr-cis-Translation
+    Description: >-
+      Nom EXACT du depot, tirets inclus. Une faute ici et le `sub` du jeton ne
+      correspond a rien : AssumeRoleWithWebIdentity echoue sans dire pourquoi.
+
+  GitHubRepositoryId:
+    Type: String
+    Default: ''
+    Description: >-
+      ID NUMERIQUE immuable du depot (`gh api repos/<org>/<repo> --jq .id`).
+      Laisser VIDE sauf si vous avez aussi ajoute `repository_id` aux claims
+      OIDC du depot (Settings > Actions > General). Renseigne SANS ce reglage,
+      il produit une condition qui ne correspondra jamais, et le deploiement
+      echoue sur un refus incomprehensible.
+
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ''
+    Description: >-
+      ARN d'un fournisseur OIDC GitHub DEJA present sur le compte. Le
+      fournisseur n'existe qu'une fois par compte AWS : le creer deux fois fait
+      echouer la pile. Verifier avant :
+      aws iam list-open-id-connect-providers
+
+  DeployStackName:
+    Type: String
+    Default: precis-translator-prod
+    Description: >-
+      Nom de la pile applicative. Doit etre IDENTIQUE au `--stack-name` des
+      workflows : c'est sur ce nom que l'autorisation CloudFormation est
+      restreinte, et une divergence donne un AccessDenied muet.
+
+  SsmPrefix:
+    Type: String
+    Default: /precis-translator/prod
+    Description: >-
+      Prefixe des parametres. Commence par `/` et ne finit PAS par `/`.
+
+  ProjectTag:
+    Type: String
+    Default: precis-translator
+    Description: >-
+      Valeur du tag `Projet` porte par l'instance. C'est par ce tag que
+      `ssm:SendCommand` est restreint : s'il diverge du tag pose par la pile
+      applicative, le deploiement est refuse.
+
+  AlertEmail:
+    Type: String
+    Default: ''
+    Description: >-
+      Destinataire de l'alerte de budget. Vide = AUCUN budget n'est cree et
+      rien ne surveille la facture. AWS envoie une demande de confirmation
+      qu'il FAUT valider dans la boite mail, sinon aucune alerte n'arrivera.
+
+  BudgetMonthlyUsd:
+    Type: Number
+    Default: 20
+    MinValue: 1
+    Description: >-
+      Plafond mensuel surveille, en USD. Il N'ARRETE RIEN : il envoie deux
+      e-mails (80 % constate, 100 % projete) et la facture continue de monter.
+      Ce qui est facture meme sans un seul visiteur : l'adresse IPv4 publique
+      (~3,6 USD/mois, facturee depuis 2024 meme attachee a une instance), puis
+      l'instance et les disques une fois le free tier ou les credits epuises.
+      Le disque de donnees est en Retain : il reste facture apres suppression
+      de la pile applicative, jusqu'a suppression manuelle. 20 USD laisse donc
+      de la marge au-dessus du plancher incompressible (~4 USD) sans masquer
+      une derive. Descendre a 5 est defendable ; 1 declenchera l'alerte des la
+      premiere semaine si le budget compte les depenses AVANT les credits.
+
+Conditions:
+
+  CreerFournisseur: !Equals [!Ref ExistingOidcProviderArn, '']
+
+  VerrouParIdImmuable: !Not [!Equals [!Ref GitHubRepositoryId, '']]
+
+  AlerterLeBudget: !Not [!Equals [!Ref AlertEmail, '']]
+
+Resources:
+
+  # ── Le fournisseur d'identité ──────────────────────────────────────────────
+  #
+  # AUCUN `ThumbprintList` : IAM valide désormais ce fournisseur par les
+  # autorités de certification publiques. Une empreinte écrite en dur ici se
+  # périmerait silencieusement et casserait l'authentification des mois plus
+  # tard, un matin, sans qu'aucun changement de notre côté ne l'explique.
+  FournisseurOidc:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreerFournisseur
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Projet
+          Value: !Ref ProjectTag
+
+  # ── Le rôle que CloudFormation assume pour créer les ressources ────────────
+  #
+  # POURQUOI CE DÉTOUR : créer un VPC, une instance, des rôles et des profils
+  # demande une soixantaine d'actions IAM. Les énumérer dans le rôle de GitHub
+  # est à la fois fastidieux et dangereux — on finit par écrire `ec2:*` et
+  # `iam:*` sur un rôle qu'un dépôt public peut assumer.
+  #
+  # Ici le privilège large est porté par un rôle que SEUL le service
+  # CloudFormation peut assumer (`Principal: cloudformation.amazonaws.com`).
+  # GitHub, lui, ne reçoit que le droit de le PASSER à CloudFormation. Si le
+  # jeton OIDC de GitHub fuyait, son porteur ne pourrait rien faire d'autre que
+  # déployer cette pile-là, avec ce modèle-là.
+  RoleExecutionCfn:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: precis-cfn-execution
+      Description: >-
+        Assume par CloudFormation seul, pour creer les ressources de la pile
+        applicative. Jamais par un humain ni par GitHub.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+            # Verrou de confusion de mandataire : même si un tiers obtenait le
+            # droit d'appeler CloudFormation, il ne pourrait pas lui faire
+            # assumer ce rôle depuis un autre compte que le nôtre.
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      Policies:
+        # PowerUserAccess ne couvre pas IAM, et la pile applicative doit créer
+        # le rôle d'instance et son profil. On rouvre donc IAM, mais SEULEMENT
+        # sur les noms que la pile utilise : un `iam:*` complet ici
+        # permettrait de se forger un rôle d'administrateur.
+        - PolicyName: iam-pour-le-role-d-instance
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:CreateInstanceProfile
+                  - iam:DeleteInstanceProfile
+                  - iam:GetInstanceProfile
+                  - iam:AddRoleToInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/precis-instance-*
+                  - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/precis-instance-*
+
+  # ── Le rôle que GitHub Actions assume pour déployer ────────────────────────
+  RoleDeploy:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: precis-deploy
+      Description: >-
+        Assume par GitHub Actions via OIDC, depuis la branche main de ce depot
+        uniquement. Aucune cle, aucun secret.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreerFournisseur
+                - !Ref FournisseurOidc
+                - !Ref ExistingOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              # `aud` en StringEquals TOUJOURS. Et `sub` en StringEquals et non
+              # StringLike : sans joker, il n'y a aucune raison d'ouvrir la
+              # porte à une correspondance partielle. Un `*` mal placé dans un
+              # StringLike sur `sub` accorde ce rôle à N'IMPORTE QUEL dépôt
+              # GitHub du monde — c'est la faute classique de ce modèle.
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !If
+                  - VerrouParIdImmuable
+                  # Forme à ID immuable : renommer le dépôt, ou en créer un
+                  # homonyme après l'avoir supprimé, ne redonne pas l'accès.
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main:repository_id:${GitHubRepositoryId}
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main
+      Policies:
+
+        # 1. Piloter la pile applicative, et elle seule.
+        - PolicyName: cloudformation-pile-applicative
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:ListStackResources
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${DeployStackName}/*
+              # `GetTemplateSummary` est appelé par l'AWS CLI sans ressource
+              # ciblée avant de connaître la pile : il faut le laisser passer
+              # séparément, sinon `cloudformation deploy` échoue d'emblée.
+              - Effect: Allow
+                Action: cloudformation:GetTemplateSummary
+                Resource: '*'
+              # Déléguer le privilège, sans le détenir.
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt RoleExecutionCfn.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+
+        # 2. Déposer et tirer les images. ECR et non GHCR : le rôle d'instance
+        #    s'authentifie seul (`aws ecr get-login-password`), donc il n'y a
+        #    AUCUN jeton à poser en SSM ni à faire tourner. Un dépôt GHCR privé
+        #    aurait exigé un PAT stocké — un secret de plus à surveiller.
+        - PolicyName: ecr-pousser-les-images
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:DescribeRepositories
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource:
+                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/precis-backend
+                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/precis-web
+
+        # 3. Lire la clé d'interface au moment du build.
+        #
+        #    POURQUOI LA CI A BESOIN DE LIRE UN SECRET : `VITE_API_KEY` est
+        #    CUITE dans l'image frontend au build (ARG + ENV, contrôle Node
+        #    bloquant dans `frontend/Dockerfile`). Elle ne peut donc pas être
+        #    fournie au démarrage comme les autres. Et elle doit valoir
+        #    EXACTEMENT `FRONTEND_API_KEY` du service, sinon l'interface reçoit
+        #    un 401 sur chaque requête et rien dans les journaux ne l'explique.
+        #    La lire depuis SSM au build — la même source que celle où
+        #    l'instance lira `FRONTEND_API_KEY` — rend la divergence
+        #    MÉCANIQUEMENT impossible. Un secret GitHub, lui, serait une
+        #    seconde copie à maintenir d'accord avec la première.
+        - PolicyName: ssm-lire-les-parametres
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                # `SsmPrefix` commence déjà par `/` : on écrit donc
+                # `parameter${SsmPrefix}` et SURTOUT pas `parameter/${SsmPrefix}`,
+                # qui donnerait `//precis-translator/...` et une autorisation
+                # qui ne correspond à rien.
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmPrefix}/*
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: '*'
+                # Les SecureString sont chiffrés par la clé gérée de SSM. Sans
+                # ce droit, `--with-decryption` renvoie un AccessDenied qui ne
+                # nomme pas KMS, et l'on cherche du côté de SSM pour rien.
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+
+        # 4. Exécuter le déploiement sur l'instance, sans ouvrir de port 22.
+        - PolicyName: ssm-executer-le-deploiement
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Deux restrictions CUMULÉES : la commande ne peut viser qu'une
+              # instance portant notre tag, et ne peut exécuter qu'un seul
+              # document. Sans la seconde, ce rôle pourrait lancer n'importe
+              # quel document SSM du compte.
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+                Condition:
+                  StringEquals:
+                    ssm:ResourceTag/Projet: !Ref ProjectTag
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript
+              - Effect: Allow
+                Action:
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                  - ssm:ListCommands
+                Resource: '*'
+              # Retrouver l'instance par son tag quand la sortie de pile n'est
+              # pas disponible (déploiement sans provisionnement).
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeTags
+                Resource: '*'
+
+  # ── L'alerte de budget ─────────────────────────────────────────────────────
+  #
+  # Elle vit dans l'amorçage et NON dans la pile applicative, à dessein :
+  # détruire ou recréer l'application ne doit pas emporter la surveillance de
+  # la facture.
+  #
+  # Ce que le budget NE fait PAS : il ne coupe rien. Dépassement = deux
+  # e-mails, et la facture continue. Pour arrêter les frais, il faut supprimer
+  # la pile applicative À LA MAIN — puis le disque de données, qui est en
+  # Retain et survit à cette suppression.
+  #
+  # Ce qui est facturé même sans un seul visiteur : l'adresse IPv4 publique
+  # (~3,6 USD/mois depuis 2024, y compris attachée à une instance). L'instance
+  # et les disques sont couverts tant que dure le free tier (comptes anciens :
+  # 12 mois) ou les crédits de départ (comptes ouverts depuis juillet 2025 :
+  # un montant en crédits, valable ~6 mois). Vérifier lequel s'applique dans
+  # Billing and Cost Management → Free Tier / Crédits : les deux régimes
+  # n'expirent pas de la même façon.
+  #
+  # Les deux premiers budgets d'un compte sont gratuits ; celui-ci est donc
+  # sans coût.
+  Budget:
+    Type: AWS::Budgets::Budget
+    Condition: AlerterLeBudget
+    Properties:
+      Budget:
+        BudgetName: precis-translator-mensuel
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref BudgetMonthlyUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        # 80 % du plafond : il reste le temps d'agir.
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        # La projection de fin de mois : elle prévient AVANT le dépassement.
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+
+  # ── Les dépôts d'images ────────────────────────────────────────────────────
+  #
+  # Dans l'amorçage et non dans la pile applicative : les images SURVIVENT à la
+  # destruction de l'application. C'est ce qui permet de recréer la pile et de
+  # redéployer la version précédente sans rien reconstruire.
+  DepotBackend:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: precis-backend
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      # Garder les 10 dernières : sans cette règle, le dépôt grossit sans fin
+      # et l'image backend pèse ~2 Go. Dix versions laissent de quoi revenir
+      # loin en arrière tout en bornant la facture de stockage.
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,
+                     "description":"Garder les 10 dernieres images",
+                     "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},
+                     "action":{"type":"expire"}}]}
+      Tags:
+        - Key: Projet
+          Value: !Ref ProjectTag
+
+  DepotWeb:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: precis-web
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,
+                     "description":"Garder les 10 dernieres images",
+                     "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},
+                     "action":{"type":"expire"}}]}
+      Tags:
+        - Key: Projet
+          Value: !Ref ProjectTag
+
+Outputs:
+
+  # Ces trois valeurs se recopient dans GitHub > Settings > Secrets and
+  # variables > Actions > VARIABLES (et non secrets : un ARN de rôle n'est pas
+  # un secret, il ne sert à rien sans un jeton OIDC de ce dépôt précis).
+  RoleDeployArn:
+    Description: A poser en variable de depot AWS_ROLE_DEPLOY
+    Value: !GetAtt RoleDeploy.Arn
+
+  RegionAUtiliser:
+    Description: A poser en variable de depot AWS_REGION
+    Value: !Ref AWS::Region
+
+  RegistreEcr:
+    Description: A poser en variable de depot ECR_REGISTRY
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+
+  RoleExecutionCfnArn:
+    Description: Passe a CloudFormation par le workflow de provisionnement
+    Value: !GetAtt RoleExecutionCfn.Arn
+
+  OidcProviderArn:
+    Description: Fournisseur utilise (cree ici, ou celui qui existait deja)
+    Value: !If
+      - CreerFournisseur
+      - !Ref FournisseurOidc
+      - !Ref ExistingOidcProviderArn
+
+  SsmPrefixUtilise:
+    Description: >-
+      Prefixe des parametres. Doit etre identique dans la pile applicative, le
+      script de deploiement et le workflow.
+    Value: !Ref SsmPrefix

@@ -1,0 +1,8 @@
+# Les fichiers executes sur l'instance Linux DOIVENT garder des fins de ligne
+# LF. Un CRLF introduit par un commit depuis Windows fait echouer le script
+# avec un message qui ne nomme pas la cause.
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile* text eol=lf
+*.py text eol=lf

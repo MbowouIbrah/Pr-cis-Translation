@@ -5,7 +5,7 @@
 Le texte est relevé avec sa géométrie et ses styles, traduit, puis réinjecté
 dans le document d'origine — jamais reconstruit. PDF, PPTX, DOCX, XLSX.
 
-Projet **1.0.0** · backend 1.1.0 · frontend 1.0.0 · moteurs PDF 1.0.0, PPTX
+Projet **1.1.0** · backend 1.1.0 · frontend 1.0.0 · moteurs PDF 1.0.0, PPTX
 1.0.0, DOCX 1.0.0, XLSX **0.1.0** (squelette)
 
 ## Démarrer
@@ -33,6 +33,8 @@ aperçus non-PDF.
 | [`backend/engines/pptx/CONTEXTE.md`](backend/engines/pptx/CONTEXTE.md) | Le moteur PPTX — parties partagées, objets OLE |
 | [`backend/engines/docx/CONTEXTE.md`](backend/engines/docx/CONTEXTE.md) | Le moteur DOCX |
 | [`backend/engines/xlsx/CONTEXTE.md`](backend/engines/xlsx/CONTEXTE.md) | Le moteur XLSX — **squelette**, couverture partielle |
+| [`docs/feuille-de-route-production.md`](docs/feuille-de-route-production.md) | **Aller en production** : les 6 étapes dans l'ordre, qui fait quoi, et la preuve de chacune |
+| [`docs/deploiement.md`](docs/deploiement.md) | **Mettre en ligne** : machine AWS, configuration, HTTPS, limites connues |
 | [`docs/etude-ocr.md`](docs/etude-ocr.md) | Étude : traduire des PDF **scannés** (OCR) — feature à venir |
 | `docs/api/index.html` | Les 32 opérations HTTP (`npm run docs:api`) |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | **Ajouter une fonctionnalité** : cycle, checklist, versions, retour arrière |
@@ -80,5 +82,5 @@ cd backend
 for t in tests/test_*.py; do venv/Scripts/python.exe "$t"; done
 ```
 
-Treize suites, **313 contrôles**, hors ligne. Une suite doit sortir en `exit=0` :
+Vingt et une suites, **418 contrôles**, hors ligne. Une suite doit sortir en `exit=0` :
 un score vert avec un code de retour non nul cache toujours quelque chose.

@@ -51,7 +51,7 @@ cd backend && venv/Scripts/python.exe -c "import engines, sys; \
 | `backend/app/models/` | Modèles SQLAlchemy et forfaits. | contenir des règles de traduction |
 | `backend/app/services/` | Le travail : jobs, exécuteurs, cache de rendu, aperçu d'essai. | importer FastAPI |
 | `backend/engines/` | Les moteurs, et ce qu'ils partagent (LibreOffice, balises, client IA). | importer `app` |
-| `backend/tests/` | Treize suites, **313 contrôles**, exécutables séparément. | dépendre du réseau |
+| `backend/tests/` | Vingt et une suites, **418 contrôles**, exécutables séparément. | dépendre du réseau |
 
 ---
 

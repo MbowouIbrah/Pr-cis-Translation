@@ -1,0 +1,591 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  LA PILE APPLICATIVE — une machine PRÊTE, et rien de plus
+#
+#  Ce modèle ne déploie PAS l'application. Il livre une instance sur laquelle
+#  Docker est installé, l'agent SSM répond, les secrets sont lisibles et le
+#  disque de données est monté. Le déploiement, lui, passe par
+#  `deploy/scripts/aws-ssm-deploy.sh`, appelé par le workflow.
+#
+#  Cette séparation n'est pas une élégance : elle permet de redéployer vingt
+#  fois l'application sans toucher à l'infrastructure, donc sans jamais risquer
+#  un remplacement d'instance.
+#
+#  ─── UNE SEULE INSTANCE, ET CE N'EST PAS UN RACCOURCI ────────────────────────
+#  L'application tient son état de travaux EN MÉMOIRE (`JobManager._jobs`,
+#  dict de `queue.Queue`, backend/app/services/jobs.py) et
+#  `docker-entrypoint.sh` impose `--workers 1`. Deux instances, ou deux
+#  workers, auraient chacun leur propre registre : un client interrogeant la
+#  progression d'une traduction tomberait une fois sur deux sur le processus
+#  qui ne la connaît pas. Donc pas d'autoscaling, pas de répartiteur de charge
+#  multi-cible, jusqu'à ce que cet état sorte en base ou en Redis.
+#
+#  ─── AUCUN PORT 22 ───────────────────────────────────────────────────────────
+#  L'accès se fait par Session Manager (`aws ssm start-session`). C'est le rôle
+#  d'instance qui l'autorise, pas une clé privée qui traîne sur un poste.
+# ═════════════════════════════════════════════════════════════════════════════
+
+Description: >-
+  Precis Translator - VPC, instance unique, disque de donnees persistant,
+  acces par Session Manager uniquement.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: {default: Machine}
+        Parameters: [InstanceType, LatestAmiId, RootVolumeSizeGb, DataVolumeSizeGb]
+      - Label: {default: Reseau}
+        Parameters: [VpcCidr, SubnetCidr, AllowedHttpCidr]
+      - Label: {default: Conventions partagees}
+        Parameters: [SsmPrefix, ProjectTag]
+
+Parameters:
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.small, t3.medium, t3.large, t4g.medium]
+    Description: >-
+      t3.medium (4 Go) par DEFAUT et non t3.micro. `docs/deploiement.md` a
+      mesure le besoin : moins de 4 Go ne suffit pas, LibreOffice et le rendu
+      PDF cohabitent mal dans 2 Go. Avec 1 Go, le tueur de memoire du noyau
+      s'en prend au plus gros processus — Postgres — au premier apercu PPTX.
+      t3.small reste possible pour eprouver la chaine, pas pour servir.
+      ATTENTION : changer ce parametre REMPLACE l'instance. Le disque de
+      donnees survit (il est separe et Retain), le disque racine non.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: >-
+      Image Ubuntu 24.04, resolue par SSM — jamais un identifiant d'AMI en dur,
+      qui est regional et se perime.
+      PIEGE : cette valeur CHANGE quand Canonical publie une image. Comme elle
+      remplace l'instance, le workflow de provisionnement doit la figer avec
+      `UsePreviousValue` (voir .github/workflows/infra.yml). C'est pour cela
+      que les donnees vivent sur un disque SEPARE.
+
+  RootVolumeSizeGb:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    Description: >-
+      Disque systeme : OS, Docker et ses images. L'image backend pese ~2 Go
+      (LibreOffice), et l'on en garde deux pour pouvoir revenir en arriere.
+
+  DataVolumeSizeGb:
+    Type: Number
+    Default: 10
+    MinValue: 10
+    Description: >-
+      Disque de DONNEES, monte sur /var/lib/docker/volumes : la base et les
+      documents traduits. Il porte DeletionPolicy Retain et survit a tout
+      remplacement d'instance.
+
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/16
+
+  SubnetCidr:
+    Type: String
+    Default: 10.20.1.0/24
+
+  AllowedHttpCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: >-
+      Qui peut joindre les ports 80 et 443. Ouvert par defaut, le temps de
+      poser le domaine. A RESSERRER ensuite sur les plages Cloudflare : sinon
+      l'adresse IP nue reste joignable en clair et contourne le TLS du frontal.
+      Ce resserrement est une etape a part entiere, pas une finition.
+
+  SsmPrefix:
+    Type: String
+    Default: /precis-translator/prod
+    Description: >-
+      Commence par `/`, ne finit PAS par `/`. Identique au bootstrap, au script
+      de deploiement et au workflow.
+
+  ProjectTag:
+    Type: String
+    Default: precis-translator
+    Description: >-
+      Tag `Projet` de l'instance. C'est par lui que le role de deploiement est
+      autorise a lui envoyer une commande : s'il diverge de la valeur du
+      bootstrap, `ssm:SendCommand` repond AccessDenied sans dire lequel.
+
+  RacineApplicative:
+    Type: String
+    Default: /opt/precis
+    Description: >-
+      Repertoire de travail sur l'instance. Cite par le script de deploiement
+      et par la commande SSM du workflow : les trois doivent concorder.
+
+Resources:
+
+  # ── Le réseau ──────────────────────────────────────────────────────────────
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      # Les deux sont indispensables : sans résolution DNS dans le VPC,
+      # l'agent SSM ne joint pas ses points de terminaison et la machine reste
+      # muette — alors qu'il n'y a pas de port 22 pour aller voir pourquoi.
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - {Key: Name, Value: !Sub '${AWS::StackName}-vpc'}
+        - {Key: Projet, Value: !Ref ProjectTag}
+
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - {Key: Projet, Value: !Ref ProjectTag}
+
+  IgwAttachement:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref Igw
+
+  # Sous-réseau PUBLIC et une seule zone de disponibilité. Pas de sous-réseau
+  # privé, donc pas de passerelle NAT : celle-ci coûterait ~32 $/mois pour une
+  # machine qui doit de toute façon être joignable depuis l'Internet.
+  SousReseau:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref SubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - {Key: Name, Value: !Sub '${AWS::StackName}-public'}
+        - {Key: Projet, Value: !Ref ProjectTag}
+
+  TableRoutage:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - {Key: Projet, Value: !Ref ProjectTag}
+
+  RouteSortie:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttachement
+    Properties:
+      RouteTableId: !Ref TableRoutage
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+
+  AssociationRoutage:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SousReseau
+      RouteTableId: !Ref TableRoutage
+
+  # ── Le pare-feu ────────────────────────────────────────────────────────────
+  GroupeSecurite:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: >-
+        Precis Translator - 80 et 443 uniquement. AUCUNE REGLE 22 : l'acces
+        administrateur passe par Session Manager. Ne rouvrez pas le 22
+        "temporairement" - `aws ssm start-session` fait la meme chose sans
+        exposer un service d'authentification a l'Internet entier.
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: !Ref AllowedHttpCidr, Description: HTTP}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref AllowedHttpCidr, Description: HTTPS}
+        # Pas de 5432 : la base ne sort pas du réseau interne de Compose.
+        # Pas de 8000 : seul nginx parle au service, et c'est lui qui porte les
+        # limites de taille (100 Mo) et de délai (3600 s) des traductions.
+      SecurityGroupEgress:
+        # Sortie ouverte, et c'est délibéré : l'agent SSM (443), le registre
+        # d'images (443), l'API DeepSeek (443) et le serveur de courrier (587
+        # ou 465) sont tous indispensables. Énumérer ces ports donnerait
+        # l'illusion d'un filtrage tout en cassant l'envoi d'e-mails le jour
+        # où le fournisseur change de port.
+        - {IpProtocol: -1, CidrIp: 0.0.0.0/0, Description: Sortie ouverte (SSM, ECR, DeepSeek, SMTP)}
+      Tags:
+        - {Key: Name, Value: !Sub '${AWS::StackName}-sg'}
+        - {Key: Projet, Value: !Ref ProjectTag}
+
+  # ── Le rôle de l'instance ──────────────────────────────────────────────────
+  RoleInstance:
+    Type: AWS::IAM::Role
+    Properties:
+      # Le préfixe `precis-instance-` est celui que le rôle d'exécution
+      # CloudFormation du bootstrap est autorisé à créer. Le changer ici fait
+      # échouer la pile sur un AccessDenied IAM.
+      RoleName: !Sub precis-instance-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # C'est CETTE politique qui fait tenir la promesse « pas de port 22 ».
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: lire-les-secrets-du-projet
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                # `SsmPrefix` commence déjà par `/`. On écrit donc
+                # `parameter${SsmPrefix}/*`. Avec un `/` de plus, le chemin
+                # devient `//precis-translator/prod/*`, l'autorisation ne
+                # correspond à rien, et le symptôme est un `.env` vide dont le
+                # garde de production se plaint comme si vous aviez oublié les
+                # variables que vous venez précisément de poser.
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmPrefix}/*
+              # LECTURE SEULE : pas de `ssm:PutParameter`. L'instance consomme
+              # les secrets, elle ne les pose pas. La seule exception est le
+              # script d'amorçage des secrets, qui a sa propre autorisation
+              # ci-dessous, bornée par `Overwrite = false`.
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+              # Créer un paramètre ABSENT, jamais écraser un paramètre
+              # existant. C'est ce qui permet à `poser-secrets.sh` de générer
+              # les secrets depuis l'instance — ils ne traversent alors aucun
+              # poste, aucun historique de terminal — tout en rendant
+              # IMPOSSIBLE la régénération accidentelle de `jwt_secret` (qui
+              # déconnecterait tout le monde) ou de `postgres_password` (qui
+              # couperait le service de sa propre base, `pgdata` ayant figé
+              # l'ancien mot de passe au premier démarrage).
+              - Effect: Allow
+                Action: ssm:PutParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmPrefix}/*
+                Condition:
+                  StringEquals:
+                    ssm:Overwrite: 'false'
+        - PolicyName: tirer-les-images
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Pas de jeton de registre à stocker : le rôle d'instance suffit
+              # (`aws ecr get-login-password`). C'est la raison du choix d'ECR
+              # plutôt que d'un dépôt privé GHCR, qui aurait exigé un PAT posé
+              # en SSM — un secret de plus, à faire tourner, et qui expire.
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource:
+                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/precis-backend
+                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/precis-web
+
+  ProfilInstance:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub precis-instance-${AWS::StackName}
+      Roles: [!Ref RoleInstance]
+
+  # ── Le disque de données ───────────────────────────────────────────────────
+  #
+  # LA RESSOURCE LA PLUS IMPORTANTE DE CE MODÈLE.
+  #
+  # Les volumes Docker nommés (`pgdata`, `translations`) vivent sous
+  # /var/lib/docker/volumes. Laissés sur le disque racine, ils disparaîtraient
+  # avec l'instance — et l'instance est remplacée par un simple changement de
+  # type ou par la publication d'une nouvelle image Ubuntu par Canonical. On
+  # perdrait tous les comptes et toutes les traductions, un matin, sans qu'un
+  # seul commit de notre côté ne l'explique.
+  #
+  # Ici le disque est une ressource SÉPARÉE, en Retain : CloudFormation ne le
+  # supprime ni ne le remplace jamais, même si la pile entière est détruite.
+  # La contrepartie, à connaître : détruire la pile LAISSE ce disque, qui
+  # continue d'être facturé jusqu'à sa suppression manuelle.
+  DisqueDonnees:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Size: !Ref DataVolumeSizeGb
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - {Key: Name, Value: !Sub '${AWS::StackName}-donnees'}
+        - {Key: Projet, Value: !Ref ProjectTag}
+
+  AttachementDisqueDonnees:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref Instance
+      VolumeId: !Ref DisqueDonnees
+      # Nom demandé ; le noyau le présentera comme /dev/nvme1n1 sur une
+      # instance Nitro. UserData cherche donc les deux.
+      Device: /dev/sdf
+
+  # ── L'instance ─────────────────────────────────────────────────────────────
+  Instance:
+    Type: AWS::EC2::Instance
+    # La pile ÉCHOUE si UserData ne signale pas sa réussite dans les 15
+    # minutes. Sans cela, CloudFormation annoncerait « CREATE_COMPLETE » sur
+    # une machine dont l'amorçage a raté — et comme il n'y a pas de port 22,
+    # on se retrouverait devant une machine muette sans moyen d'enquêter.
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+        Count: 1
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref ProfilInstance
+      SubnetId: !Ref SousReseau
+      SecurityGroupIds: [!Ref GroupeSecurite]
+      # AUCUN `KeyName` : pas de paire de clés, donc pas de clé privée à
+      # protéger, et rien à faire du port 22 même si on le rouvrait.
+      MetadataOptions:
+        # IMDSv2 obligatoire : `HttpTokens: required` ferme la porte à la
+        # lecture des identifiants du rôle par une requête contrefaite depuis
+        # l'application (SSRF). Saut unique : aucun conteneur d'ici n'interroge
+        # le service de métadonnées, donc en autoriser deux n'ouvrirait un
+        # chemin que pour un attaquant.
+        HttpTokens: required
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1   # racine, sur l'AMI Ubuntu
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref RootVolumeSizeGb
+            # Le chiffrement ne se rattrape pas : l'activer plus tard exige un
+            # instantané, un nouveau volume et un arrêt de service.
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - {Key: Name, Value: !Ref AWS::StackName}
+        # LE tag qui autorise le déploiement. Le rôle `precis-deploy` ne peut
+        # envoyer une commande qu'à une instance qui le porte.
+        - {Key: Projet, Value: !Ref ProjectTag}
+        - {Key: Env, Value: prod}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # ═══════════════════════════════════════════════════════════════════
+          #  Amorçage de la machine. PRÉPARATION SEULEMENT : on installe, on
+          #  monte, on crée les répertoires. On ne déploie rien — le
+          #  déploiement a son script, versionné avec le code qu'il déploie.
+          #
+          #  `set -euo pipefail` : le moindre échec arrête tout, et le signal
+          #  envoyé en sortie (trap) fait échouer la pile avec la cause.
+          # ═══════════════════════════════════════════════════════════════════
+          set -euxo pipefail
+          exec > >(tee -a /var/log/precis-bootstrap.log) 2>&1
+
+          ETAT=1
+          signaler() {
+            # `cfn-signal` est le seul lien entre cette machine et la pile.
+            /usr/local/bin/cfn-signal --exit-code "$ETAT" \
+              --stack '${AWS::StackName}' \
+              --resource Instance \
+              --region '${AWS::Region}' || true
+          }
+          trap signaler EXIT
+
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y ca-certificates curl gnupg jq unzip git python3-pip
+
+          # ── Docker, depuis le dépôt officiel ──────────────────────────────
+          # Et NON `docker.io` d'Ubuntu : il ne fournit pas
+          # `docker-compose-plugin`, donc pas la commande `docker compose`
+          # (avec une espace) que tous nos fichiers emploient.
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            -o /etc/apt/keyrings/docker.asc
+          chmod a+r /etc/apt/keyrings/docker.asc
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+            > /etc/apt/sources.list.d/docker.list
+          apt-get update
+          apt-get install -y docker-ce docker-ce-cli containerd.io \
+            docker-buildx-plugin docker-compose-plugin
+
+          # Rotation des journaux de conteneurs. Sans elle, les journaux d'une
+          # traduction longue remplissent le disque — et un disque plein arrête
+          # le service aussi sûrement qu'une panne.
+          cat > /etc/docker/daemon.json <<'JSON'
+          {
+            "log-driver": "json-file",
+            "log-opts": {"max-size": "20m", "max-file": "3"}
+          }
+          JSON
+
+          # ── AWS CLI v2 ────────────────────────────────────────────────────
+          # La v1 d'apt ignore des options SSM que le script de déploiement
+          # emploie.
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
+            -o /tmp/awscliv2.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          /tmp/aws/install --update
+          rm -rf /tmp/awscliv2.zip /tmp/aws
+
+          # ── `cfn-signal`, pour pouvoir rendre compte ──────────────────────
+          pip3 install --break-system-packages \
+            https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+          ln -sf /usr/local/bin/cfn-signal /usr/local/bin/cfn-signal || true
+
+          # ── L'agent SSM ───────────────────────────────────────────────────
+          # Préinstallé par snap sur l'AMI Canonical. S'il ne démarre pas,
+          # l'instance est INATTEIGNABLE par conception (pas de port 22) : on
+          # échoue donc franchement ici plutôt que de livrer une machine muette.
+          snap start amazon-ssm-agent || true
+          systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+          for essai in $(seq 1 30); do
+            if snap services amazon-ssm-agent | grep -q active; then break; fi
+            sleep 5
+          done
+          snap services amazon-ssm-agent | grep -q active
+
+          # ── Le disque de données ──────────────────────────────────────────
+          # Il porte /var/lib/docker/volumes, donc `pgdata` et `translations`.
+          # On ne le formate QUE s'il est vierge : le reformater à chaque
+          # amorçage effacerait précisément ce qu'il est là pour protéger.
+          DISQUE=""
+          for essai in $(seq 1 30); do
+            for candidat in /dev/sdf /dev/xvdf /dev/nvme1n1; do
+              if [ -b "$candidat" ]; then DISQUE="$candidat"; break; fi
+            done
+            [ -n "$DISQUE" ] && break
+            sleep 5
+          done
+          test -n "$DISQUE"
+
+          if ! blkid "$DISQUE" >/dev/null 2>&1; then
+            mkfs.ext4 -L precis-donnees "$DISQUE"
+          fi
+
+          systemctl stop docker docker.socket containerd || true
+          mkdir -p /var/lib/docker/volumes
+          grep -q 'LABEL=precis-donnees' /etc/fstab || \
+            echo 'LABEL=precis-donnees /var/lib/docker/volumes ext4 defaults,nofail 0 2' >> /etc/fstab
+          mount -a
+          # Preuve que le montage a bien pris : sans elle, Docker écrirait sur
+          # le disque racine et les données seraient perdues au prochain
+          # remplacement d'instance, SANS la moindre erreur.
+          findmnt /var/lib/docker/volumes
+          systemctl start containerd docker
+
+          # ── Swap ──────────────────────────────────────────────────────────
+          # Aucun build n'a lieu ici, mais le pic de LibreOffice sur un gros
+          # document et le `docker pull` de l'image backend (~2 Go) en
+          # profitent. Le swap ne remplace pas la mémoire : il évite que le
+          # tueur de mémoire du noyau choisisse Postgres.
+          if [ ! -f /swapfile ]; then
+            fallocate -l 4G /swapfile
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            grep -q '/swapfile' /etc/fstab || \
+              echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          fi
+
+          # ── L'arborescence de travail ────────────────────────────────────
+          # `${RacineApplicative}` est cité à l'identique par le script de
+          # déploiement et par la commande SSM du workflow.
+          install -d -m 0755 '${RacineApplicative}'
+          install -d -m 0755 '${RacineApplicative}/deploy'
+          usermod -aG docker ubuntu || true
+
+          # Les conventions, écrites sur la machine : un exploitant qui ouvre
+          # une session six mois plus tard n'a pas à relire le dépôt.
+          cat > '${RacineApplicative}/conventions.env' <<CONV
+          SSM_PREFIX=${SsmPrefix}
+          AWS_REGION=${AWS::Region}
+          ECR_REGISTRY=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+          RACINE=${RacineApplicative}
+          COMPOSE_PROJECT_NAME=precis
+          CONV
+
+          touch '${RacineApplicative}/bootstrap-ok'
+          ETAT=0
+
+  # ── L'adresse fixe ─────────────────────────────────────────────────────────
+  #
+  # Séparée de l'instance, à dessein : remplacer l'instance ne change alors pas
+  # l'adresse, donc ne casse pas l'enregistrement DNS. Elle est FACTURÉE, y
+  # compris pendant les douze mois de free tier — d'où l'alerte de budget posée
+  # dans la pile d'amorçage.
+  AdresseFixe:
+    Type: AWS::EC2::EIP
+    DependsOn: IgwAttachement
+    Properties:
+      Domain: vpc
+      Tags:
+        - {Key: Projet, Value: !Ref ProjectTag}
+
+  AssociationAdresseFixe:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt AdresseFixe.AllocationId
+      InstanceId: !Ref Instance
+
+  # ── Le réveil automatique ──────────────────────────────────────────────────
+  #
+  # Sur une panne de l'infrastructure sous-jacente, AWS redémarre l'instance
+  # sur un hôte sain. Les volumes et l'adresse fixe sont conservés, donc le
+  # service revient seul.
+  #
+  # On NE promet PAS d'alarme sur le disque ni sur la mémoire : ces métriques
+  # n'existent pas sans l'agent CloudWatch, qui n'est pas installé. Annoncer
+  # une surveillance que l'on n'a pas instrumentée est pire que de ne rien
+  # annoncer — on cesse de regarder.
+  AlarmeSysteme:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-echec-systeme'
+      AlarmDescription: >-
+        Panne de l'hote sous-jacent : recuperation automatique de l'instance.
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_System
+      Dimensions:
+        - {Name: InstanceId, Value: !Ref Instance}
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Sub arn:aws:automate:${AWS::Region}:ec2:recover
+
+Outputs:
+
+  InstanceId:
+    Description: >-
+      Cible du `ssm send-command` du workflow de deploiement.
+    Value: !Ref Instance
+
+  AdresseIpPublique:
+    Description: >-
+      A pointer en enregistrement DNS A (Cloudflare, proxy actif, SSL/TLS Full).
+    Value: !Ref AdresseFixe
+
+  OuvrirUneSession:
+    Description: Acces administrateur, sans port 22 ni cle privee.
+    Value: !Sub aws ssm start-session --target ${Instance} --region ${AWS::Region}
+
+  DisqueDonneesId:
+    Description: >-
+      Disque RETENU : il survit a la destruction de la pile, et continue
+      d'etre facture jusqu'a sa suppression manuelle.
+    Value: !Ref DisqueDonnees
+
+  RacineSurLaMachine:
+    Value: !Ref RacineApplicative

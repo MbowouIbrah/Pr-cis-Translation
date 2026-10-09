@@ -40,6 +40,19 @@ router = APIRouter(prefix="/api/documents", tags=["Documents"])
 STORAGE_BASE = TRANSLATIONS_DIR
 
 
+def _lire(chemin: str) -> bytes:
+    """Lit un fichier ENTIER, à appeler par `run_in_threadpool`.
+
+    Un `open().read()` dans un `async def` fige la boucle d'événements le temps
+    de la lecture — donc TOUTE l'application, flux SSE de la traduction
+    progressive compris. Le service ne tourne qu'avec un seul worker uvicorn
+    (registre de jobs en mémoire) et les fichiers vont jusqu'à MAX_FILE_SIZE :
+    un téléchargement de 100 Mo suspendait les aperçus de tous les autres.
+    """
+    with open(chemin, "rb") as fh:
+        return fh.read()
+
+
 def _inside_store(path: str) -> bool:
     """Le chemin est-il bien DANS le magasin ? Dernier rempart avant `os.remove`.
 
@@ -260,8 +273,7 @@ async def download_document(
     if not doc.translated_path:
         if not doc.original_path or not os.path.isfile(doc.original_path):
             raise HTTPException(status_code=404, detail="Le fichier n'est plus disponible. Réessayez ou rechargez la page.")
-        with open(doc.original_path, "rb") as f:
-            data = f.read()
+        data = await run_in_threadpool(_lire, doc.original_path)
         return Response(content=data, media_type="application/octet-stream",
                         headers={"Content-Disposition": f'attachment; filename="{doc.original_name}"'})
 
@@ -339,8 +351,7 @@ async def original_document(
         raise HTTPException(status_code=404, detail="Le fichier n'est plus disponible. Réessayez ou rechargez la page.")
     # Response explicite plutôt que FileResponse : évite les Range/206 qui
     # peuvent faire échouer le fetch côté frontend (ERR_FAILED 206).
-    with open(doc.original_path, "rb") as f:
-        data = f.read()
+    data = await run_in_threadpool(_lire, doc.original_path)
     ext = os.path.splitext(doc.original_name)[1].lstrip(".").lower()
 
     if as_ == "pdf" and ext != "pdf":
@@ -387,8 +398,7 @@ async def preview_document(
     if not doc.translated_path:
         if not doc.original_path or not os.path.isfile(doc.original_path):
             raise HTTPException(status_code=404, detail="Le fichier n'est plus disponible. Réessayez ou rechargez la page.")
-        with open(doc.original_path, "rb") as f:
-            data = f.read()
+        data = await run_in_threadpool(_lire, doc.original_path)
         ext_orig = os.path.splitext(doc.original_name)[1].lstrip(".").lower()
         media_orig = "application/pdf" if ext_orig == "pdf" else "application/octet-stream"
         return Response(content=data, media_type=media_orig)
