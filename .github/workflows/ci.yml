@@ -1,0 +1,212 @@
+# ═════════════════════════════════════════════════════════════════════════════
+#  LA GARDE — les 21 suites, sur chaque proposition de fusion
+#
+#  Jusqu'ici il n'existait aucune intégration continue : les 418 assertions ne
+#  tournaient que sur le poste de développement, à la main, quand on y pensait.
+#  Ce workflow en fait une condition d'entrée.
+#
+#  Il est aussi appelé par `deploy.yml` (`workflow_call`) : on ne déploie pas
+#  une version dont les suites n'ont pas tourné SUR CE COMMIT EXACT. Dupliquer
+#  les étapes là-bas aurait garanti qu'elles divergent un jour.
+# ═════════════════════════════════════════════════════════════════════════════
+
+name: Garde
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_call: {}
+
+# Aucun besoin d'AWS ici : pas de `id-token: write`. Un workflow qui peut
+# assumer un rôle sans en avoir l'usage est une surface d'attaque gratuite.
+permissions:
+  contents: read
+
+concurrency:
+  group: garde-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ── Les 21 suites du service ───────────────────────────────────────────────
+  suites-backend:
+    name: Suites backend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    services:
+      # 8 des 21 suites appellent `create_async_engine` AU NIVEAU MODULE, donc
+      # à l'import, hors de tout `try` : test_admin_users,
+      # test_download_format_integrity, test_error_logs, test_paiement_page,
+      # test_pptx_preview, test_revue_ultra, test_support, test_verrous_plan.
+      # Aucune ne se replie sur SQLite ni ne se saute gracieusement. Sans base,
+      # la garde est rouge d'emblée — et l'on serait tenté d'exclure
+      # précisément `test_verrous_plan` et `test_garde_secrets`, les deux plus
+      # utiles avant une mise en ligne.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: precis
+          POSTGRES_PASSWORD: precis_ci
+          POSTGRES_DB: precis
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U precis -d precis"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://precis:precis_ci@localhost:5432/precis
+      # Sans lui, la sortie accentuée des assertions se décode de travers et
+      # des comparaisons justes échouent à tort.
+      PYTHONIOENCODING: utf-8
+      PRECIS_NO_BANNER: '1'
+      EMAIL_ENABLED: 'false'
+      # ATTENTION, ON NE POSE NI `ALLOWED_ORIGINS` NI `FRONTEND_URL` :
+      # `config.py` arme `IS_PRODUCTION` dès qu'une origine NON LOCALE est
+      # déclarée. Y mettre un vrai domaine armerait le garde de production
+      # dans l'intégration continue, et l'application refuserait de monter —
+      # avec raison, mais pour rien. `test_garde_secrets` manipule cela
+      # lui-même, par sous-processus, donc il n'est pas gêné.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          # La version du `backend/Dockerfile`. Pas plus récente : on garde
+          # ce qui tournera réellement en production, et PyMuPDF comme asyncpg
+          # n'ont pas forcément de roues ailleurs.
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Secrets d'integration, aleatoires
+        run: |
+          # Un secret de test ne peut pas être un gabarit : `config.py` refuse
+          # tout ce qui contient `example`, `dummy`, `placeholder`,
+          # `dev-secret`, `insecure`, `sample`… (`_MARQUEURS_GABARIT`). Un
+          # `JWT_SECRET=ci-example-...` ferait échouer la garde elle-même.
+          # De l'hexadécimal pur ne contient aucun de ces marqueurs, et
+          # change à chaque exécution — donc rien à fuir.
+          {
+            echo "JWT_SECRET=$(openssl rand -hex 32)"
+            echo "FRONTEND_API_KEY=$(openssl rand -hex 24)"
+            echo "DEEPSEEK_API_KEY=$(openssl rand -hex 24)"
+            echo "POSTGRES_USER=precis"
+            echo "POSTGRES_PASSWORD=precis_ci"
+            echo "POSTGRES_DB=precis"
+          } >> "$GITHUB_ENV"
+
+      - name: Dependances Python
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: LibreOffice et polices
+        # `test_apercu_progressif` et `test_ole_apercu` convertissent réellement
+        # des documents. Une garde qui les sauterait ne garderait pas l'aperçu,
+        # c'est-à-dire la moitié visible du produit. Les polices ne sont pas
+        # décoratives : sans elles, la conversion substitue et la mesure de
+        # densité d'encre des moteurs devient fausse.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libreoffice-writer libreoffice-impress libreoffice-calc \
+            fonts-liberation fonts-dejavu-core
+          soffice --version
+
+      - name: Migrations
+        working-directory: backend
+        # Les suites ne créent pas le schéma — aucune n'appelle `create_all` ni
+        # alembic. `migrations/env.py` lit `DATABASE_URL` dans l'environnement.
+        run: alembic upgrade head
+
+      - name: Les 21 suites
+        working-directory: backend
+        run: |
+          set -uo pipefail
+
+          # Le glob, et non une liste écrite dans ce fichier : une 22e suite
+          # ajoutée demain serait exécutée sans que personne n'y pense, alors
+          # qu'une liste codée en dur se périmerait en silence et ne garderait
+          # rien.
+          suites=(tests/test_*.py)
+          nombre=${#suites[@]}
+          echo "Suites decouvertes : $nombre"
+
+          # LE GARDE CONTRE LA PANNE LA PLUS TROMPEUSE : un glob qui ne
+          # correspond à rien (mauvais répertoire de travail, renommage du
+          # dossier) laisserait la boucle « réussir » en n'exécutant AUCUN
+          # test. La garde serait verte et ne garderait plus rien.
+          if [ "$nombre" -lt 21 ]; then
+            echo "::error::$nombre suites trouvees, 21 attendues au minimum."
+            echo "Soit le repertoire de travail est faux, soit des suites ont disparu."
+            exit 1
+          fi
+
+          echecs=()
+          for suite in "${suites[@]}"; do
+            echo "::group::$suite"
+            if python "$suite"; then
+              echo "OK $suite"
+            else
+              echo "::error file=backend/$suite::Suite en echec : $suite"
+              echecs+=("$suite")
+            fi
+            echo "::endgroup::"
+          done
+
+          echo "─────────────────────────────────────────────"
+          echo "$nombre suites executees, ${#echecs[@]} en echec"
+          if [ ${#echecs[@]} -gt 0 ]; then
+            printf 'ECHEC : %s\n' "${echecs[@]}"
+            exit 1
+          fi
+
+      - name: Journal des migrations si echec
+        if: failure()
+        working-directory: backend
+        run: alembic current || true
+
+  # ── L'interface ────────────────────────────────────────────────────────────
+  build-frontend:
+    name: Interface
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'   # celle du `frontend/Dockerfile`
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Dependances
+        run: npm ci --prefix frontend
+
+      - name: Types et traductions
+        # `lint` vaut `tsc --noEmit && check-i18n.mjs` : erreurs de type ET
+        # clés de traduction manquantes. Très rentable, quelques secondes.
+        run: npm run lint --prefix frontend
+
+      - name: Build
+        env:
+          # Le build ÉCHOUE sans cette clé : un contrôle Node bloquant dans
+          # `frontend/Dockerfile` refuse une interface muette qui recevrait un
+          # 401 sur chaque requête. Ici la valeur n'a aucune importance — on
+          # prouve seulement que le build passera. La vraie clé est lue depuis
+          # SSM au moment de construire l'image (voir `deploy.yml`).
+          VITE_API_KEY: ci-verification-du-build
+          # Vide, comme en production : le navigateur appelle alors `/api/` sur
+          # sa propre origine, et la question du partage entre origines ne se
+          # pose jamais. Une valeur ici masquerait une panne de configuration.
+          VITE_API_BASE: ''
+        run: npm run build --prefix frontend

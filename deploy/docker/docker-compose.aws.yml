@@ -1,0 +1,161 @@
+# ═════════════════════════════════════════════════════════════════════════════
+#  LA PILE EN PRODUCTION — images PRÉ-CONSTRUITES
+#
+#  Même pile que `docker-compose.yml` à la racine, à une différence près : les
+#  `build:` sont remplacés par des `image:`. Rien n'est construit sur
+#  l'instance — les images arrivent du registre, construites en intégration
+#  continue, où il y a de la place, du cache et des gardes.
+#
+#  Lancé par `deploy/scripts/aws-ssm-deploy.sh`, jamais à la main :
+#
+#      docker compose -p precis \
+#        -f deploy/docker/docker-compose.aws.yml \
+#        --env-file backend/.env up -d
+#
+#  LES TROIS PARTIES DE CETTE COMMANDE SONT OBLIGATOIRES :
+#
+#  • `-p precis` — Compose nomme le projet d'après le répertoire du FICHIER,
+#    soit `docker` ici. Les volumes deviendraient `docker_pgdata` au lieu de
+#    `precis_pgdata` : on ouvrirait une base VIERGE en croyant avoir perdu
+#    toutes les données. Le `name:` ci-dessous le fige, le `-p` le redit.
+#
+#  • `--env-file backend/.env` — sans lui, Compose lit un `.env` à côté de CE
+#    fichier, c'est-à-dire un SECOND fichier de secrets qui divergerait du
+#    premier. C'est exactement le défaut documenté en tête du fichier d'origine.
+#
+#  • `IMAGE_TAG` dans l'environnement — voir ci-dessous.
+# ═════════════════════════════════════════════════════════════════════════════
+
+name: precis
+
+services:
+
+  # ── La base de données ─────────────────────────────────────────────────────
+  # Identique au fichier d'origine : c'est voulu. Ni RDS ni EFS — la base est
+  # un conteneur, ses données sont dans un volume nommé, et ce volume est posé
+  # sur un disque qui survit au remplacement de l'instance.
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      # `:?` fait ÉCHOUER le démarrage si la variable manque, au lieu de créer
+      # une base « postgres/postgres » que personne n'a voulue et que tout le
+      # monde peut ouvrir.
+      POSTGRES_USER: ${POSTGRES_USER:?absent de backend/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?absent de backend/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-precis}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # AUCUN port publié, et le groupe de sécurité n'ouvre pas le 5432 non plus.
+    # Deux verrous valent mieux qu'un : exposer ce port offrirait à quiconque
+    # scanne l'Internet un nombre illimité d'essais de mot de passe.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── Le service de traduction ───────────────────────────────────────────────
+  backend:
+    # `:?` et non `:-latest` : un tag manquant doit faire ÉCHOUER le
+    # déploiement, pas déployer une version au hasard. Et `latest` rendrait le
+    # retour en arrière impossible — on ne saurait plus ce qui tourne.
+    image: ${ECR_REGISTRY:?absent de l environnement}/precis-backend:${IMAGE_TAG:?absent de l environnement}
+    restart: unless-stopped
+    env_file:
+      # Chemin relatif à CE FICHIER, et non au répertoire de travail : c'est
+      # ainsi que Compose résout `env_file`. Depuis `deploy/docker/`, cela
+      # désigne `src/backend/.env` sur l'instance — le fichier même que le
+      # script de déploiement vient d'écrire depuis SSM. Vérifié par
+      # `docker compose config`.
+      #
+      # IL NE FAIT PAS DOUBLON avec le `--env-file` de la ligne de commande,
+      # et les deux sont nécessaires :
+      #   • `env_file` (ici) injecte les variables DANS LE CONTENEUR — c'est
+      #     ce que l'application lit ;
+      #   • `--env-file` (ligne de commande) alimente la substitution des
+      #     `${...}` DE CE FICHIER — c'est ce qui dérive `DATABASE_URL` des
+      #     `POSTGRES_*` ci-dessous.
+      # Omettre le second ne prive pas l'application de ses réglages : il fait
+      # échouer la substitution, et Compose irait chercher un `.env` à côté de
+      # ce fichier-ci, soit un SECOND fichier de secrets qui divergerait du
+      # premier.
+      - ../../backend/.env
+    environment:
+      # Ces deux valeurs ÉCRASENT le `.env`, exactement comme dans le fichier
+      # d'origine.
+      #
+      # DATABASE_URL est DÉRIVÉE des trois POSTGRES_* au lieu d'être recopiée :
+      # des identifiants écrits deux fois finissent par différer, et l'on
+      # cherche alors une heure pourquoi le service ne joint plus une base qui
+      # fonctionne très bien. Le script de déploiement laisse dans le `.env`
+      # une URL sur `localhost` — utile aux outils lancés hors conteneur — et
+      # Compose la remplace ici par `db`, le nom de l'autre conteneur.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-precis}
+      PRECIS_ENV: ${PRECIS_ENV:-production}
+    volumes:
+      # CE CHEMIN N'EST PAS NÉGOCIABLE. `config.py` DÉRIVE `TRANSLATIONS_DIR`
+      # de l'emplacement du code (`BACKEND_DIR / "translations"`) sans lire
+      # aucune variable. Monter ailleurs donnerait un volume que rien n'écrit,
+      # et les traductions vivraient dans la couche éphémère du conteneur :
+      # elles disparaîtraient au déploiement suivant, SANS AUCUNE ERREUR.
+      - translations:/app/backend/translations
+    depends_on:
+      db:
+        condition: service_healthy
+    # AUCUN `command:` ni `entrypoint:` ICI, ET C'EST ESSENTIEL.
+    #
+    # `docker-entrypoint.sh` fait deux choses qu'il ne faut pas perdre :
+    #   1. il applique les migrations avant de démarrer le serveur, avec
+    #      attente de la base ;
+    #   2. il impose `--workers 1`, « pas négociable » : le registre des
+    #      travaux vit en mémoire (`JobManager._jobs`), et deux workers
+    #      auraient chacun le leur. Un client interrogeant la progression
+    #      d'une traduction tomberait une fois sur deux sur le processus qui ne
+    #      la connaît pas, et le flux d'événements se fermerait en cours de
+    #      route.
+    #
+    # Préserver cela, ici, c'est NE RIEN ÉCRIRE. Le moindre `command:` le
+    # casserait silencieusement.
+    #
+    # Pas de `mem_limit` non plus : avec un seul service applicatif sur la
+    # machine, une limite mémoire ne protège rien et transformerait un
+    # ralentissement en arrêt brutal du conteneur. Le swap posé à l'amorçage
+    # fait un meilleur travail.
+
+  # ── L'interface ────────────────────────────────────────────────────────────
+  web:
+    image: ${ECR_REGISTRY:?absent de l environnement}/precis-web:${IMAGE_TAG:?absent de l environnement}
+    restart: unless-stopped
+    ports:
+      # Le seul port publié. Le 443 n'y figure pas : le TLS est assuré par le
+      # frontal Cloudflare, qui parle au 80 de cette machine. Le groupe de
+      # sécurité ouvre les deux pour que le jour où un certificat sera posé
+      # ici, seul ce fichier change.
+      - "80:80"
+    depends_on:
+      - backend
+    # AUCUN `build:`, donc AUCUN `args:`, donc `VITE_API_KEY` n'apparaît NULLE
+    # PART dans ce fichier — elle est cuite dans l'image au moment du build.
+    #
+    # C'est précisément pourquoi l'égalité entre cette clé et
+    # `FRONTEND_API_KEY` du service doit être garantie EN AMONT : le workflow
+    # lit la clé dans SSM pour construire l'image, c'est-à-dire dans la source
+    # EXACTE où le script de déploiement lira `FRONTEND_API_KEY` quelques
+    # minutes plus tard. Une seule valeur, un seul endroit.
+    #
+    # Le filet du fichier d'origine — « prise à la même ligne du même fichier,
+    # impossible qu'elles divergent » — n'existe plus ici. Celui-ci le
+    # remplace.
+
+volumes:
+  # Noms IDENTIQUES au fichier d'origine, et nom de projet figé par le `name:`
+  # en tête : c'est ce qui garantit que l'on ouvre bien les mêmes données.
+  #
+  # Ces volumes vivent sous /var/lib/docker/volumes, que l'amorçage de
+  # l'instance a monté sur un disque SÉPARÉ, en « Retain ». Ils survivent donc
+  # non seulement à `docker compose down`, mais au remplacement de l'instance
+  # elle-même — y compris lorsque Canonical publie une nouvelle image Ubuntu.
+  pgdata:
+  translations:

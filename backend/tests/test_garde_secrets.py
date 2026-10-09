@@ -70,9 +70,15 @@ def monter(**env: str) -> tuple[int, str]:
     """
     e = dict(os.environ)
     e["PRECIS_NO_BANNER"] = "1"
+    # Le fils parle UTF-8 et on le lit en UTF-8. Sans ces deux lignes,
+    # Windows décode sa sortie en Latin-1 : « refusée » devient
+    # « refusÃ©e », et le test ne reconnaît plus le message de refus
+    # qu'il attend — il échoue alors que le garde a parfaitement
+    # fonctionné. Un test aveugle à l'accent est un test qui ment.
+    e["PYTHONIOENCODING"] = "utf-8"
     e.update(env)
     p = subprocess.run([sys.executable, "-c", _MONTAGE], env=e,
-                       capture_output=True, text=True, timeout=180)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
     return p.returncode, (p.stdout + p.stderr)
 
 
@@ -83,6 +89,10 @@ SOLIDES = {
     "DATABASE_URL": "postgresql+asyncpg://precis:m0tDeP4sseReel@localhost:5432/precis",
     "DEEPSEEK_API_KEY": "sk-4f9b2c7e1a8d3506b9f2e4c7a1d8b503",
     "EMAIL_ENABLED": "false",
+    # Sans cette ligne, les cas « secrets solides -> demarre » ci-dessous
+    # echouent : l'adresse publique du site fait partie des reglages
+    # qu'une mise en ligne doit poser, au meme titre qu'un secret.
+    "FRONTEND_URL": "https://precis-translator.com",
 }
 PUBLIC = "https://precis-translator.com"
 LOCAL = "http://localhost:5173"
@@ -127,6 +137,22 @@ def main() -> int:
     check(config._est_gabarit("x" * 60 + "_here"),
           "un marqueur de gabarit est vu même noyé dans une longue valeur")
 
+    # Secrets de DÉVELOPPEMENT. Ils ne portent aucun marqueur de gabarit et
+    # sont assez longs pour passer le plancher : ce sont eux qui traversent
+    # le garde. Cas réel — le `.env` du poste disait
+    # « change-IN-production » quand la liste ne cherchait que
+    # « change-ME », et le service aurait démarré en ligne avec un secret
+    # connu. Un secret qui s'annonce lui-même comme provisoire doit être
+    # refusé, quelle que soit sa longueur.
+    for faux in ("dev-secret-key-change-in-production-64-chars-minimum-pad!",
+                 "development-jwt-key-not-for-production-use-0123456789abc",
+                 "local-only-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "insecure-default-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "sample-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"):
+        check(config._est_gabarit(faux),
+              "un secret de DÉVELOPPEMENT est refusé, même sans « change-me »",
+              faux[:38] + "…")
+
     # ── 4. Détection de production : le signal qu'on ne peut pas oublier ────
     print("\n4. Démarrage réel, dans des processus distincts")
 
@@ -167,6 +193,26 @@ def main() -> int:
           "développement local + secrets par défaut  ->  démarre (avertit seulement)",
           sortie[-400:])
 
+    # FRONTEND_URL reste le réglage qu'on oublie, parce que rien ne le réclame :
+    # ce n'est pas un secret, l'application démarre sans lui, et sa valeur par
+    # défaut — `http://localhost:3000` — a l'air inoffensive. En ligne, elle
+    # envoie chaque lien de vérification de compte sur la machine de
+    # l'utilisateur : AUCUN compte ne peut être activé, et la redirection après
+    # connexion Google part au même endroit. Panne totale des inscriptions,
+    # sans une ligne de journal.
+    code, sortie = monter(ALLOWED_ORIGINS=PUBLIC, PRECIS_ENV="",
+                          **{k: v for k, v in SOLIDES.items()
+                             if k != "FRONTEND_URL"})
+    check(code != 0 and "FRONTEND_URL" in sortie,
+          "production sans FRONTEND_URL public  ->  REFUS de démarrer",
+          sortie[-400:])
+
+    code, sortie = monter(ALLOWED_ORIGINS=PUBLIC, PRECIS_ENV="",
+                          **{**SOLIDES, "FRONTEND_URL": "http://localhost:3000"})
+    check(code != 0 and "FRONTEND_URL" in sortie,
+          "production + FRONTEND_URL=localhost  ->  REFUS de démarrer",
+          sortie[-400:])
+
     # ── 5. Les origines de développement disparaissent une fois en ligne ────
     #
     # Elles étaient ajoutées INCONDITIONNELLEMENT : un service en production
@@ -183,7 +229,7 @@ def main() -> int:
              "import sys;sys.path.insert(0, r'%s');"
              "from app.config import ALLOWED_ORIGINS;"
              "print('|'.join(sorted(ALLOWED_ORIGINS)))" % BACKEND],
-            env=e, capture_output=True, text=True, timeout=120)
+            env=e, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         return [o for o in p.stdout.strip().split("|") if o]
 
     en_ligne = origines(ALLOWED_ORIGINS=PUBLIC, PRECIS_ENV="", **SOLIDES)

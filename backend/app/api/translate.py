@@ -577,8 +577,9 @@ async def translation_partial(job_id: str, x_api_key: str = Header(None),
     path = job.get("partial_path")
     if not path or not os.path.exists(path):
         raise HTTPException(status_code=202, detail="Aucune page prête pour l'instant.")
-    with open(path, "rb") as f:
-        data = f.read()
+    # Lecture déportée : un `read()` ici figerait la boucle d'événements, donc
+    # le flux SSE qui annonce les pages suivantes de cette même traduction.
+    data = await asyncio.to_thread(lambda: open(path, "rb").read())
 
     # PLAN D'ESSAI : jamais le clair. On envoyait le PDF traduit tel quel et on
     # comptait sur le navigateur pour l'assombrir — mesuré : un compte `free`

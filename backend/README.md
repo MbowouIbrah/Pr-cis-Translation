@@ -43,7 +43,7 @@ app/
   services/        le travail : jobs, exécuteurs, cache de rendu, aperçus
 engines/           les moteurs — n'importent JAMAIS app/
 migrations/        Alembic
-tests/             13 suites, 313 contrôles, hors ligne
+tests/             21 suites, 418 controles, hors ligne
 ```
 
 Le détail des couches et de leurs interdits : [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
@@ -98,7 +98,7 @@ venv/Scripts/python.exe seed_admin.py            # crée le compte administrateu
 
 ## Tests
 
-Treize suites, **313 contrôles**, sans réseau et sans DeepSeek. Chacune
+Vingt et une suites, **418 contrôles**, sans réseau et sans DeepSeek. Chacune
 s'exécute seule :
 
 ```bash

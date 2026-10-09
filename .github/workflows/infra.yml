@@ -1,0 +1,215 @@
+# ═════════════════════════════════════════════════════════════════════════════
+#  LE PROVISIONNEMENT — à la main, jamais automatiquement
+#
+#  POURQUOI CE WORKFLOW EST SÉPARÉ DE `deploy.yml` :
+#
+#  `LatestAmiId` est résolu par SSM sur « la dernière Ubuntu 24.04 ». Cette
+#  valeur CHANGE quand Canonical publie une image — et un changement d'AMI
+#  REMPLACE l'instance. Si le provisionnement tournait à chaque déploiement, il
+#  suffirait que Canonical publie pendant la nuit pour qu'une mise en ligne de
+#  routine détruise et recrée la machine, un matin, sans qu'un seul commit de
+#  notre côté ne l'explique.
+#
+#  Le disque de données est en `Retain` et survivrait (c'est sa raison d'être),
+#  mais le service s'interromprait et il faudrait redéployer à la main. Le
+#  provisionnement et le déploiement n'ont pas le même rythme : on les sépare.
+#
+#  Au quotidien, on ne lance JAMAIS ce workflow. On le lance pour créer la
+#  pile, pour changer le type d'instance, ou pour resserrer `AllowedHttpCidr`.
+# ═════════════════════════════════════════════════════════════════════════════
+
+name: Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Ce que vous voulez faire
+        required: true
+        type: choice
+        default: changeset
+        options:
+          # Par DÉFAUT on ne fait que proposer : le journal montre exactement
+          # ce qui serait créé, modifié et surtout REMPLACÉ, avant que
+          # quiconque n'y touche. `appliquer` demande un second passage.
+          - changeset
+          - appliquer
+      figer_ami:
+        description: >-
+          Garder l'AMI actuelle (oui = aucun remplacement d'instance)
+        required: true
+        type: choice
+        default: 'oui'
+        options: ['oui', 'non']
+      type_instance:
+        description: Type d'instance (vide = ne pas changer)
+        required: false
+        type: string
+      cidr_http:
+        description: >-
+          Qui peut joindre 80/443 (vide = ne pas changer ; plages Cloudflare
+          une fois le domaine pose)
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  # Deux provisionnements simultanés sur la même pile se marchent dessus et
+  # laissent la pile en UPDATE_ROLLBACK_FAILED, dont on ne sort qu'à la main.
+  group: infra-precis-prod
+  cancel-in-progress: false
+
+env:
+  PILE: precis-translator-prod
+
+jobs:
+  provisionner:
+    name: ${{ inputs.action }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Identite AWS, sans aucune cle
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_DEPLOY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: infra-${{ github.run_id }}
+
+      - name: Le modele est-il valide
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://infra/aws/precis-translator.yml >/dev/null
+          echo "Modele valide."
+
+      - name: La pile existe-t-elle deja
+        id: etat
+        run: |
+          if aws cloudformation describe-stacks --stack-name "$PILE" >/dev/null 2>&1; then
+            echo "existe=oui" >> "$GITHUB_OUTPUT"
+          else
+            echo "existe=non" >> "$GITHUB_OUTPUT"
+            echo "Premiere creation : l'AMI ne peut pas etre figee."
+          fi
+
+      - name: Parametres
+        id: params
+        env:
+          EXISTE: ${{ steps.etat.outputs.existe }}
+          FIGER: ${{ inputs.figer_ami }}
+          TYPE_INSTANCE: ${{ inputs.type_instance }}
+          CIDR_HTTP: ${{ inputs.cidr_http }}
+        run: |
+          # On ne passe QUE ce qui change. Tout paramètre non mentionné garde
+          # sa valeur précédente : c'est ce qui évite qu'un défaut du modèle
+          # écrase en silence un réglage posé à la main.
+          # On ne passe QUE ce qui change ; `UsePreviousValue` garde le reste.
+          # Les entrées du workflow passent par l'environnement et non par
+          # substitution dans le texte du script : une valeur contenant une
+          # apostrophe ou un `;` serait sinon interprétée par le shell.
+          p=()
+          if [ "$EXISTE" = "oui" ] && [ "$FIGER" = "oui" ]; then
+            # LE GARDE CENTRAL DE CE WORKFLOW : sans lui, une nouvelle image
+            # Canonical remplace l'instance.
+            p+=("LatestAmiId=UsePreviousValue=true")
+          fi
+          [ -n "$TYPE_INSTANCE" ] && p+=("InstanceType=$TYPE_INSTANCE")
+          [ -n "$CIDR_HTTP" ]     && p+=("AllowedHttpCidr=$CIDR_HTTP")
+          echo "liste=${p[*]}" >> "$GITHUB_OUTPUT"
+          echo "A passer : ${p[*]:-(aucun, tout garde sa valeur precedente)}"
+
+      # ── Le mode par défaut : montrer, sans toucher ───────────────────────
+      - name: Ce qui changerait
+        if: inputs.action == 'changeset'
+        env:
+          EXISTE: ${{ steps.etat.outputs.existe }}
+          PARAMS: ${{ steps.params.outputs.liste }}
+          ROLE_CFN: ${{ vars.AWS_ROLE_CFN_EXECUTION }}
+        run: |
+          NOM="revue-${{ github.run_id }}"
+          if [ "$EXISTE" = "oui" ]; then TYPE=UPDATE; else TYPE=CREATE; fi
+
+          # `$PARAMS` est volontairement NON protégé par des guillemets : il
+          # porte plusieurs arguments séparés par des espaces, et des
+          # guillemets en feraient un seul argument que l'AWS CLI rejette.
+          # Les valeurs qu'il contient viennent d'une liste fermée (type
+          # d'instance) ou d'un CIDR, jamais d'un texte libre.
+          OPTS=()
+          [ -n "$PARAMS" ] && OPTS=(--parameter-overrides $PARAMS)
+
+          aws cloudformation create-change-set \
+            --stack-name "$PILE" \
+            --change-set-name "$NOM" \
+            --change-set-type "$TYPE" \
+            --template-body file://infra/aws/precis-translator.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --role-arn "$ROLE_CFN" \
+            "${OPTS[@]}"
+
+          aws cloudformation wait change-set-create-complete \
+            --stack-name "$PILE" --change-set-name "$NOM" || true
+
+          echo "## Changements proposes" >> "$GITHUB_STEP_SUMMARY"
+          aws cloudformation describe-change-set \
+            --stack-name "$PILE" --change-set-name "$NOM" \
+            --query 'Changes[].ResourceChange.[Action,LogicalResourceId,ResourceType,Replacement]' \
+            --output table | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # Un `Replacement: True` sur l'instance signifie une interruption de
+          # service et un redéploiement à faire derrière. On le dit fort.
+          if aws cloudformation describe-change-set \
+               --stack-name "$PILE" --change-set-name "$NOM" \
+               --query 'Changes[?ResourceChange.Replacement==`True`]' \
+               --output text | grep -q .; then
+            echo "::warning::Des ressources seraient REMPLACEES. Lisez le tableau avant d'appliquer."
+          fi
+
+          aws cloudformation delete-change-set \
+            --stack-name "$PILE" --change-set-name "$NOM" || true
+
+      # ── Le mode qui agit ─────────────────────────────────────────────────
+      - name: Appliquer
+        if: inputs.action == 'appliquer'
+        env:
+          PARAMS: ${{ steps.params.outputs.liste }}
+          ROLE_CFN: ${{ vars.AWS_ROLE_CFN_EXECUTION }}
+        run: |
+          OPTS=()
+          [ -n "$PARAMS" ] && OPTS=(--parameter-overrides $PARAMS)
+
+          # `--no-fail-on-empty-changeset` est indispensable : sans lui, tout
+          # déploiement qui ne change rien à l'infrastructure — le cas normal —
+          # échoue sur une erreur qui ressemble à une panne.
+          aws cloudformation deploy \
+            --stack-name "$PILE" \
+            --template-file infra/aws/precis-translator.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --role-arn "$ROLE_CFN" \
+            "${OPTS[@]}"
+
+      - name: Les evenements, si la pile a echoue
+        if: failure() && inputs.action == 'appliquer'
+        run: |
+          # La cause réelle est presque toujours dans le premier échec, que
+          # `cloudformation deploy` ne montre pas.
+          aws cloudformation describe-stack-events --stack-name "$PILE" \
+            --query 'StackEvents[?contains(ResourceStatus, `FAILED`)].[Timestamp,LogicalResourceId,ResourceStatusReason]' \
+            --output table | head -40
+
+      - name: Ce qu'il faut retenir
+        if: inputs.action == 'appliquer'
+        run: |
+          aws cloudformation describe-stacks --stack-name "$PILE" \
+            --query 'Stacks[0].Outputs[].[OutputKey,OutputValue]' \
+            --output table | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Si c'est la premiere creation : posez les secrets avant tout deploiement." >> "$GITHUB_STEP_SUMMARY"
+          echo "Voir infra/aws/README.md, section « Poser les secrets »." >> "$GITHUB_STEP_SUMMARY"

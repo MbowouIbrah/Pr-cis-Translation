@@ -216,8 +216,20 @@ SECRETS_INTERDITS = {
 }
 # Marqueurs de gabarit : attrapent les variantes non listées (« your_x_here »,
 # « changeme », « à remplacer »…) sans qu'on ait à les énumérer.
-_MARQUEURS_GABARIT = ("change-me", "changeme", "your_", "_here", "remplacer",
-                      "xxx", "todo")
+_MARQUEURS_GABARIT = ("change-me", "changeme", "change-in-", "change_in_",
+                      "your_", "_here", "remplacer", "xxx", "todo",
+                      # Un secret qui s'annonce PROVISOIRE est un gabarit, même
+                      # sans « change-me » et même assez long pour passer le
+                      # plancher. C'est le cas qui a traversé les trois
+                      # contrôles : `dev-secret-key-change-in-production-…`,
+                      # 64 caractères, aucun marqueur connu. Il aurait signé
+                      # les jetons en production, et quiconque ayant lu ce
+                      # fichier aurait pu forger un jeton d'administrateur.
+                      "dev-secret", "dev_secret", "development",
+                      "not-for-production", "notforproduction",
+                      "insecure", "placeholder", "exemple", "example",
+                      "sample", "specimen", "dummy", "factice",
+                      "local-only", "local_only", "localonly")
 
 # Longueur minimale d'un secret de signature. En dessous, HS256 se force.
 JWT_SECRET_MIN_LEN = 32
@@ -263,6 +275,23 @@ def defauts_de_production() -> list[str]:
         fautes.append(
             "DEEPSEEK_API_KEY absente ou gabarit — aucune traduction ne "
             "pourra aboutir.")
+
+    # FRONTEND_URL n'est pas un secret, et c'est pour cela qu'on l'oublie :
+    # l'application démarre très bien sans lui et sa valeur par défaut a l'air
+    # anodine. Mais c'est l'adresse mise DANS les e-mails de vérification et
+    # dans la redirection de retour de Google. Restée sur `localhost`, elle
+    # envoie chaque nouvel inscrit sur sa propre machine : aucun compte ne
+    # s'active, et rien ne le signale.
+    _front = os.getenv("FRONTEND_URL", "").strip()
+    if not _front or _front.startswith(("http://localhost",
+                                        "http://127.0.0.1",
+                                        "https://localhost")):
+        fautes.append(
+            f"FRONTEND_URL vaut {_front or '(vide, donc localhost)'} — les "
+            "liens de vérification de compte et le retour de connexion Google "
+            "pointeraient vers la machine de l'utilisateur : aucune "
+            "inscription ne pourrait aboutir. Poser l'adresse publique du "
+            "site (ex. https://precis-translator.com).")
 
     if os.getenv("EMAIL_ENABLED", "true").lower() == "true" and not os.getenv(
             "SMTP_PASSWORD", "").strip():

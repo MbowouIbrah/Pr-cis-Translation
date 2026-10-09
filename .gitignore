@@ -39,3 +39,8 @@ backend/tests/_generic_tmp/
 *.old
 
 
+
+# Sorties des bancs d'essai du moteur (images de pages, PDF d'aperçu).
+# Volumineuses (plusieurs dizaines de Mo) et REGENERABLES : un « git add . »
+# les embarquerait sinon dans le dépôt, qui ne pèse que 11 Mo par ailleurs.
+.ocr_out/

@@ -1,0 +1,416 @@
+# ═════════════════════════════════════════════════════════════════════════════
+#  LA MISE EN LIGNE — sur publication d'une version, jamais sur un commit
+#
+#  Déclenchement : `release/version.txt` change sur `main`. On déploie quand on
+#  PUBLIE une version, pas à chaque fois que `main` avance.
+#
+#  Quatre verrous, dans cet ordre :
+#    1. les versions concordent (fichier, package.json, CHANGELOG, tag git) ;
+#    2. les 21 suites passent SUR CE COMMIT (le workflow Garde, appelé) ;
+#    3. les images sont construites et poussées avec un tag immuable ;
+#    4. l'instance déploie, et le workflow ATTEND le verdict.
+#
+#  Ce workflow ne touche PAS à l'infrastructure : voir `infra.yml` et la raison
+#  qui y est écrite (une nouvelle image Ubuntu remplacerait l'instance).
+# ═════════════════════════════════════════════════════════════════════════════
+
+name: Mise en ligne
+
+on:
+  push:
+    branches: [main]
+    paths: ['release/version.txt']
+  workflow_dispatch:
+    inputs:
+      confirmer_version:
+        description: >-
+          Saisir la version a deployer, telle quelle (ex. 1.1.0). Elle doit
+          correspondre a release/version.txt.
+        required: true
+        type: string
+
+permissions:
+  id-token: write   # pour assumer le rôle AWS par OIDC
+  contents: read
+
+concurrency:
+  # Deux mises en ligne en parallèle laisseraient l'instance dans un état que
+  # ni l'une ni l'autre n'a voulu. On ne les annule pas pour autant : une mise
+  # en ligne interrompue au milieu est pire qu'une mise en ligne en retard.
+  group: mise-en-ligne-prod
+  cancel-in-progress: false
+
+env:
+  PILE: precis-translator-prod
+  SSM_PREFIX: /precis-translator/prod
+  RACINE: /opt/precis
+
+jobs:
+
+  # ── 1. Les versions concordent-elles ? ─────────────────────────────────────
+  garde-version:
+    name: Version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.lire.outputs.version }}
+      tag_image: ${{ steps.lire.outputs.tag_image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Les tags sont nécessaires pour vérifier que ce commit en porte un.
+          fetch-depth: 0
+
+      - name: Lire et confronter
+        id: lire
+        env:
+          CONFIRMATION: ${{ inputs.confirmer_version }}
+        run: |
+          set -euo pipefail
+
+          version=$(tr -d ' \t\r\n' < release/version.txt)
+          echo "release/version.txt : $version"
+          if [ -z "$version" ]; then
+            echo "::error::release/version.txt est vide."
+            exit 1
+          fi
+
+          # Lancement manuel : la version se saisit à la main. Un déploiement
+          # en production ne doit pas pouvoir partir d'un clic distrait.
+          if [ -n "$CONFIRMATION" ] && [ "$CONFIRMATION" != "$version" ]; then
+            echo "::error::Vous avez saisi « $CONFIRMATION », le fichier dit « $version »."
+            exit 1
+          fi
+
+          # `app/versions.py` lit la version du projet DANS `package.json` sur
+          # disque. Si les deux divergent, `/health` et la bannière annoncent
+          # une version qui n'est pas celle qui tourne — et plus aucun rapport
+          # de bogue n'est interprétable.
+          pkg=$(node -p "require('./package.json').version")
+          echo "package.json        : $pkg"
+          if [ "$pkg" != "$version" ]; then
+            echo "::error::package.json annonce $pkg, la version publiee est $version."
+            echo "Portez package.json a $version : c'est lui que /health lit."
+            exit 1
+          fi
+
+          if ! grep -qE "^##+ \[?$version\]?" CHANGELOG.md; then
+            echo "::error::Aucune section « $version » dans CHANGELOG.md."
+            echo "Une version sans journal des changements n'est pas publiable."
+            exit 1
+          fi
+
+          # Un déploiement correspond TOUJOURS à un tag : c'est ce qui permet,
+          # six mois plus tard, de retrouver le code exact qui tourne.
+          if ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::error::Le tag v$version n'existe pas."
+            echo "  git tag -a v$version -m 'version $version' && git push origin v$version"
+            exit 1
+          fi
+          attendu=$(git rev-parse "refs/tags/v$version^{commit}")
+          if [ "$attendu" != "$GITHUB_SHA" ]; then
+            echo "::error::Le tag v$version designe $attendu, pas le commit courant $GITHUB_SHA."
+            exit 1
+          fi
+
+          # Tag d'image CANONIQUE : version + commit. Jamais `latest`, qui rend
+          # le retour en arrière impossible et le redémarrage d'une instance
+          # imprévisible — on ne saurait plus quelle image elle vient de tirer.
+          court=$(echo "$GITHUB_SHA" | cut -c1-7)
+          echo "version=$version"            >> "$GITHUB_OUTPUT"
+          echo "tag_image=$version-$court"   >> "$GITHUB_OUTPUT"
+          echo "Tag d'image : $version-$court"
+
+  # ── 2. Les 21 suites, sur ce commit exact ──────────────────────────────────
+  garde-tests:
+    name: Garde
+    needs: garde-version
+    # Appel du workflow, et non copie de ses étapes : deux copies divergent.
+    uses: ./.github/workflows/ci.yml
+
+  # ── 3. Les images ──────────────────────────────────────────────────────────
+  images:
+    name: Images
+    needs: [garde-version, garde-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60   # l'image backend installe LibreOffice
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_DEPLOY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: images-${{ github.run_id }}
+
+      - name: Entrer dans le registre
+        # Aucun jeton stocké : le rôle assumé par OIDC suffit. C'est la raison
+        # du choix d'ECR plutôt que d'un dépôt privé GHCR, qui aurait exigé un
+        # jeton personnel posé en SSM — un secret de plus, qui expire.
+        run: |
+          aws ecr get-login-password --region "${{ vars.AWS_REGION }}" \
+            | docker login --username AWS --password-stdin "${{ vars.ECR_REGISTRY }}"
+
+      - name: La cle de l'interface, depuis SSM
+        id: cle
+        run: |
+          set -euo pipefail
+
+          # ═══ LE PIÈGE CENTRAL DE CE DÉPLOIEMENT ═══════════════════════════
+          #
+          # `VITE_API_KEY` est CUITE dans l'image au build : `ARG` + `ENV` dans
+          # `frontend/Dockerfile`, avec un contrôle Node bloquant. Elle ne peut
+          # donc pas arriver au démarrage comme les autres réglages, et elle
+          # doit valoir EXACTEMENT `FRONTEND_API_KEY` du service — sinon
+          # l'interface reçoit un 401 sur chaque requête et rien, absolument
+          # rien dans les journaux ne l'explique.
+          #
+          # En local, `docker-compose.yml` garantissait l'égalité en prenant
+          # les deux valeurs à la MÊME LIGNE du MÊME FICHIER. Ici le `build:` a
+          # disparu, donc ce filet n'existe plus.
+          #
+          # On le remplace par : lire la clé dans SSM, c'est-à-dire dans la
+          # source EXACTE où l'instance lira `FRONTEND_API_KEY` quelques
+          # minutes plus tard. Une seule valeur, un seul endroit. La divergence
+          # devient mécaniquement impossible.
+          #
+          # Un secret GitHub, lui, aurait été une SECONDE copie — exactement le
+          # défaut qu'on vient d'éliminer.
+          # ══════════════════════════════════════════════════════════════════
+          cle=$(aws ssm get-parameter \
+                  --name "$SSM_PREFIX/frontend_api_key" \
+                  --with-decryption --query Parameter.Value --output text)
+          if [ -z "$cle" ] || [ "$cle" = "None" ]; then
+            echo "::error::$SSM_PREFIX/frontend_api_key est absent."
+            echo "Posez les secrets avant la premiere mise en ligne (infra/aws/README.md)."
+            exit 1
+          fi
+          # Le masque AVANT toute autre utilisation : sans lui la valeur
+          # apparaîtrait en clair dans le journal, qui reste consultable.
+          echo "::add-mask::$cle"
+          echo "cle=$cle" >> "$GITHUB_OUTPUT"
+
+          # Non secret, et il peut légitimement être absent.
+          gid=$(aws ssm get-parameter --name "$SSM_PREFIX/google_client_id" \
+                  --query Parameter.Value --output text 2>/dev/null || echo "")
+          [ "$gid" = "None" ] && gid=""
+          echo "google=$gid" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Image du service
+        uses: docker/build-push-action@v6
+        with:
+          # Contexte = la RACINE, et non `backend/` : le Dockerfile y copie des
+          # fichiers hors de `backend/`. Un `context: ./backend` échoue.
+          context: .
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ vars.ECR_REGISTRY }}/precis-backend:${{ needs.garde-version.outputs.tag_image }}
+          # Sans ce cache, LibreOffice se réinstalle à chaque mise en ligne :
+          # vingt minutes payées pour rien.
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Image de l'interface
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ vars.ECR_REGISTRY }}/precis-web:${{ needs.garde-version.outputs.tag_image }}
+          build-args: |
+            VITE_API_KEY=${{ steps.cle.outputs.cle }}
+            VITE_API_BASE=
+            VITE_GOOGLE_CLIENT_ID=${{ steps.cle.outputs.google }}
+          # `VITE_API_BASE` VIDE, et ce n'est pas un oubli : le navigateur
+          # appelle alors `/api/` sur sa propre origine, que nginx relaie au
+          # service. La question du partage entre origines ne se pose jamais.
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+      - name: Resume
+        run: |
+          echo "### Images poussees" >> "$GITHUB_STEP_SUMMARY"
+          echo "- precis-backend:${{ needs.garde-version.outputs.tag_image }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- precis-web:${{ needs.garde-version.outputs.tag_image }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 4. Le déploiement ──────────────────────────────────────────────────────
+  deployer:
+    name: Deploiement
+    needs: [garde-version, images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: production   # permet d'exiger une approbation manuelle
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_DEPLOY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: deploy-${{ github.run_id }}
+
+      - name: Retrouver l'instance
+        id: cible
+        run: |
+          set -euo pipefail
+          id=$(aws cloudformation describe-stacks --stack-name "$PILE" \
+                 --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" \
+                 --output text 2>/dev/null || echo "")
+          if [ -z "$id" ] || [ "$id" = "None" ]; then
+            echo "::error::La pile $PILE n'existe pas, ou ne publie pas InstanceId."
+            echo "Provisionnez d'abord : workflow « Infrastructure », action « appliquer »."
+            exit 1
+          fi
+          # L'instance répond-elle à SSM ? Si l'agent est muet, la commande
+          # resterait « Pending » jusqu'au délai d'attente, et le journal ne
+          # dirait pas pourquoi. On le dit maintenant.
+          etat=$(aws ssm describe-instance-information \
+                   --filters "Key=InstanceIds,Values=$id" \
+                   --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "")
+          if [ "$etat" != "Online" ]; then
+            echo "::error::L'instance $id ne repond pas a SSM (etat : ${etat:-aucun})."
+            echo "Sans l'agent SSM il n'y a aucun acces : pas de port 22, par conception."
+            exit 1
+          fi
+          echo "instance=$id" >> "$GITHUB_OUTPUT"
+          echo "Cible : $id"
+
+      - name: Envoyer le deploiement
+        id: envoi
+        env:
+          VERSION: ${{ needs.garde-version.outputs.version }}
+          TAG_IMAGE: ${{ needs.garde-version.outputs.tag_image }}
+          INSTANCE: ${{ steps.cible.outputs.instance }}
+        run: |
+          set -euo pipefail
+
+          # Le script de déploiement n'est PAS inséré dans la commande : il est
+          # récupéré depuis le dépôt, au tag exact qu'on déploie. Ainsi le
+          # script et le fichier Compose sont toujours ceux de la version
+          # déployée, et un retour en arrière ramène la bonne version des deux.
+          # (L'autre voie — insérer le script entier dans `--parameters` — est
+          # bornée à 24 000 caractères et rend l'historique illisible.)
+          DEPOT="${{ github.server_url }}/${{ github.repository }}.git"
+
+          # Construit ligne à ligne, et non par un document en ligne : un
+          # heredoc dans un bloc `run:` indenté emporte son indentation dans la
+          # commande envoyée, ce qui casse la récupération du tag.
+          lignes=$(printf '%s\n' \
+            "set -euo pipefail" \
+            "export AWS_DEFAULT_REGION='${{ vars.AWS_REGION }}'" \
+            "export ECR_REGISTRY='${{ vars.ECR_REGISTRY }}'" \
+            "export SSM_PREFIX='$SSM_PREFIX'" \
+            "export RACINE='$RACINE'" \
+            "cd '$RACINE'" \
+            "if [ -d src/.git ]; then" \
+            "  git -C src remote set-url origin '$DEPOT'" \
+            "  git -C src fetch --force --depth 1 origin 'refs/tags/v$VERSION:refs/tags/v$VERSION'" \
+            "else" \
+            "  git clone --depth 1 --branch 'v$VERSION' '$DEPOT' src" \
+            "fi" \
+            "git -C src checkout --force 'v$VERSION'" \
+            "chmod +x src/deploy/scripts/aws-ssm-deploy.sh" \
+            "exec src/deploy/scripts/aws-ssm-deploy.sh '$VERSION' '$TAG_IMAGE'")
+
+          id=$(aws ssm send-command \
+                 --instance-ids "$INSTANCE" \
+                 --document-name AWS-RunShellScript \
+                 --comment "precis $VERSION" \
+                 --timeout-seconds 1800 \
+                 --parameters commands="$(jq -Rn --arg c "$lignes" '[$c]')" \
+                 --query 'Command.CommandId' --output text)
+          echo "commande=$id" >> "$GITHUB_OUTPUT"
+          echo "Commande SSM : $id"
+
+      - name: Attendre le verdict
+        env:
+          COMMANDE: ${{ steps.envoi.outputs.commande }}
+          INSTANCE: ${{ steps.cible.outputs.instance }}
+        run: |
+          set -uo pipefail
+
+          # ═══ SANS CETTE BOUCLE, LE WORKFLOW SERAIT VERT SUR UN ÉCHEC ══════
+          # `send-command` rend la main immédiatement : il signale que la
+          # commande est ACCEPTÉE, pas qu'elle a réussi. C'est la panne la plus
+          # trompeuse de toute cette chaîne — on croit avoir déployé.
+          # ══════════════════════════════════════════════════════════════════
+          statut=Pending
+          for essai in $(seq 1 120); do   # 120 × 15 s = 30 min
+            sleep 15
+            statut=$(aws ssm get-command-invocation \
+                       --command-id "$COMMANDE" --instance-id "$INSTANCE" \
+                       --query Status --output text 2>/dev/null || echo Inconnu)
+            echo "[$essai] $statut"
+            case "$statut" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+          done
+
+          echo "::group::Sortie du deploiement"
+          aws ssm get-command-invocation \
+            --command-id "$COMMANDE" --instance-id "$INSTANCE" \
+            --query StandardOutputContent --output text || true
+          echo "::endgroup::"
+
+          if [ "$statut" != "Success" ]; then
+            echo "::group::Erreurs"
+            aws ssm get-command-invocation \
+              --command-id "$COMMANDE" --instance-id "$INSTANCE" \
+              --query StandardErrorContent --output text || true
+            echo "::endgroup::"
+            echo "::error::Deploiement en echec (statut : $statut)."
+            exit 1
+          fi
+
+      - name: Le service rend-il le service
+        env:
+          VERSION: ${{ needs.garde-version.outputs.version }}
+        run: |
+          set -uo pipefail
+
+          ip=$(aws cloudformation describe-stacks --stack-name "$PILE" \
+                 --query "Stacks[0].Outputs[?OutputKey=='AdresseIpPublique'].OutputValue" \
+                 --output text)
+
+          # Contrôle depuis l'EXTÉRIEUR : le script, lui, a déjà vérifié depuis
+          # la machine. Ce qu'on prouve ici, c'est que le chemin complet
+          # fonctionne — pare-feu, nginx, service.
+          #
+          # Et l'on vérifie LA VERSION, pas seulement que le service répond :
+          # c'est la seule façon de distinguer « un conteneur tourne » de
+          # « la bonne version tourne ». L'ancienne version répondrait tout
+          # aussi gaiement.
+          for essai in $(seq 1 10); do
+            corps=$(curl -fsS --max-time 10 "http://$ip/health" 2>/dev/null || echo "")
+            if [ -n "$corps" ]; then
+              echo "$corps" | jq .
+              annoncee=$(echo "$corps" | jq -r '.versions.projet // empty')
+              if [ "$annoncee" = "$VERSION" ]; then
+                echo "✓ Le service annonce $annoncee."
+                exit 0
+              fi
+              echo "Le service repond mais annonce « ${annoncee:-?} », attendu « $VERSION »."
+            fi
+            sleep 10
+          done
+
+          echo "::error::Le service ne confirme pas la version $VERSION sur http://$ip/health"
+          echo "Le script de deploiement a pourtant reussi : regardez son rapport ci-dessus."
+          exit 1
+
+      - name: Resume
+        if: always()
+        env:
+          VERSION: ${{ needs.garde-version.outputs.version }}
+          TAG_IMAGE: ${{ needs.garde-version.outputs.tag_image }}
+        run: |
+          {
+            echo "### Mise en ligne $VERSION"
+            echo ""
+            echo "- Images : \`$TAG_IMAGE\`"
+            echo "- Instance : ${{ steps.cible.outputs.instance }}"
+            echo "- Resultat : ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"

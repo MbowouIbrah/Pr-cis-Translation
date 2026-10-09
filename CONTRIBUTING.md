@@ -91,7 +91,7 @@ cd frontend && npm run build
 # Interface : parité des dictionnaires (un oubli casse une langue, pas le build)
 node scripts/check-i18n.mjs
 
-# Backend : les 13 suites, hors ligne. Chacune DOIT sortir en exit=0.
+# Backend : les 21 suites, hors ligne. Chacune DOIT sortir en exit=0.
 cd ../backend
 for t in tests/test_*.py; do venv/Scripts/python.exe "$t" || echo "FAIL $t"; done
 
