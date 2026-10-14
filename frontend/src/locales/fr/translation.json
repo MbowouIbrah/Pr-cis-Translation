@@ -243,6 +243,7 @@
     "page_pending": "Cette page est en attente de traduction.",
     "credits_needed": "Il reste {{count}} page(s) à régler pour traduire ce document.",
     "trial_hover": "Version d'essai — Survolez pour apercevoir",
+    "trial_touch": "Version d'essai — Touchez la page pour apercevoir",
     "trial_buy": "Acheter pour télécharger"
   },
   "account": {

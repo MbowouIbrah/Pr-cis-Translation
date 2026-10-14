@@ -3,8 +3,12 @@ import { useTranslation } from 'react-i18next';
 import { motion } from 'motion/react';
 import { Loader2, Hourglass, Lock } from 'lucide-react';
 
-// Seuil des écrans où deux volets côte à côte deviennent illisibles.
-const COMPACT_QUERY = '(max-width: 767px)';
+// Largeur du cadre d'aperçu (#scroll) sous laquelle deux volets côte à côte
+// tombent sous ~300 px chacun : texte illisible. C'est le CADRE qui compte, pas
+// l'écran — une barre latérale peut le rétrécir sur un écran large.
+const COMPACT_MAX_PX = 680;
+
+const largeurCadre = () => document.getElementById('scroll')?.clientWidth ?? window.innerWidth;
 
 interface PdfViewerProps {
   sourceFile?: Blob | null;
@@ -63,16 +67,29 @@ export default function PdfViewer({
   // chacun, texte illisible. On n'en montre alors qu'UN, en pleine largeur, et
   // une bascule passe de l'un à l'autre — la traduction d'abord.
   const [compact, setCompact] = useState(
-    () => typeof window !== 'undefined' && window.matchMedia(COMPACT_QUERY).matches,
+    () => typeof window !== 'undefined' && largeurCadre() < COMPACT_MAX_PX,
   );
   const [volet, setVolet] = useState<'source' | 'target'>('target');
   const containerRef = useRef<HTMLDivElement>(null);
+  const basculeRef = useRef<HTMLDivElement>(null);
+  // Sans original, il n'y a rien à basculer : le volet traduit seul.
+  const voletVu = !compact ? null : sourceFile ? volet : 'target';
+  const libelleSource = sourceLabel ?? t('preview.source_label');
+  const libelleCible = targetLabel ?? t('preview.target_label');
+  // Écran sans survol (tactile) : l'invite d'essai dit « touchez », pas « survolez ».
+  const sansSurvol = typeof window !== 'undefined' && !!window.matchMedia?.('(hover: none)').matches;
 
   useEffect(() => {
-    const mq = window.matchMedia(COMPACT_QUERY);
-    const suivre = () => setCompact(mq.matches);
-    mq.addEventListener('change', suivre);
-    return () => mq.removeEventListener('change', suivre);
+    const suivre = () => setCompact(largeurCadre() < COMPACT_MAX_PX);
+    suivre();   // le cadre a pu changer entre le premier rendu et cet effet
+    const cadre = document.getElementById('scroll');
+    if (cadre && typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(suivre);
+      ro.observe(cadre);
+      return () => ro.disconnect();
+    }
+    window.addEventListener('resize', suivre);
+    return () => window.removeEventListener('resize', suivre);
   }, []);
 
   useEffect(() => {
@@ -186,10 +203,12 @@ export default function PdfViewer({
             // Hauteur disponible : le conteneur moins son padding (24px × 2) et
             // la hauteur du badge de langue au-dessus de chaque panneau (~34px).
             // Paysage : deux panneaux EMPILÉS → chacun a la MOITIÉ de la hauteur.
-            // Écran étroit : un seul volet visible, sous la bascule (~44px).
+            // Écran étroit : un seul volet visible, sous la bascule (sa hauteur
+            // mesurée + l'écart de 12px qui la sépare du volet).
             const hDispo = scrollEl.clientHeight - 48 - 34;
+            const hBascule = basculeRef.current ? basculeRef.current.offsetHeight + 12 : 0;
             containerHeight = compact
-              ? hDispo - 44
+              ? hDispo - hBascule
               : landscape ? (hDispo - 24) / 2 : hDispo;
           } else {
             containerWidth = canvas.parentElement?.clientWidth || 600;
@@ -300,8 +319,8 @@ export default function PdfViewer({
         minWidth: '100%',
       }}
     >
-      {compact && (
-        <div className="cv-bascule" role="group" aria-label={t('preview.toggle_label')}>
+      {compact && sourceFile && (
+        <div ref={basculeRef} className="cv-bascule" role="group" aria-label={t('preview.toggle_label')}>
           {(['source', 'target'] as const).map((v) => (
             <button
               key={v}
@@ -309,9 +328,7 @@ export default function PdfViewer({
               aria-pressed={volet === v}
               onClick={() => setVolet(v)}
             >
-              {v === 'source'
-                ? sourceLabel ?? t('preview.source_label')
-                : targetLabel ?? t('preview.target_label')}
+              {v === 'source' ? libelleSource : libelleCible}
             </button>
           ))}
         </div>
@@ -320,9 +337,9 @@ export default function PdfViewer({
       {/* Original Panel */}
       <div
         className="cv-wrap"
-        style={{ flexShrink: 0, display: compact && volet !== 'source' ? 'none' : undefined }}
+        style={{ flexShrink: 0, display: voletVu && voletVu !== 'source' ? 'none' : undefined }}
       >
-        <span className="cv-lang-badge fr">{sourceLabel ?? t('preview.source_label')}</span>
+        <span className="cv-lang-badge fr">{libelleSource}</span>
         <div className="cv" id="cv-fr">
           <canvas
             id="pdf-canvas-original"
@@ -347,13 +364,13 @@ export default function PdfViewer({
       {/* Translation Panel */}
       <div
         className="cv-wrap"
-        style={{ flexShrink: 0, display: compact && volet !== 'target' ? 'none' : undefined }}
+        style={{ flexShrink: 0, display: voletVu && voletVu !== 'target' ? 'none' : undefined }}
       >
         <span
           className="cv-lang-badge en"
           style={{ background: '#f0fdf4', color: '#15803d' }}
         >
-          {targetLabel ?? t('preview.target_label')}
+          {libelleCible}
         </span>
         <div
           className="cv trial-viewer"
@@ -386,6 +403,21 @@ export default function PdfViewer({
             }}
             onMouseEnter={() => setIsHovering(true)}
             onMouseLeave={() => { setCursorPos(null); setIsHovering(false); }}
+            // Écran tactile : pas de survol. Toucher (ou glisser) place le trou,
+            // qui reste là au lâcher — sinon la traduction resterait toute voilée.
+            onTouchStart={(e) => {
+              if (!isTrialMode) return;
+              const rect = e.currentTarget.getBoundingClientRect();
+              const tp = e.touches[0];
+              setCursorPos({ x: tp.clientX - rect.left, y: tp.clientY - rect.top });
+              setIsHovering(true);
+            }}
+            onTouchMove={(e) => {
+              if (!isTrialMode) return;
+              const rect = e.currentTarget.getBoundingClientRect();
+              const tp = e.touches[0];
+              setCursorPos({ x: tp.clientX - rect.left, y: tp.clientY - rect.top });
+            }}
           >
           {/* Canevas traduit — UNIQUE. En essai il n'est pas filtré : c'est le
               voile au-dessus qui l'assombrit, en laissant un trou sous le curseur. */}
@@ -509,7 +541,7 @@ export default function PdfViewer({
             >
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', justifyContent: 'center' }}>
                 <Lock size={13} strokeWidth={2.2} />
-                {t('preview.trial_hover')} ·{' '}
+                {t(sansSurvol ? 'preview.trial_touch' : 'preview.trial_hover')} ·{' '}
                 <a
                   href="#pricing"
                   style={{ color: '#93c5fd', textDecoration: 'underline' }}
