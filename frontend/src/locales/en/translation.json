@@ -249,7 +249,15 @@
     "storage": "Storage",
     "unlimited": "Unlimited",
     "no_storage": "No personal storage space",
-    "logout": "Sign out"
+    "logout": "Sign out",
+    "translations_left": "Translations left",
+    "free_left_one": "{{count}} free this month",
+    "free_left_other": "{{count}} free this month",
+    "pages_left": "Pages left this month",
+    "credits_one": "+ {{count}} purchased page available",
+    "credits_other": "+ {{count}} purchased pages available",
+    "renews": "Renews on {{date}}",
+    "storage_left": "Storage left"
   },
   "plans": {
     "free": "Free",

@@ -267,6 +267,11 @@ class JobManager:
             doc.status = status
             if translated_path:
                 doc.translated_path = translated_path
+            if status == "error":
+                # On ne facture pas ce qu'on n'a pas livré : l'offre du mois
+                # redevient libre, les pages achetées reviennent au solde.
+                from app.services.usage import refund_for_document
+                await refund_for_document(db, doc_id)
 
         try:
             _dans_une_boucle_jetable(_maj)
