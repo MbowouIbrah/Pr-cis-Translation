@@ -13,8 +13,11 @@ import i18n from '../i18n';
 
 export interface Quote {
   pages: number;
+  /** Pages facturées : ≥ `pages`, arrondi au montant minimum de l'opérateur. */
+  billed_pages: number;
   unit_price: number;
   amount: number;
+  min_amount: number;
   currency: string;
   zone: string;
 }
