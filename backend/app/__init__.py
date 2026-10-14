@@ -21,6 +21,7 @@ d'appeler un service depuis un script, sans rien entraîner derrière.
 """
 from __future__ import annotations
 
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -61,6 +62,10 @@ async def _lifespan(_app: FastAPI):
     await reconcilier_jobs_orphelins()
     balayer_partiels_orphelins()
     office.prewarm()
+    # Décor de l'aperçu d'essai : ~5 s au premier calque, payées ici en tâche
+    # de fond plutôt que par le premier visiteur gratuit après un déploiement.
+    from app.services import trial_preview
+    threading.Thread(target=trial_preview.prechauffer, daemon=True).start()
     _afficher_banniere()
     yield
 

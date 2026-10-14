@@ -34,27 +34,43 @@ qui l'aurait tué.
 """
 from __future__ import annotations
 
+import functools
+import html
+
 import fitz
 
-from app.config import BRAND_NAME, BRAND_TAGLINE, PUBLIC_SITE
+from app.config import BACKEND_DIR, BRAND_NAME, PUBLIC_SITE
 
 # Résolution de l'aperçu d'essai. Assez pour juger la mise en page et lire au
 # projecteur ; pas de quoi produire une réimpression propre. Ce n'est pas un
 # réglage de qualité, c'est le curseur du teaser.
 TRIAL_DPI = 110
 
-# Filigrane = MINI-PUBLICITÉ. Deux lignes : la marque, puis le métier + l'adresse
-# du site. Le contenu est DYNAMIQUE (`app.config`) : changer de domaine ne touche
-# pas ce moteur. Il ne « protège » pas à lui seul (on peut recadrer), mais il rend
-# toute fuite IDENTIFIABLE — et, cuit dans les pixels (voir plus bas), il n'est
-# plus une couche de texte qu'on détache : l'enlever demande de retoucher l'image.
-_MARK_BRAND = BRAND_NAME
-_MARK_SUB = f"{BRAND_TAGLINE} · {PUBLIC_SITE}"
-_MARK_BRAND_SIZE = 19
-_MARK_SUB_SIZE = 10
-_MARK_STEP = 300          # pas de la trame, en points (banderoles espacées)
-_MARK_COLOR = (0.10, 0.20, 0.55)
-_MARK_OPACITY = 0.15
+# Filigrane = le DÉCOR de l'application, figé : les quatre bandes de mots
+# multilingues qui défilent derrière les sections (`hero/LanguageMarquee`),
+# ici immobiles et répétées sur toute la page. Garder ces listes alignées sur
+# `BANDES` du composant. La marque et le site sont glissés dans chaque bande : le décor
+# rend toute fuite IDENTIFIABLE, et cuit dans les pixels (voir plus bas) il
+# n'est plus une couche de texte qu'on détache.
+_BANDES: tuple[tuple[str, ...], ...] = (
+    ("Translation", "Traduction", "Traducción", "Übersetzung", "Traduzione",
+     "Overzetting", "翻訳", "번역", "翻译", "ترجمة", "Перевод"),
+    ("Documents", "Actes", "Certificats", "Contrats", "Diplômes",
+     "書類", "문서", "文档", "عقود", "Справки"),
+    ("Precision", "Précision", "Precisión", "Präzision", "Precisione",
+     "Precisie", "精度", "정밀도", "精确", "دقة", "Точность"),
+    ("AI & Human", "IA & Humain", "IA y Humano", "KI & Mensch", "IA & Umano",
+     "AI & Mens", "AI & 人間", "AI & 인간", "AI & 人类", "ذكاء بشري واصطناعي"),
+)
+_MARK_ENSEIGNE = f"{BRAND_NAME} · {PUBLIC_SITE}"
+# Serif italique, au plus près de la police d'affichage du site (Cormorant
+# Garamond, non embarquée). CJK, arabe et cyrillique passent par le repli de
+# polices de MuPDF (`insert_htmlbox`), qui met aussi l'arabe en forme.
+_MARK_FONT = BACKEND_DIR / "fonts" / "ptserif-Italic.ttf"
+_MARK_SIZE = 26           # corps des mots, en points
+_MARK_INTERLIGNE = 1.9    # pas vertical entre bandes, en multiples du corps
+_MARK_COLOR = "#0b1f4d"   # navy du décor de l'app
+_MARK_OPACITY = 0.11
 
 
 def rasterize_for_trial(pdf_bytes: bytes, pages=None,
@@ -109,28 +125,64 @@ def rasterize_for_trial(pdf_bytes: bytes, pages=None,
 
 
 def _stamp(page: fitz.Page) -> None:
-    """Trame de mini-publicités en diagonale sur toute la page.
+    """Pose le décor de bandes multilingues sur toute la page.
 
-    Chaque motif porte DEUX lignes (marque, puis métier + site). Les deux
-    tournent autour du MÊME point d'ancrage (`morph=(base, rot)`) pour rester
-    solidaires — sinon chacune pivoterait sur elle-même et le bloc se disloquerait.
+    Un filigrane manqué ne doit pas perdre la page : l'échec est avalé.
     """
-    rot = fitz.Matrix(1, 1).prerotate(45)
     r = page.rect
-    y = -int(r.height)
-    while y < r.height + _MARK_STEP:
-        x = 0
-        while x < r.width + _MARK_STEP:
-            base = fitz.Point(x, y)
-            try:
-                page.insert_text(base, _MARK_BRAND, fontsize=_MARK_BRAND_SIZE,
-                                 fontname="hebo", color=_MARK_COLOR,
-                                 fill_opacity=_MARK_OPACITY, morph=(base, rot))
-                page.insert_text(fitz.Point(x, y + 14), _MARK_SUB,
-                                 fontsize=_MARK_SUB_SIZE, fontname="helv",
-                                 color=_MARK_COLOR, fill_opacity=_MARK_OPACITY,
-                                 morph=(base, rot))
-            except Exception:
-                pass          # un filigrane manqué ne doit pas perdre la page
-            x += _MARK_STEP
-        y += _MARK_STEP
+    try:
+        page.insert_image(r, stream=_calque(round(r.width), round(r.height)))
+    except Exception:
+        pass
+
+
+def prechauffer() -> None:
+    """Construit d'avance le décor des formats courants (A4, Letter).
+
+    Le premier calque d'un processus coûte ~5 s (chargement des polices de
+    repli CJK/arabe) : sans ça, c'est le premier aperçu d'essai après chaque
+    déploiement qui les paierait.
+    """
+    for largeur, hauteur in ((595, 842), (612, 792)):
+        try:
+            _calque(largeur, hauteur)
+        except Exception:
+            pass
+
+
+@functools.lru_cache(maxsize=16)
+def _calque(largeur: int, hauteur: int) -> bytes:
+    """Le décor pour UN format de page, en PNG transparent, construit une fois.
+
+    MESURÉ (A4) : composé en PDF, le calque embarque les polices de repli
+    entières — 35 Mo, et ~0,5 s à re-rastériser à CHAQUE page. Figé en image à
+    la résolution d'essai : 125 Ko, ~50 ms. Il finit de toute façon cuit dans
+    les pixels de la page. Mis en cache en OCTETS : un Document fitz partagé
+    entre threads n'est pas sûr.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=largeur, height=hauteur)
+    archive = fitz.Archive()
+    archive.add(fitz.Font(fontfile=str(_MARK_FONT)).buffer, "deco.ttf")
+    css = ("@font-face {font-family: deco; src: url(deco.ttf);}"
+           f"p {{font-family: deco, serif; font-style: italic; margin: 0;"
+           f" font-size: {_MARK_SIZE}px; color: {_MARK_COLOR};"
+           " white-space: nowrap;}")
+    pas = _MARK_SIZE * _MARK_INTERLIGNE
+    y, i = 0.0, 0
+    while y < hauteur:
+        bande = _BANDES[i % len(_BANDES)]
+        mots = bande[:3] + (_MARK_ENSEIGNE,) + bande[3:]
+        ligne = html.escape("  •  ".join(mots * 2))
+        # Décalage propre à chaque bande : figer le défilement, c'est figer
+        # des bandes qui ne sont pas alignées entre elles.
+        dx = -float((i * 137) % 400)
+        page.insert_htmlbox(fitz.Rect(dx, y, dx + 6000, y + pas),
+                            f"<p>{ligne}</p>", css=css, archive=archive,
+                            opacity=_MARK_OPACITY)
+        y += pas
+        i += 1
+    try:
+        return page.get_pixmap(dpi=TRIAL_DPI, alpha=True).tobytes("png")
+    finally:
+        doc.close()
