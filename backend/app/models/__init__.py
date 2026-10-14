@@ -32,6 +32,8 @@ from .plans import (
 from .user import User
 from .document import Document
 from .payment import Payment
+from .usage import (UsageRecord, KIND_CREDITS, KIND_FREE_OFFER, KIND_LEGACY,
+                    KIND_PLAN)
 from .auth_tokens import RefreshToken, VerificationCode
 from .error_log import (ErrorLog, LEVELS, SOURCES, STATUS_HANDLED, STATUS_NEW)
 from .support_ticket import (SupportTicket, CATEGORIES,
@@ -39,7 +41,8 @@ from .support_ticket import (SupportTicket, CATEGORIES,
 
 __all__ = [
     "Base", "new_uuid", "utcnow",
-    "User", "Document", "Payment", "RefreshToken", "VerificationCode",
+    "User", "Document", "Payment", "UsageRecord",
+    "KIND_CREDITS", "KIND_FREE_OFFER", "KIND_LEGACY", "KIND_PLAN", "RefreshToken", "VerificationCode",
     "ErrorLog", "LEVELS", "SOURCES", "STATUS_HANDLED", "STATUS_NEW",
     "SupportTicket", "CATEGORIES", "STATUS_OPEN", "TICKET_HANDLED",
     "ASSIGNABLE_PLANS", "FREE_PLAN", "PLAN_LABELS", "PLAN_MONTHLY_PAGES",
