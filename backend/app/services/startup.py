@@ -30,7 +30,8 @@ async def reconcilier_jobs_orphelins():
     # LIMITE ASSUMÉE : si un second processus démarre pendant qu'un premier
     # traduit encore, il marquera en erreur un job bien vivant. Le dégât est
     # transitoire — le worker du premier appellera `jobs.done`, qui repasse la
-    # ligne à `done` avec son `translated_path`. On ne complique pas pour ça.
+    # ligne à `done` avec son `translated_path` et annule le remboursement
+    # fait ici (`rebill_for_document`) : livré, donc facturé.
     try:
         from app.core.database import async_session
         from app.models import Document

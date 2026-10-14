@@ -285,6 +285,11 @@ class JobManager:
                 # redevient libre, les pages achetées reviennent au solde.
                 from app.services.usage import refund_for_document
                 await refund_for_document(db, doc_id)
+            elif status == "done":
+                # Livré : si un redémarrage concurrent l'avait remboursé
+                # (`reconcilier_jobs_orphelins`), la consommation revient.
+                from app.services.usage import rebill_for_document
+                await rebill_for_document(db, doc_id)
 
         try:
             _dans_une_boucle_jetable(_maj)

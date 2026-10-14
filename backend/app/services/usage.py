@@ -84,6 +84,29 @@ async def refund_for_document(db: AsyncSession, document_id: str) -> None:
                 user.page_credits += rec.pages
 
 
+async def rebill_for_document(db: AsyncSession, document_id: str) -> None:
+    """Annule le remboursement d'une traduction finalement LIVRÉE.
+
+    Seul cas connu : un second processus démarre pendant qu'un premier
+    traduit, et `reconcilier_jobs_orphelins` rembourse un job bien vivant,
+    qui aboutit ensuite. Sans ceci, le client aurait la traduction ET ses
+    pages. Un Document ne se relance jamais sous le même id : un
+    enregistrement remboursé puis livré ne peut venir que de là. Le solde
+    peut passer sous zéro si les pages rendues ont déjà servi : c'est la
+    dette réelle, et elle bloque le prochain débit."""
+    rows = (await db.execute(
+        select(UsageRecord).where(UsageRecord.document_id == document_id,
+                                  UsageRecord.refunded.is_(True))
+        .with_for_update()
+    )).scalars().all()
+    for rec in rows:
+        rec.refunded = False
+        if rec.kind == KIND_CREDITS:
+            user = await db.get(User, rec.user_id, with_for_update=True)
+            if user is not None:
+                user.page_credits -= rec.pages
+
+
 async def usage_summary(db: AsyncSession, user: User) -> dict:
     """Ce qu'il reste à l'utilisateur ce mois-ci, tel que la route l'appliquera."""
     plan = user.plan

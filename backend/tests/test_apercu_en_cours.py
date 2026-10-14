@@ -11,7 +11,8 @@ figé. On attend désormais :
   • job FINI mais base pas à jour (report échoué) → son rendu final
     (`X-Render: full`) s'il réussit, 404 s'il échoue — jamais un partiel
     redemandé sans fin ;
-  • une traduction interrompue par un redémarrage est REMBOURSÉE ;
+  • une traduction interrompue par un redémarrage est REMBOURSÉE, et
+    re-facturée si son job (vivant dans un autre processus) aboutit ;
   • dans AUCUN cas l'original déguisé en traduction.
 
 Exécution :  cd backend && venv/Scripts/python.exe tests/test_apercu_en_cours.py
@@ -88,8 +89,10 @@ async def run():
         docs = {}
         for cle, u, statut in (("vol", payant, "translating"),
                                ("vol_libre", libre, "translating"),
-                               ("mort", payant, "error")):
-            d = Document(user_id=u.id, original_name="doc.pdf",
+                               ("mort", payant, "error"),
+                               ("vol_pptx", payant, "translating")):
+            d = Document(user_id=u.id,
+                         original_name="doc.pptx" if cle == "vol_pptx" else "doc.pdf",
                          source_lang="auto", target_lang="en",
                          original_path=orig, translated_path=None,
                          size_bytes=1, status=statut)
@@ -123,11 +126,22 @@ async def run():
             async with async_session() as db:
                 solde = (await db.get(User, payant.id)).page_credits
                 statut_coupe = (await db.get(Document, docs["coupe"])).status
-                for cle in ("vol", "vol_libre"):
+                for cle in ("vol", "vol_libre", "vol_pptx"):
                     (await db.get(Document, docs[cle])).status = "translating"
                 await db.commit()
             ok("REDEMARRAGE : traduction interrompue en erreur et remboursee",
                statut_coupe == "error" and solde == 2,
+               f"statut={statut_coupe} solde={solde}")
+            # Le job n'était pas mort (autre processus) : il aboutit.
+            job_coupe = jobs.create()
+            jobs.set(job_coupe, document_id=docs["coupe"])
+            await asyncio.to_thread(jobs.sync_status, job_coupe, "done", orig)
+            jobs.forget(job_coupe)
+            async with async_session() as db:
+                solde = (await db.get(User, payant.id)).page_credits
+                statut_coupe = (await db.get(Document, docs["coupe"])).status
+            ok("REDEMARRAGE puis livraison : la consommation revient",
+               statut_coupe == "done" and solde == 0,
                f"statut={statut_coupe} solde={solde}")
 
             jobs.set(job_id, document_id=docs["vol"], user_id=payant.id,
@@ -180,6 +194,24 @@ async def run():
             r = client.get(url, headers=entetes(payant))
             ok("ECHEC non consigne : 404, plus de partiel",
                r.status_code == 404, f"status={r.status_code}")
+
+            # PPTX fini, pas encore consigné : son partiel (PDF) le temps du
+            # report, puis plus rien — jamais un suivi sans fin.
+            import time as _t
+            job_pptx = jobs.create()
+            jobs.set(job_pptx, document_id=docs["vol_pptx"], user_id=payant.id,
+                     partial_path=partiel, pages=None, state="done",
+                     result_path=final, finished_at=_t.time())
+            url_pptx = f"/api/documents/{docs['vol_pptx']}/preview?page=1"
+            r = client.get(url_pptx, headers=entetes(payant))
+            ok("PPTX fini a l'instant : partiel servi pendant le report",
+               r.status_code == 200 and r.headers.get("X-Render") == "partial",
+               f"status={r.status_code} render={r.headers.get('X-Render')}")
+            jobs.set(job_pptx, finished_at=_t.time() - 120)
+            r = client.get(url_pptx, headers=entetes(payant))
+            ok("PPTX fini depuis 2 min, jamais consigne : 404",
+               r.status_code == 404, f"status={r.status_code}")
+            jobs.forget(job_pptx)
 
             # 5. Plus de job, pas de traduction : 404, pas l'original.
             r = client.get(f"/api/documents/{docs['mort']}/preview?page=1",

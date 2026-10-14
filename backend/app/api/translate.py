@@ -16,6 +16,7 @@ import queue
 from fastapi import (APIRouter, Depends, File, Form, Header, HTTPException,
                      Request, UploadFile)
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -464,7 +465,7 @@ async def translate_endpoint(
                                       target_lang, original_path, len(file_bytes),
                                       paid=doc_is_paid, page_count=pages_facturees,
                                       usage_kind=usage_kind)
-    except HTTPException:
+    except Exception:
         # Rien ne sera soumis : le job ouvert plus haut resterait « pending »
         # en mémoire, sans document ni worker, jusqu'au ménage.
         jobs.forget(job_id)
@@ -581,9 +582,12 @@ async def translation_partial(job_id: str, x_api_key: str = Header(None),
     path = job.get("partial_path")
     if not path or not os.path.exists(path):
         raise HTTPException(status_code=202, detail="Aucune page prête pour l'instant.")
-    # Lecture déportée : un `read()` ici figerait la boucle d'événements, donc
-    # le flux SSE qui annonce les pages suivantes de cette même traduction.
-    data = await asyncio.to_thread(lambda: open(path, "rb").read())
+    # Lecture et rastérisation HORS de la boucle : appelé à chaque page du
+    # flux, un appel bloquant ici figeait toute l'application, SSE compris.
+    def _lire() -> bytes:
+        with open(path, "rb") as f:
+            return f.read()
+    data = await run_in_threadpool(_lire)
 
     # PLAN D'ESSAI : jamais le clair. On envoyait le PDF traduit tel quel et on
     # comptait sur le navigateur pour l'assombrir — mesuré : un compte `free`
@@ -595,7 +599,7 @@ async def translation_partial(job_id: str, x_api_key: str = Header(None),
     # plan retiré du barème) est traité comme non payant. `== FREE_PLAN`
     # donnait l'inverse : tout ce qui n'était pas littéralement "free" passait.
     if not await _droit_au_clair(job, current_user, db):
-        data = rasterize_for_trial(data, job.get("pages"))
+        data = await run_in_threadpool(rasterize_for_trial, data, job.get("pages"))
 
     return Response(content=data, media_type="application/pdf",
                     headers={"Cache-Control": "no-store"})

@@ -31,6 +31,9 @@ export default function PaymentModal({
   const [phone, setPhone] = useState('');
   // Ce que le serveur facture réellement (montant minimum de l'opérateur).
   const billed = quote?.billed_pages ?? pages;
+  // Taille retenue par le SERVEUR : pour un document, elle peut différer de
+  // la prop (taille jamais consignée côté bibliothèque, recomptée au devis).
+  const dues = quote?.pages ?? pages;
   const op = detectOperator(phone);
 
   useEffect(() => {
@@ -158,10 +161,10 @@ export default function PaymentModal({
                   </div>
                   {/* Montant minimum de l'opérateur : on le dit avant l'invite,
                       et on dit où vont les pages payées en plus. */}
-                  {quote && pricing && billed > pages && (
+                  {quote && pricing && billed > dues && (
                     <p style={{ fontSize: '12px', color: 'var(--gray-500)', margin: '10px 0 0', lineHeight: 1.45 }}>
                       Montant minimum de {formatMoney(quote.min_amount, quote.currency, pricing.decimals, 'fr')} :{' '}
-                      {billed - pages} page{billed - pages > 1 ? 's' : ''} en plus, créditée{billed - pages > 1 ? 's' : ''}{' '}
+                      {billed - dues} page{billed - dues > 1 ? 's' : ''} en plus, créditée{billed - dues > 1 ? 's' : ''}{' '}
                       sur votre compte pour une prochaine traduction.
                     </p>
                   )}

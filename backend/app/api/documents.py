@@ -3,6 +3,7 @@ Routes documents — CRUD par utilisateur.
 """
 from __future__ import annotations
 import os
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import Response
@@ -132,11 +133,6 @@ async def _purge_if_orphan(db: AsyncSession, path: str) -> bool:
         return False
     _prune_empty_dirs(os.path.dirname(real))
     return True
-
-
-def _read_bytes(path: str) -> bytes:
-    with open(path, "rb") as f:
-        return f.read()
 
 
 def _prune_empty_dirs(start: str) -> None:
@@ -412,8 +408,14 @@ async def preview_document(
         # Job FINI mais base pas à jour (report `sync_status` échoué) : servir
         # le partiel ici ferait redemander le client indéfiniment. Le rendu
         # final du job, s'il existe, est la vraie réponse ; sinon, rien.
+        # Hors PDF, le rendu final n'est pas un PDF : on garde le partiel
+        # (déjà converti) le temps que `sync_status` consigne la traduction —
+        # une minute au plus, sinon un report échoué ferait redemander le
+        # client sans fin.
         if etat == "done" and job.get("result_path") and ext == "pdf":
             chemin, rendu = job["result_path"], "full"
+        elif etat == "done" and time.time() - job.get("finished_at", 0) < 60:
+            chemin, rendu = job.get("partial_path"), "partial"
         elif etat in ("done", "error") or doc.status != "translating":
             chemin, rendu = None, None
         else:
@@ -423,7 +425,7 @@ async def preview_document(
                 raise HTTPException(status_code=404, detail="Traduction indisponible. Relancez-la depuis la bibliothèque.")
             return Response(status_code=202, headers={"Cache-Control": "no-store",
                                                       "X-Render": "pending"})
-        data = await run_in_threadpool(_read_bytes, chemin)
+        data = await run_in_threadpool(_lire, chemin)
         if not _may_read_clear(user, doc):
             # Même règle que /translate/partial : un plan d'essai ne reçoit
             # que des pixels, et seules les pages traduites sont à protéger.
@@ -474,7 +476,7 @@ async def preview_document(
     if clear:
         cached = render_cache.cache_valid(doc.translated_path)
         if cached:
-            data = await run_in_threadpool(_read_bytes, cached)
+            data = await run_in_threadpool(_lire, cached)
             return Response(content=data, media_type="application/pdf",
                             headers={"Cache-Control": "no-store",
                                      "X-Render": "full"})
