@@ -249,7 +249,15 @@
     "storage": "Stockage",
     "unlimited": "Illimité",
     "no_storage": "Sans espace de stockage personnel",
-    "logout": "Déconnexion"
+    "logout": "Déconnexion",
+    "translations_left": "Traductions restantes",
+    "free_left_one": "{{count}} offerte ce mois",
+    "free_left_other": "{{count}} offertes ce mois",
+    "pages_left": "Pages restantes ce mois",
+    "credits_one": "+ {{count}} page achetée disponible",
+    "credits_other": "+ {{count}} pages achetées disponibles",
+    "renews": "Renouvellement le {{date}}",
+    "storage_left": "Stockage restant"
   },
   "plans": {
     "free": "Gratuit",

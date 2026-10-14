@@ -123,7 +123,8 @@ export default function DocumentLibrary({
   return (
     <>
       <Drawer open={isOpen} onClose={onClose} label={t('library.title')}>
-        {user && <AccountPanel user={user} />}
+        {user && <AccountPanel user={user}
+          refreshKey={documents.map(d => `${d.id}:${d.status}`).join('|')} />}
 
         <header className="biblio__tete">
           <div>
