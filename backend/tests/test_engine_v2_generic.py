@@ -602,7 +602,7 @@ def _build_p25(pg):
 def _p27_page():
     """Page synthétique écrite en opérateurs PDF bruts (q / W n / cm / Do)."""
     doc = fitz.open()
-    pg = doc.new_page(width=300, height=200)
+    pg = doc.new_page(width=300, height=320)
 
     def _png(rgb):
         pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), 0)
@@ -622,7 +622,8 @@ def _p27_page():
     cercle = _chemin(lambda sh: sh.draw_circle((70, 70), 50))
     triangle = _chemin(lambda sh: sh.draw_polyline(
         [(150, 20), (280, 20), (150, 120)]))
-    H = 200
+    disque = _chemin(lambda sh: sh.draw_circle((150, 280), 30))
+    H = 320
     ops = (
         # A. image rouge [20,20,120,120] découpée en DISQUE.
         f"q {cercle} h W n 100 0 0 100 20 {H - 120} cm /{rouge} Do Q\n"
@@ -636,6 +637,19 @@ def _p27_page():
         # la découpe de la première.
         f"q 180 {H - 195} 50 60 re W n 50 0 0 60 180 {H - 195} cm /{vert} Do Q\n"
         f"q 235 {H - 195} 50 60 re W n 50 0 0 60 235 {H - 195} cm /{rouge} Do Q\n"
+        # E. image rouge [20,210,80,260] SANS découpe, puis un rectangle vert
+        # sous une découpe qui couvre presque toute l'image : cette découpe
+        # n'est pas la sienne.
+        f"q 60 0 0 50 20 {H - 260} cm /{rouge} Do Q\n"
+        f"q 25 {H - 260} 75 50 re W n 0 1 0 rg 90 {H - 260} 10 50 re f Q\n"
+        # F. photo ronde : DISQUE, fond peint, puis l'image sous la MÊME
+        # découpe (le fond ne referme pas la découpe).
+        f"q {disque} h W n 0 0 1 rg 120 {H - 310} 60 60 re f "
+        f"60 0 0 60 120 {H - 310} cm /{rouge} Do Q\n"
+        # G. image verte sans découpe PUIS image rouge découpée, sans tracé
+        # peint entre elles : la découpe ne glisse pas d'un rang.
+        f"q 48 0 0 40 190 {H - 260} cm /{vert} Do Q\n"
+        f"q 250 {H - 260} 40 40 re W n 50 0 0 40 240 {H - 260} cm /{rouge} Do Q\n"
     )
     doc.update_stream(pg.get_contents()[0], ops.encode("latin-1"))
     for x in pg.get_contents()[1:]:
@@ -656,11 +670,15 @@ def _p27_clips_et_ordre(eng):
     def _proche(c, ref, tol=40):
         return all(abs(a - b) <= tol for a, b in zip(c, ref))
 
-    BLANC, ROUGE, NAVY, BLEU = ((255, 255, 255), (230, 20, 20),
-                                (26, 51, 102), (0, 0, 255))
+    BLANC, ROUGE, NAVY, BLEU, VERT = ((255, 255, 255), (230, 20, 20),
+                                      (26, 51, 102), (0, 0, 255), (20, 160, 20))
     res = []
     arme = (_proche(_px(src, 24, 24), BLANC) and _proche(_px(src, 270, 110), BLANC)
-            and _proche(_px(src, 95, 165), BLEU))
+            and _proche(_px(src, 95, 165), BLEU)
+            and _proche(_px(src, 22, 235), ROUGE)
+            and _proche(_px(src, 122, 252), BLANC)
+            and _proche(_px(src, 192, 240), VERT)
+            and _proche(_px(src, 242, 240), BLANC))
     res.append(("P27  piège armé (l'original découpe et recouvre)", arme, ""))
     coin, centre = _px(out, 24, 24), _px(out, 70, 70)
     res.append(("P27  photo découpée en DISQUE : le coin du carré reste vide",
@@ -676,6 +694,17 @@ def _p27_clips_et_ordre(eng):
     seconde = _px(out, 260, 170)
     res.append(("P27  deux images découpées à la suite : la seconde reste visible",
                 _proche(seconde, ROUGE), f"pixel={seconde}"))
+    bord = _px(out, 22, 235)
+    res.append(("P27  image sans découpe : celle de l'objet suivant ne la rogne pas",
+                _proche(bord, ROUGE), f"pixel={bord}"))
+    coin, centre = _px(out, 122, 252), _px(out, 150, 280)
+    res.append(("P27  photo ronde sous fond peint : le disque tient malgré le fond",
+                _proche(coin, BLANC) and _proche(centre, ROUGE),
+                f"coin={coin} centre={centre}"))
+    libre, rognee = _px(out, 192, 240), _px(out, 242, 240)
+    res.append(("P27  image libre puis image découpée : chacune sa découpe",
+                _proche(libre, VERT) and _proche(rognee, BLANC),
+                f"libre={libre} rognee={rognee}"))
     return res
 
 

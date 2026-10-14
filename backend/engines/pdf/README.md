@@ -69,11 +69,12 @@ engine.reinject(data, "sortie.pdf")              # JSON -> PDF (+ bordures)
       "page_num": 1,
       "width": 612.0,
       "height": 792.0,
-      "elements": [                // ordre de peinture : fond -> images -> texte
+      "elements": [                // dessins et images entrelacés par `seqno`, puis texte
         { "type": "drawing", "draw_type": "f", "bbox": [...], "items": [...],
-          "stroke_color": [...], "fill_color": [...], "width": 1.0, ... },
+          "stroke_color": [...], "fill_color": [...], "width": 1.0, "seqno": 12,
+          "clips": [ { "items": [...], "even_odd": false } ], ... },
         { "type": "image", "bbox": [...], "xref": 582, "ext": "png",
-          "asset_b64": "..." },
+          "asset_b64": "...", "seqno": 13, "clips": [...] },
         { "type": "paragraph", "bbox": [...],
           "text": "texte du paragraphe (dé-césuré, lignes jointes)",
           "lines": [               // 1..N lignes visuelles
@@ -175,8 +176,11 @@ colonne par colonne. À ajouter si besoin pour l'extraction de texte continu.
   pas embarquée.
 - **Images** : composées avec leur masque de transparence (**SMask**) en PNG à
   alpha, pour préserver les zones transparentes.
-- **Ordre de peinture** : dessins/fonds → images → texte, pour un recouvrement
-  identique à l'original.
+- **Ordre de peinture** : dessins et images dans l'ordre de l'original (`seqno`,
+  indice du journal `get_bboxlog()`), puis le texte au-dessus.
+- **Découpes (clips)** : chaque dessin ou image garde la pile des découpes
+  actives (`clips`), rejouée en « chemin W n » autour de lui seul. Celles d'une
+  image sont relevées par un device MuPDF au moment où elle est peinte.
 - **Bordures** (debug) : vert = texte, rouge = image, bleu = dessin. Tracées en
   dernier, toujours visibles. Désactivables (`--no-borders`). Un paragraphe
   multi-lignes est cadré par un **contour rectilinéaire en escalier** qui passe
@@ -190,4 +194,7 @@ colonne par colonne. À ajouter si besoin pour l'extraction de texte continu.
 - **Images pivotées / transformées** : placées dans leur rectangle
   d'englobement (pas de matrice de rotation).
 - **Texte pivoté** : rendu à sa baseline sans rotation (cas basique).
-- **Clips / groupes** vectoriels ignorés.
+- **Découpes non rejouables** (par texte, masque d'image ou contour de trait) :
+  omises, l'objet est peint entier. Groupes et masques doux ignorés.
+- **Emprise des dessins découpés** : le `bbox` reste celui du tracé entier, non
+  resserré à sa découpe (la détection de conteneurs en dépend).

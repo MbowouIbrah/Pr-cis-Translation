@@ -23,7 +23,7 @@ import io
 import re
 import json
 import math
-import bisect
+import logging
 import base64
 from pathlib import Path
 from collections import defaultdict
@@ -31,6 +31,8 @@ from collections import defaultdict
 import fitz  # PyMuPDF >= 1.23
 
 from . import reflow
+
+_log = logging.getLogger(__name__)
 
 # Caractères de contrôle parasites (hors \t \n \r) à purger du texte extrait.
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -182,29 +184,113 @@ def _walk_clips(trace):
             pile = pile + [d]
 
 
-def _clip_chains(trace, seqno):
-    """Chaînes de découpes ouvertes entre le dernier tracé peint qui précède
-    l'objet `seqno` et le premier qui le suit (voir `_attach_image_order`).
+_mu = getattr(fitz, "mupdf", None)
 
-    Une découpe qui s'enfonce d'un niveau prolonge la chaîne courante ; une
-    découpe qui ne s'enfonce pas (q/Q refermé entre-temps) en ouvre une
-    nouvelle — celle de l'objet SUIVANT. Rend la liste des chaînes, chacune
-    avec ses découpes ancêtres encore actives."""
-    chaines, niveau = [], None
-    for d, actives in _walk_clips(trace):
-        sq = d.get("seqno")
-        if sq is not None and sq > seqno:
-            break
-        if d.get("type") == "clip":
-            lvl = d.get("level") or 0
-            if niveau is None or lvl <= niveau:
-                chaines.append(actives + [d])
+
+if _mu is not None:
+    class _ClipPathWalker(_mu.FzPathWalker2):
+        """Relève un chemin de découpe en items `get_drawings()` (coordonnées
+        page). `rectto` donne un « re » quand la matrice garde les axes."""
+
+        def __init__(self, ctm):
+            super().__init__()
+            self.use_virtual_moveto()
+            self.use_virtual_lineto()
+            self.use_virtual_curveto()
+            self.use_virtual_closepath()
+            self.use_virtual_rectto()
+            self.ctm = ctm
+            self.items = []
+            self.cur = self.start = None
+
+        def _p(self, x, y):
+            p = _mu.fz_transform_point(_mu.FzPoint(x, y), self.ctm)
+            return fitz.Point(p.x, p.y)
+
+        def moveto(self, ctx, x, y):
+            self.cur = self.start = self._p(x, y)
+
+        def lineto(self, ctx, x, y):
+            p = self._p(x, y)
+            self.items.append(("l", self.cur, p))
+            self.cur = p
+
+        def curveto(self, ctx, x1, y1, x2, y2, x3, y3):
+            p = self._p(x3, y3)
+            self.items.append(("c", self.cur, self._p(x1, y1), self._p(x2, y2), p))
+            self.cur = p
+
+        def closepath(self, ctx):
+            if self.cur is not None and self.start is not None and self.cur != self.start:
+                self.items.append(("l", self.cur, self.start))
+            self.cur = self.start
+
+        def rectto(self, ctx, x0, y0, x1, y1):
+            pts = [self._p(x0, y0), self._p(x1, y0), self._p(x1, y1), self._p(x0, y1)]
+            if (abs(pts[0].y - pts[1].y) < 1e-3 and abs(pts[1].x - pts[2].x) < 1e-3):
+                self.items.append(("re", fitz.Rect(pts[0], pts[2]).normalize()))
             else:
-                chaines[-1] = actives + [d]
-            niveau = lvl
-        elif sq is not None:
-            chaines, niveau = [], None
-    return chaines
+                for a, b in zip(pts, pts[1:] + pts[:1]):
+                    self.items.append(("l", a, b))
+            self.cur = self.start = pts[0]
+
+    class _ImageClipDevice(_mu.FzDevice2):
+        """Device MuPDF qui tient la pile des découpes RÉELLEMENT actives et la
+        relève à chaque image peinte : aucune déduction par voisinage.
+
+        Une découpe que le PDF ne sait pas rejouer en « chemin W n » (texte,
+        masque d'image, contour de trait) entre dans la pile comme `None` : elle
+        compte pour `pop_clip`, mais l'image n'en reçoit aucune approximation."""
+
+        def __init__(self):
+            super().__init__()
+            for n in ("clip_path", "clip_stroke_path", "clip_text",
+                      "clip_stroke_text", "clip_image_mask", "pop_clip",
+                      "fill_image"):
+                getattr(self, "use_virtual_" + n)()
+            self.pile = []
+            self.images = []
+
+        def clip_path(self, ctx, path, even_odd, ctm, scissor):
+            w = _ClipPathWalker(_mu.FzMatrix(ctm))
+            _mu.fz_walk_path(_mu.FzPath(_mu.ll_fz_keep_path(path)), w, w.m_internal)
+            self.pile.append({"items": w.items, "even_odd": bool(even_odd)}
+                             if w.items else None)
+
+        def clip_stroke_path(self, ctx, *args):
+            self.pile.append(None)
+
+        def clip_text(self, ctx, *args):
+            self.pile.append(None)
+
+        def clip_stroke_text(self, ctx, *args):
+            self.pile.append(None)
+
+        def clip_image_mask(self, ctx, *args):
+            self.pile.append(None)
+
+        def pop_clip(self, ctx):
+            if self.pile:
+                self.pile.pop()
+
+        def fill_image(self, ctx, image, ctm, alpha, color_params):
+            r = _mu.fz_transform_rect(_mu.FzRect(0, 0, 1, 1), _mu.FzMatrix(ctm))
+            self.images.append((fitz.Rect(r.x0, r.y0, r.x1, r.y1), list(self.pile)))
+
+
+def _image_clip_stacks(page):
+    """Pour chaque image peinte, dans l'ordre de peinture : (rectangle, pile
+    des découpes actives). Liste vide si le device MuPDF est indisponible."""
+    if _mu is None:
+        return []
+    try:
+        dev = _ImageClipDevice()
+        _mu.fz_run_page(page.this, dev, _mu.FzMatrix(), _mu.FzCookie())
+        return dev.images
+    except Exception as exc:
+        _log.warning("découpes d'images non relevées (page %s) : %s",
+                     getattr(page, "number", "?"), exc)
+        return []
 
 
 def _effective_clips(pile, rect):
@@ -212,7 +298,9 @@ def _effective_clips(pile, rect):
 
     Un rectangle de découpe qui contient l'objet n'a aucun effet (cas de la
     quasi-totalité des PDF : tout sous un clip pleine page) : on l'omet, le
-    JSON n'enfle pas pour rien."""
+    JSON n'enfle pas pour rien. Une découpe par CONTOUR de trait (`even_odd`
+    à None chez MuPDF) n'a pas d'équivalent « chemin W n » : on l'omet plutôt
+    que de la rejouer en découpe par l'intérieur du chemin."""
     out = []
     try:
         r = fitz.Rect(rect)
@@ -220,7 +308,7 @@ def _effective_clips(pile, rect):
         return out
     for c in pile:
         items = c.get("items") or []
-        if not items:
+        if not items or c.get("even_odd") is None:
             continue
         if (len(items) == 1 and items[0][0] == "re"
                 and fitz.Rect(items[0][1]).contains(r)):
@@ -370,7 +458,7 @@ class PDFObjectEngine:
         draw_els = self._extract_drawings(page, trace)
         img_els = self._extract_images(
             doc, page, page_num, embed_images, assets_dir)
-        self._attach_image_order(page, img_els, trace)
+        self._attach_image_order(page, img_els)
         graphiques = draw_els + img_els
         graphiques.sort(key=lambda e: e.get("seqno")
                         if e.get("seqno") is not None else math.inf)
@@ -2684,17 +2772,19 @@ class PDFObjectEngine:
             elements.append(el)
         return elements
 
-    def _attach_image_order(self, page, img_els, trace):
+    def _attach_image_order(self, page, img_els):
         """Donne à chaque image son ordre de peinture (`seqno`) et ses découpes.
 
         `get_bboxlog()` liste TOUT ce qui est peint, dans l'ordre : son indice
         est le `seqno` des tracés. Une image y apparaît en `fill-image`, avec
         son rectangle : on l'apparie par position.
 
-        Les découpes d'une image ne sont pas exposées par MuPDF (une image n'a
-        pas de `level`). On retient la chaîne posée APRÈS le dernier tracé peint
-        qui la précède (`_clip_chains`). Sans découpe neuve, aucune : mieux vaut
-        un carré qu'une image amputée à tort.
+        Les découpes d'une image ne figurent pas dans `get_drawings()` (une
+        image n'a pas de `level`) : `_image_clip_stacks` les relève au moment
+        même où l'image est peinte. Ses images arrivent dans le même ordre que
+        les `fill-image` du journal : la k-ième de l'un est la k-ième de l'autre.
+        Une découpe impossible à rejouer (texte, masque) est omise, jamais
+        approchée : mieux vaut un carré qu'une image amputée à tort.
         """
         if not img_els:
             return
@@ -2702,38 +2792,26 @@ class PDFObjectEngine:
             log = page.get_bboxlog()
         except Exception:
             return
+        piles = _image_clip_stacks(page)
         poses = [(i, fitz.Rect(r)) for i, (k, r) in enumerate(log)
                  if k == "fill-image"]
-        traces = sorted(d["seqno"] for d in trace if d.get("seqno") is not None)
+        if len(piles) != len(poses):
+            piles = []          # appariement incertain : aucune découpe
+        poses = [(seq, pr, piles[k][1] if piles else [])
+                 for k, (seq, pr) in enumerate(poses)]
         for el in img_els:
             r = fitz.Rect(el["bbox"])
             best, ecart = None, 2.0
-            for j, (seq, pr) in enumerate(poses):
+            for j, (seq, pr, pile) in enumerate(poses):
                 d = max(abs(pr.x0 - r.x0), abs(pr.y0 - r.y0),
                         abs(pr.x1 - r.x1), abs(pr.y1 - r.y1))
                 if d < ecart:
                     best, ecart = j, d
             if best is None:
                 continue
-            el["seqno"] = poses.pop(best)[0]
-        # Plusieurs images peuvent se suivre sans tracé peint entre elles : la
-        # k-ième image d'un même intervalle prend la k-ième chaîne. Garde-fou :
-        # une découpe qui ne recouvre pas l'essentiel de l'image n'est pas la
-        # sienne — on n'ampute jamais une image sur une correspondance douteuse.
-        rangs = {}
-        for el in sorted((e for e in img_els if e.get("seqno") is not None),
-                         key=lambda e: e["seqno"]):
-            seq = el["seqno"]
-            intervalle = bisect.bisect_left(traces, seq)
-            k = rangs.get(intervalle, 0)
-            rangs[intervalle] = k + 1
-            chaines = _clip_chains(trace, seq)
-            if k >= len(chaines):
-                continue
-            pile = chaines[k]
-            r = fitz.Rect(el["bbox"])
-            vue = fitz.Rect(pile[-1].get("scissor") or r) & r
-            if r.is_empty or vue.is_empty or vue.get_area() < 0.5 * r.get_area():
+            seq, _, pile = poses.pop(best)
+            el["seqno"] = seq
+            if any(c is None for c in pile):
                 continue
             clips = _effective_clips(pile, el["bbox"])
             if clips:
@@ -2883,12 +2961,17 @@ class PDFObjectEngine:
         # l'encadre de la découpe (q … W n … Q) une fois posé.
         avant = set(page.get_contents())
         page.insert_image(rect, stream=stream)
+        # Une page aux q/Q déséquilibrés reçoit aussi des flux d'encadrement
+        # (`wrap_contents`) : seul celui qui invoque l'image (« Do ») est le sien.
+        doc = page.parent
         neufs = [x for x in page.get_contents() if x not in avant]
-        if len(neufs) == 1:
-            doc = page.parent
-            corps = doc.xref_stream(neufs[0]) or b""
-            doc.update_stream(neufs[0], b"q\n" + clip.encode("latin-1")
-                              + corps + b"\nQ\n")
+        corps = {x: doc.xref_stream(x) or b"" for x in neufs}
+        siens = [x for x in neufs if b" Do" in corps[x]]
+        if len(siens) != 1:
+            _log.warning("découpe d'image non posée : %d flux candidats", len(siens))
+            return
+        doc.update_stream(siens[0], b"q\n" + clip.encode("latin-1")
+                          + corps[siens[0]] + b"\nQ\n")
 
     # ── Rendu dessin vectoriel ───────────────────────────────────────────────
     def _draw_drawing(self, page, el):
