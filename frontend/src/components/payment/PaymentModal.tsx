@@ -28,6 +28,8 @@ export default function PaymentModal({
   const { pricing } = usePricing();
   const { phase, quote, ussdCode, operator, error, getQuote, pay, reset } = usePayment();
   const [phone, setPhone] = useState('');
+  // Ce que le serveur facture réellement (montant minimum de l'opérateur).
+  const billed = quote?.billed_pages ?? pages;
 
   useEffect(() => {
     if (open) { reset(); getQuote(pages); }
@@ -138,7 +140,7 @@ export default function PaymentModal({
                               background: 'var(--gray-50)', marginBottom: 18 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13.5px',
                                 color: 'var(--gray-600)', marginBottom: 6 }}>
-                    <span>{pages} page{pages > 1 ? 's' : ''}</span>
+                    <span>{billed} page{billed > 1 ? 's' : ''}</span>
                     {quote && pricing && (
                       <span>{formatMoney(quote.unit_price, quote.currency, pricing.decimals, 'fr')} / page</span>
                     )}
@@ -152,6 +154,15 @@ export default function PaymentModal({
                         : '…'}
                     </span>
                   </div>
+                  {/* Montant minimum de l'opérateur : on le dit avant l'invite,
+                      et on dit où vont les pages payées en plus. */}
+                  {quote && pricing && billed > pages && (
+                    <p style={{ fontSize: '12px', color: 'var(--gray-500)', margin: '10px 0 0', lineHeight: 1.45 }}>
+                      Montant minimum de {formatMoney(quote.min_amount, quote.currency, pricing.decimals, 'fr')} :{' '}
+                      {billed - pages} page{billed - pages > 1 ? 's' : ''} en plus, créditée{billed - pages > 1 ? 's' : ''}{' '}
+                      sur votre compte pour une prochaine traduction.
+                    </p>
+                  )}
                 </div>
 
                 {error && (

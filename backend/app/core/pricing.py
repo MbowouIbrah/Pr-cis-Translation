@@ -149,3 +149,19 @@ def plan_price(plan: str, zone: str, annual: bool = False) -> int | None:
 def page_price(zone: str) -> int:
     """Prix d'une page à l'unité, en unités mineures."""
     return PAGE_PRICE.get(zone, PAGE_PRICE[DEFAULT_ZONE])
+
+
+# Plus petit montant qu'un encaissement peut porter, par devise, en unités
+# mineures. Orange Money et MTN MoMo refusent une transaction sous 100 F :
+# une page à 75 F seule échouerait chez l'opérateur, APRÈS l'invite USSD.
+# Les autres devises n'ont pas encore de moyen d'encaissement (pas de seuil).
+MIN_PAYMENT_AMOUNT: dict[str, int] = {"XAF": 100}
+
+
+def billable_pages(zone: str, pages: int) -> int:
+    """Pages réellement facturées : au moins `pages`, et assez pour atteindre
+    le montant minimum de la devise. Le surplus est crédité au compte, jamais
+    perdu."""
+    minimum = MIN_PAYMENT_AMOUNT.get(CURRENCY[zone], 0)
+    unit = page_price(zone)
+    return max(pages, -(-minimum // unit))

@@ -18,7 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models import User, Document, Payment
 from app.core.security import require_auth
-from app.core.pricing import zone_for_country, CURRENCY, page_price
+from app.core.pricing import (zone_for_country, CURRENCY, page_price,
+                               billable_pages, MIN_PAYMENT_AMOUNT)
 from app.core.payment_gateway import (campay, CampayError, SUPPORTED_CURRENCY,
                            normalize_phone)
 
@@ -52,10 +53,15 @@ async def quote(body: QuoteBody, request: Request, user: User = Depends(require_
     """
     zone = _zone_of(request)
     unit = page_price(zone)
+    billed = billable_pages(zone, body.pages)
     return {
         "pages": body.pages,
+        # Peut dépasser `pages` : le montant minimum de l'opérateur l'impose.
+        # Le surplus est crédité au compte (cf. `_apply_credit`).
+        "billed_pages": billed,
         "unit_price": unit,
-        "amount": unit * body.pages,
+        "amount": unit * billed,
+        "min_amount": MIN_PAYMENT_AMOUNT.get(CURRENCY[zone], 0),
         "currency": CURRENCY[zone],
         "zone": zone,
     }
@@ -97,7 +103,13 @@ async def collect(body: CollectBody, request: Request,
         if doc.paid:
             raise HTTPException(status_code=409, detail="Ce document est déjà payé.")
 
-    amount = page_price(zone) * body.pages
+    # Le document se paie à SA taille, connue du serveur : le nombre de pages
+    # envoyé par le navigateur ne fait pas le prix d'un document identifié.
+    pages = doc.page_count if doc is not None and doc.page_count else body.pages
+    # Arrondi au montant minimum de l'opérateur ; `_apply_credit` reverse au
+    # compte les pages payées au-delà du document.
+    billed = billable_pages(zone, pages)
+    amount = page_price(zone) * billed
     # Normalisé ICI, une fois : ce qui part chez Campay et ce qu'on enregistre
     # doivent être le même numéro. Le faire côté navigateur laisserait les deux
     # diverger dès qu'un autre client appellerait l'API.
@@ -107,7 +119,7 @@ async def collect(body: CollectBody, request: Request,
     # a débité le client, on a de quoi réconcilier ; l'inverse perd l'argent
     # du client sans laisser la moindre trace chez nous.
     payment = Payment(
-        user_id=user.id, document_id=body.document_id, pages=body.pages,
+        user_id=user.id, document_id=body.document_id, pages=billed,
         amount=amount, currency=CURRENCY[zone], zone=zone,
         phone=phone, status="PENDING",
     )
@@ -118,7 +130,7 @@ async def collect(body: CollectBody, request: Request,
     try:
         res = await campay.collect(
             amount=amount, phone=phone,
-            description=f"Précis — {body.pages} page(s)",
+            description=f"Précis — {billed} page(s)",
             external_reference=payment.id,
         )
     except CampayError as e:
@@ -172,16 +184,20 @@ async def _apply_credit(db: AsyncSession, payment: Payment) -> None:
         await db.rollback()
         return
 
+    surplus = payment.pages
     if payment.document_id:
-        # Paiement ciblé : il débloque CE document, et rien d'autre.
+        # Paiement ciblé : il débloque CE document. Les pages payées au-delà
+        # de sa taille (montant minimum de l'opérateur) vont au compte.
         await db.execute(update(Document)
                          .where(Document.id == payment.document_id)
                          .values(paid=True))
-    else:
+        doc = await db.get(Document, payment.document_id)
+        surplus = max(0, payment.pages - (doc.page_count or payment.pages)) if doc else 0
+    if surplus:
         # Incrément en SQL : deux paiements du même compte qui se croisent ne
         # doivent pas s'écraser l'un l'autre.
         await db.execute(update(User).where(User.id == payment.user_id)
-                         .values(page_credits=User.page_credits + payment.pages))
+                         .values(page_credits=User.page_credits + surplus))
 
     await db.commit()
     payment.credited = True
