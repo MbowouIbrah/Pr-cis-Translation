@@ -599,6 +599,86 @@ def _build_p25(pg):
         x += _w(txt, size)
 
 
+def _p27_page():
+    """Page synthétique écrite en opérateurs PDF bruts (q / W n / cm / Do)."""
+    doc = fitz.open()
+    pg = doc.new_page(width=300, height=200)
+
+    def _png(rgb):
+        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), 0)
+        pix.set_rect(pix.irect, rgb)
+        return pix.tobytes("png")
+
+    pg.insert_image(fitz.Rect(0, 0, 1, 1), stream=_png((230, 20, 20)))
+    pg.insert_image(fitz.Rect(0, 0, 1, 1), stream=_png((20, 160, 20)))
+    noms = [im[7] for im in pg.get_images(full=True)]
+    rouge, vert = noms[0], noms[1]
+
+    def _chemin(trace):
+        sh = pg.new_shape()
+        trace(sh)
+        return sh.draw_cont
+
+    cercle = _chemin(lambda sh: sh.draw_circle((70, 70), 50))
+    triangle = _chemin(lambda sh: sh.draw_polyline(
+        [(150, 20), (280, 20), (150, 120)]))
+    H = 200
+    ops = (
+        # A. image rouge [20,20,120,120] découpée en DISQUE.
+        f"q {cercle} h W n 100 0 0 100 20 {H - 120} cm /{rouge} Do Q\n"
+        # B. rectangle navy [150,20,280,120] découpé en TRIANGLE.
+        f"q {triangle} h W n 0.1 0.2 0.4 rg 150 {H - 120} 130 100 re f Q\n"
+        # C. image verte [20,140,120,190], PUIS un fond bleu qui la recouvre.
+        f"q 100 0 0 50 20 {H - 190} cm /{vert} Do Q\n"
+        f"q 0 0 1 rg 70 {H - 190} 100 50 re f Q\n"
+        # D. deux images À LA SUITE, chacune sous SA découpe rectangulaire
+        # (aucun tracé peint entre elles) : la seconde ne doit pas hériter de
+        # la découpe de la première.
+        f"q 180 {H - 195} 50 60 re W n 50 0 0 60 180 {H - 195} cm /{vert} Do Q\n"
+        f"q 235 {H - 195} 50 60 re W n 50 0 0 60 235 {H - 195} cm /{rouge} Do Q\n"
+    )
+    doc.update_stream(pg.get_contents()[0], ops.encode("latin-1"))
+    for x in pg.get_contents()[1:]:
+        doc.update_stream(x, b"")
+    return doc
+
+
+def _p27_clips_et_ordre(eng):
+    src = _p27_page()
+    pd = eng.extract_page_data(src, 0, src[0], embed_images=True)
+    out = fitz.open()
+    eng.render_page_into(out, pd, draw_borders=False)
+
+    def _px(doc, x, y):
+        pix = doc[0].get_pixmap(dpi=72, clip=fitz.Rect(x, y, x + 1, y + 1))
+        return tuple(pix.pixel(0, 0))
+
+    def _proche(c, ref, tol=40):
+        return all(abs(a - b) <= tol for a, b in zip(c, ref))
+
+    BLANC, ROUGE, NAVY, BLEU = ((255, 255, 255), (230, 20, 20),
+                                (26, 51, 102), (0, 0, 255))
+    res = []
+    arme = (_proche(_px(src, 24, 24), BLANC) and _proche(_px(src, 270, 110), BLANC)
+            and _proche(_px(src, 95, 165), BLEU))
+    res.append(("P27  piège armé (l'original découpe et recouvre)", arme, ""))
+    coin, centre = _px(out, 24, 24), _px(out, 70, 70)
+    res.append(("P27  photo découpée en DISQUE : le coin du carré reste vide",
+                _proche(coin, BLANC) and _proche(centre, ROUGE),
+                f"coin={coin} centre={centre}"))
+    hors, dans = _px(out, 270, 110), _px(out, 160, 30)
+    res.append(("P27  bandeau découpé en TRIANGLE : rien hors du biais",
+                _proche(hors, BLANC) and _proche(dans, NAVY),
+                f"hors={hors} dans={dans}"))
+    dessus = _px(out, 95, 165)
+    res.append(("P27  ordre de peinture : le fond peint APRÈS l'image la recouvre",
+                _proche(dessus, BLEU), f"pixel={dessus}"))
+    seconde = _px(out, 260, 170)
+    res.append(("P27  deux images découpées à la suite : la seconde reste visible",
+                _proche(seconde, ROUGE), f"pixel={seconde}"))
+    return res
+
+
 def run():
     scratch = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "_generic_tmp")
@@ -1173,6 +1253,14 @@ def run():
     c3 = _coupe("utilisé")
     ok("P23  « utilisé » ne laisse jamais « sé » orphelin",
        c3 is None or len(c3[1]) >= 3, f"obtenu {c3!r}")
+
+    # ── P27 : découpes (clip) et ordre de peinture images / dessins ────────
+    # Une photo RONDE est une image carrée découpée par un cercle ; un bandeau
+    # en BIAIS, un rectangle découpé par un triangle. Ignorer la découpe
+    # repeint le carré, le rectangle entier. Et une image peinte AVANT un fond
+    # qui la recouvre doit rester dessous.
+    for nom, bon, detail in _p27_clips_et_ordre(eng):
+        ok(nom, bon, detail)
 
     # ── Rapport ─────────────────────────────────────────────────────────────
     print("=" * 78)

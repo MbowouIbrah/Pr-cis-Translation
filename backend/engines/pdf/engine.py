@@ -23,6 +23,7 @@ import io
 import re
 import json
 import math
+import bisect
 import base64
 from pathlib import Path
 from collections import defaultdict
@@ -166,6 +167,111 @@ def _drawing_item_boxes(el):
     return boxes
 
 
+def _walk_clips(trace):
+    """Parcourt `get_drawings(extended=True)` en tenant la pile des découpes.
+
+    Rend (entrée, pile) où `pile` = découpes ACTIVES au niveau de l'entrée.
+    Une entrée de niveau L ferme tout ce qui a été ouvert à un niveau >= L
+    (MuPDF numérote les q/Q) ; une découpe s'empile ensuite à son niveau."""
+    pile = []
+    for d in trace:
+        lvl = d.get("level") or 0
+        pile = [c for c in pile if (c.get("level") or 0) < lvl]
+        yield d, pile
+        if d.get("type") == "clip":
+            pile = pile + [d]
+
+
+def _clip_chains(trace, seqno):
+    """Chaînes de découpes ouvertes entre le dernier tracé peint qui précède
+    l'objet `seqno` et le premier qui le suit (voir `_attach_image_order`).
+
+    Une découpe qui s'enfonce d'un niveau prolonge la chaîne courante ; une
+    découpe qui ne s'enfonce pas (q/Q refermé entre-temps) en ouvre une
+    nouvelle — celle de l'objet SUIVANT. Rend la liste des chaînes, chacune
+    avec ses découpes ancêtres encore actives."""
+    chaines, niveau = [], None
+    for d, actives in _walk_clips(trace):
+        sq = d.get("seqno")
+        if sq is not None and sq > seqno:
+            break
+        if d.get("type") == "clip":
+            lvl = d.get("level") or 0
+            if niveau is None or lvl <= niveau:
+                chaines.append(actives + [d])
+            else:
+                chaines[-1] = actives + [d]
+            niveau = lvl
+        elif sq is not None:
+            chaines, niveau = [], None
+    return chaines
+
+
+def _effective_clips(pile, rect):
+    """Les découpes de `pile` qui changent quelque chose à `rect`, sérialisées.
+
+    Un rectangle de découpe qui contient l'objet n'a aucun effet (cas de la
+    quasi-totalité des PDF : tout sous un clip pleine page) : on l'omet, le
+    JSON n'enfle pas pour rien."""
+    out = []
+    try:
+        r = fitz.Rect(rect)
+    except Exception:
+        return out
+    for c in pile:
+        items = c.get("items") or []
+        if not items:
+            continue
+        if (len(items) == 1 and items[0][0] == "re"
+                and fitz.Rect(items[0][1]).contains(r)):
+            continue
+        out.append({"items": [_serialize_drawing_item(it) for it in items],
+                    "even_odd": bool(c.get("even_odd"))})
+    return out
+
+
+def _trace_items(shape, items):
+    """Construit dans `shape` le chemin des items sérialisés. Vrai si au moins
+    un segment a été tracé."""
+    drew = False
+    for it in items:
+        op = it.get("op")
+        try:
+            if op == "l":
+                shape.draw_line(fitz.Point(it["p1"]), fitz.Point(it["p2"]))
+                drew = True
+            elif op == "c":
+                shape.draw_bezier(fitz.Point(it["p1"]), fitz.Point(it["p2"]),
+                                  fitz.Point(it["p3"]), fitz.Point(it["p4"]))
+                drew = True
+            elif op == "re":
+                shape.draw_rect(fitz.Rect(it["rect"]))
+                drew = True
+            elif op == "qu":
+                pts = it["quad"]
+                shape.draw_quad(fitz.Quad(fitz.Point(pts[0]), fitz.Point(pts[1]),
+                                          fitz.Point(pts[2]), fitz.Point(pts[3])))
+                drew = True
+        except Exception:
+            pass
+    return drew
+
+
+def _clip_ops(page, clips):
+    """Opérateurs PDF qui posent les découpes `clips` (« chemin W n », dans
+    l'ordre). Les coordonnées passent par `Shape`, qui connaît la matrice de
+    la page. Chaîne vide si rien à découper."""
+    if not clips:
+        return ""
+    ops = ""
+    for c in clips:
+        shape = page.new_shape()
+        if not _trace_items(shape, c.get("items", [])):
+            continue
+        ops += shape.draw_cont + "h " + ("W* n\n" if c.get("even_odd") else "W n\n")
+    return ops
+
+
 def _serialize_drawing(d):
     """Sérialise un dessin vectoriel complet (une entrée get_drawings())."""
     return {
@@ -256,11 +362,19 @@ class PDFObjectEngine:
         # Ordre de peinture (du fond vers l'avant), pour que les
         # objets se recouvrent comme dans l'original : dessins
         # vectoriels / fonds d'abord, puis images, puis texte au-dessus.
-        draw_els = self._extract_drawings(page)
+        #
+        # Les dessins et les images sont ensuite RE-TRIÉS sur leur numéro
+        # d'ordre de peinture (`seqno`) : une image peinte AVANT un fond qui la
+        # recouvre en partie doit rester dessous, et inversement.
+        trace = self._drawing_trace(page)
+        draw_els = self._extract_drawings(page, trace)
         img_els = self._extract_images(
             doc, page, page_num, embed_images, assets_dir)
-        page_data["elements"].extend(draw_els)
-        page_data["elements"].extend(img_els)
+        self._attach_image_order(page, img_els, trace)
+        graphiques = draw_els + img_els
+        graphiques.sort(key=lambda e: e.get("seqno")
+                        if e.get("seqno") is not None else math.inf)
+        page_data["elements"].extend(graphiques)
         text_lines = self._extract_text(page, draw_els, img_els)
         if self.group_paragraphs:
             ctx = self._build_page_ctx(page, text_lines,
@@ -2539,15 +2653,91 @@ class PDFObjectEngine:
         return elements
 
     # ── Dessins vectoriels : un tracé = un objet ─────────────────────────────
-    def _extract_drawings(self, page):
-        elements = []
+    def _drawing_trace(self, page):
+        """`get_drawings(extended=True)` : les tracés PEINTS, mais aussi les
+        tracés de DÉCOUPE (clip) et leur profondeur d'imbrication (`level`)."""
         try:
-            drawings = page.get_drawings()
+            return page.get_drawings(extended=True)
         except Exception:
-            drawings = []
-        for d in drawings:
-            elements.append(_serialize_drawing(d))
+            return []
+
+    def _extract_drawings(self, page, trace=None):
+        """Un élément par tracé peint, avec les découpes qui le bornent.
+
+        LES DÉCOUPES COMPTENT. Une photo ronde est très souvent une image
+        CARRÉE découpée par un cercle ; un bandeau en biais, un rectangle
+        découpé par un triangle. Sans la découpe on repeint le carré, le
+        rectangle entier — qui passe alors DEVANT ce qu'il ne devait pas
+        toucher. Chaque tracé garde donc la pile des découpes actives à son
+        niveau d'imbrication (`clips`).
+        """
+        if trace is None:
+            trace = self._drawing_trace(page)
+        elements = []
+        for d, pile in _walk_clips(trace):
+            if d.get("type") in ("clip", "group"):
+                continue
+            el = _serialize_drawing(d)
+            clips = _effective_clips(pile, d.get("rect"))
+            if clips:
+                el["clips"] = clips
+            elements.append(el)
         return elements
+
+    def _attach_image_order(self, page, img_els, trace):
+        """Donne à chaque image son ordre de peinture (`seqno`) et ses découpes.
+
+        `get_bboxlog()` liste TOUT ce qui est peint, dans l'ordre : son indice
+        est le `seqno` des tracés. Une image y apparaît en `fill-image`, avec
+        son rectangle : on l'apparie par position.
+
+        Les découpes d'une image ne sont pas exposées par MuPDF (une image n'a
+        pas de `level`). On retient la chaîne posée APRÈS le dernier tracé peint
+        qui la précède (`_clip_chains`). Sans découpe neuve, aucune : mieux vaut
+        un carré qu'une image amputée à tort.
+        """
+        if not img_els:
+            return
+        try:
+            log = page.get_bboxlog()
+        except Exception:
+            return
+        poses = [(i, fitz.Rect(r)) for i, (k, r) in enumerate(log)
+                 if k == "fill-image"]
+        traces = sorted(d["seqno"] for d in trace if d.get("seqno") is not None)
+        for el in img_els:
+            r = fitz.Rect(el["bbox"])
+            best, ecart = None, 2.0
+            for j, (seq, pr) in enumerate(poses):
+                d = max(abs(pr.x0 - r.x0), abs(pr.y0 - r.y0),
+                        abs(pr.x1 - r.x1), abs(pr.y1 - r.y1))
+                if d < ecart:
+                    best, ecart = j, d
+            if best is None:
+                continue
+            el["seqno"] = poses.pop(best)[0]
+        # Plusieurs images peuvent se suivre sans tracé peint entre elles : la
+        # k-ième image d'un même intervalle prend la k-ième chaîne. Garde-fou :
+        # une découpe qui ne recouvre pas l'essentiel de l'image n'est pas la
+        # sienne — on n'ampute jamais une image sur une correspondance douteuse.
+        rangs = {}
+        for el in sorted((e for e in img_els if e.get("seqno") is not None),
+                         key=lambda e: e["seqno"]):
+            seq = el["seqno"]
+            intervalle = bisect.bisect_left(traces, seq)
+            k = rangs.get(intervalle, 0)
+            rangs[intervalle] = k + 1
+            chaines = _clip_chains(trace, seq)
+            if k >= len(chaines):
+                continue
+            pile = chaines[k]
+            r = fitz.Rect(el["bbox"])
+            vue = fitz.Rect(pile[-1].get("scissor") or r) & r
+            if r.is_empty or vue.is_empty or vue.get_area() < 0.5 * r.get_area():
+                continue
+            clips = _effective_clips(pile, el["bbox"])
+            if clips:
+                el["clips"] = clips
 
     # ─────────────────────────────────────────────────────────────────────────
     # 2. RÉINJECTION (reconstruction sur page vierge + bordures)
@@ -2685,7 +2875,20 @@ class PDFObjectEngine:
                     stream = fh.read()
         if stream is None:
             return
+        clip = _clip_ops(page, el.get("clips"))
+        if not clip:
+            page.insert_image(rect, stream=stream)
+            return
+        # `insert_image` ajoute son propre flux de contenu à la page : on
+        # l'encadre de la découpe (q … W n … Q) une fois posé.
+        avant = set(page.get_contents())
         page.insert_image(rect, stream=stream)
+        neufs = [x for x in page.get_contents() if x not in avant]
+        if len(neufs) == 1:
+            doc = page.parent
+            corps = doc.xref_stream(neufs[0]) or b""
+            doc.update_stream(neufs[0], b"q\n" + clip.encode("latin-1")
+                              + corps + b"\nQ\n")
 
     # ── Rendu dessin vectoriel ───────────────────────────────────────────────
     def _draw_drawing(self, page, el):
@@ -2693,29 +2896,7 @@ class PDFObjectEngine:
         if draw_type in ("clip", "group"):
             return   # basique : on ignore les clips/groupes
         shape = page.new_shape()
-        drew = False
-        for it in el.get("items", []):
-            op = it.get("op")
-            try:
-                if op == "l":
-                    shape.draw_line(fitz.Point(it["p1"]), fitz.Point(it["p2"]))
-                    drew = True
-                elif op == "c":
-                    shape.draw_bezier(fitz.Point(it["p1"]), fitz.Point(it["p2"]),
-                                      fitz.Point(it["p3"]), fitz.Point(it["p4"]))
-                    drew = True
-                elif op == "re":
-                    shape.draw_rect(fitz.Rect(it["rect"]))
-                    drew = True
-                elif op == "qu":
-                    pts = it["quad"]
-                    quad = fitz.Quad(fitz.Point(pts[0]), fitz.Point(pts[1]),
-                                     fitz.Point(pts[2]), fitz.Point(pts[3]))
-                    shape.draw_quad(quad)
-                    drew = True
-            except Exception:
-                pass
-        if not drew:
+        if not _trace_items(shape, el.get("items", [])):
             return
 
         # draw_type : 's'=trait, 'f'=remplissage, 'fs'=les deux.
@@ -2752,6 +2933,11 @@ class PDFObjectEngine:
             # Repli minimal si un paramètre n'est pas accepté par cette version.
             shape.finish(color=finish_kwargs["color"], fill=finish_kwargs["fill"],
                          width=finish_kwargs["width"])
+        clip = _clip_ops(page, el.get("clips"))
+        if clip:
+            # `finish` a encadré le tracé de « q … Q » : la découpe se pose
+            # juste après le q, et ne vaut donc que pour ce tracé.
+            shape.totalcont = shape.totalcont.replace("q\n", "q\n" + clip, 1)
         shape.commit()
 
     # ── Rendu texte : paragraphe = lignes, ligne = runs (positions exactes) ──
