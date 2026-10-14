@@ -36,10 +36,13 @@ from __future__ import annotations
 
 import functools
 import html
+import logging
 
 import fitz
 
 from app.config import BACKEND_DIR, BRAND_NAME, PUBLIC_SITE
+
+logger = logging.getLogger(__name__)
 
 # Résolution de l'aperçu d'essai. Assez pour juger la mise en page et lire au
 # projecteur ; pas de quoi produire une réimpression propre. Ce n'est pas un
@@ -127,13 +130,12 @@ def rasterize_for_trial(pdf_bytes: bytes, pages=None,
 def _stamp(page: fitz.Page) -> None:
     """Pose le décor de bandes multilingues sur toute la page.
 
-    Un filigrane manqué ne doit pas perdre la page : l'échec est avalé.
+    Un échec RELÈVE, comme le reste de `rasterize_for_trial` : l'avaler
+    servirait un aperçu d'essai sans filigrane, donc exploitable tel quel.
+    `_calque` ne met pas les échecs en cache : l'appel suivant réessaie.
     """
     r = page.rect
-    try:
-        page.insert_image(r, stream=_calque(round(r.width), round(r.height)))
-    except Exception:
-        pass
+    page.insert_image(r, stream=_calque(round(r.width), round(r.height)))
 
 
 def prechauffer() -> None:
@@ -146,8 +148,11 @@ def prechauffer() -> None:
     for largeur, hauteur in ((595, 842), (612, 792)):
         try:
             _calque(largeur, hauteur)
-        except Exception:
-            pass
+        except Exception as e:
+            # Pas bloquant ici (le premier aperçu le reconstruira), mais un
+            # calque qui ne se construit pas doit se voir dans le journal.
+            logger.warning("Préchauffage du filigrane %sx%s impossible : %s",
+                           largeur, hauteur, e)
 
 
 @functools.lru_cache(maxsize=16)

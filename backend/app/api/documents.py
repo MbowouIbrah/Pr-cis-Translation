@@ -134,6 +134,11 @@ async def _purge_if_orphan(db: AsyncSession, path: str) -> bool:
     return True
 
 
+def _read_bytes(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
 def _prune_empty_dirs(start: str) -> None:
     """Remonte en effaçant les dossiers VIDES, sans jamais sortir du magasin.
 
@@ -403,20 +408,29 @@ async def preview_document(
     # l'original déguisé en traduction. `X-Render` dit au client de redemander.
     if not doc.translated_path:
         job = jobs.for_document(doc.id)
-        partiel = job.get("partial_path") if job else None
-        if not partiel or not os.path.isfile(partiel):
-            if doc.status != "translating":
+        etat = job.get("state") if job else None
+        # Job FINI mais base pas à jour (report `sync_status` échoué) : servir
+        # le partiel ici ferait redemander le client indéfiniment. Le rendu
+        # final du job, s'il existe, est la vraie réponse ; sinon, rien.
+        if etat == "done" and job.get("result_path") and ext == "pdf":
+            chemin, rendu = job["result_path"], "full"
+        elif etat in ("done", "error") or doc.status != "translating":
+            chemin, rendu = None, None
+        else:
+            chemin, rendu = job.get("partial_path") if job else None, "partial"
+        if not chemin or not os.path.isfile(chemin):
+            if rendu != "partial":
                 raise HTTPException(status_code=404, detail="Traduction indisponible. Relancez-la depuis la bibliothèque.")
             return Response(status_code=202, headers={"Cache-Control": "no-store",
                                                       "X-Render": "pending"})
-        data = await run_in_threadpool(lambda: open(partiel, "rb").read())
+        data = await run_in_threadpool(_read_bytes, chemin)
         if not _may_read_clear(user, doc):
             # Même règle que /translate/partial : un plan d'essai ne reçoit
             # que des pixels, et seules les pages traduites sont à protéger.
             data = await run_in_threadpool(rasterize_for_trial, data, job.get("pages"))
         return Response(content=data, media_type="application/pdf",
                         headers={"Cache-Control": "no-store",
-                                 "X-Render": "partial"})
+                                 "X-Render": rendu})
 
     # Un plan d'essai ne reçoit que du rastérisé, et seulement pour le PDF : un
     # format non-PDF ne peut pas être filigrané ici sans risque de le livrer en
@@ -460,7 +474,7 @@ async def preview_document(
     if clear:
         cached = render_cache.cache_valid(doc.translated_path)
         if cached:
-            data = await run_in_threadpool(lambda: open(cached, "rb").read())
+            data = await run_in_threadpool(_read_bytes, cached)
             return Response(content=data, media_type="application/pdf",
                             headers={"Cache-Control": "no-store",
                                      "X-Render": "full"})

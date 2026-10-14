@@ -34,8 +34,8 @@ export default function PaymentModal({
   const op = detectOperator(phone);
 
   useEffect(() => {
-    if (open) { reset(); getQuote(pages); }
-  }, [open, pages, reset, getQuote]);
+    if (open) { reset(); getQuote(pages, documentId); }
+  }, [open, pages, documentId, reset, getQuote]);
 
   // Fermer pendant l'attente laisserait l'utilisateur sans retour sur un
   // paiement peut-être abouti. On ne verrouille rien, mais on prévient.

@@ -7,7 +7,10 @@ Ce qui est MESURÉ :
   • la ROUTE `/collect` envoie à Campay un montant ≥ minimum, enregistre les
     pages facturées, et facture un document à SA taille (pas à celle envoyée) ;
   • `_apply_credit` débloque le document ET reverse le surplus au compte ;
-    un achat d'avance crédite toutes les pages payées.
+    un achat d'avance crédite toutes les pages payées ; un document supprimé
+    pendant le paiement rend TOUT le paiement au compte ;
+  • un document dont la taille n'a jamais été consignée est RECOMPTÉ depuis
+    son fichier : devis et encaissement à sa taille, pas à celle envoyée.
 
 Exécution :  backend/venv/Scripts/python.exe backend/tests/test_paiement_minimum.py
 PostgreSQL local requis (comme test_revue_ultra).
@@ -62,9 +65,9 @@ async def _supprimer(user_id):
         await db.commit()
 
 
-async def _document(user_id, page_count):
+async def _document(user_id, page_count, original_path="x.pdf"):
     d = Document(user_id=user_id, original_name="d.pdf", source_lang="auto",
-                 target_lang="en", original_path="x.pdf", size_bytes=10,
+                 target_lang="en", original_path=original_path, size_bytes=10,
                  status="done", paid=False, page_count=page_count)
     async with async_session() as db:
         db.add(d)
@@ -127,6 +130,46 @@ async def check_routes(client, ok):
         ok("ROUTE   document de 3 pages annonce a 1 : facture 3 pages (225 F)",
            r.status_code == 200 and envoye[-1]["amount"] == 225,
            f"{r.status_code} {envoye[-1:]}")
+
+        # Taille jamais consignée (page_count NULL) : le serveur recompte.
+        import fitz, os, tempfile
+        fd, chemin = tempfile.mkstemp(suffix=".pdf")
+        os.close(fd)
+        pdf = fitz.open()
+        for _ in range(3):
+            pdf.new_page()
+        pdf.save(chemin)
+        pdf.close()
+        try:
+            d2 = await _document(u.id, None, original_path=chemin)
+            r = client.post("/api/payments/quote",
+                            json={"pages": 1, "document_id": d2.id}, headers=ent)
+            q = r.json()
+            ok("ROUTE   /quote document sans taille : recompte 3 pages (225 F)",
+               r.status_code == 200 and q.get("pages") == 3
+               and q.get("amount") == 225, str(q))
+            async with async_session() as db:
+                n = (await db.get(Document, d2.id)).page_count
+            ok("ROUTE   la taille recomptee est consignee sur le document",
+               n == 3, str(n))
+            async with async_session() as db:
+                await db.execute(Document.__table__.update()
+                                 .where(Document.id == d2.id).values(page_count=None))
+                await db.commit()
+            r = client.post("/api/payments/collect",
+                            json={"pages": 1, "phone": "237670000000",
+                                  "document_id": d2.id}, headers=ent)
+            ok("ROUTE   /collect document sans taille : facture 3 pages (225 F)",
+               r.status_code == 200 and envoye[-1]["amount"] == 225,
+               f"{r.status_code} {envoye[-1:]}")
+            async with async_session() as db:
+                for p in (await db.execute(select(Payment).where(
+                        Payment.document_id == d2.id))).scalars():
+                    await db.delete(p)
+                await db.delete(await db.get(Document, d2.id))
+                await db.commit()
+        finally:
+            os.remove(chemin)
     finally:
         route_payments.campay.collect = vrai
         await _supprimer(u.id)
@@ -160,6 +203,26 @@ async def check_credit(ok):
         async with async_session() as db:
             await db.delete(await db.get(Document, d.id))
             await db.commit()
+
+        # Document supprimé PENDANT le paiement : le paiement chargé le cite
+        # encore, mais il n'y a plus rien à débloquer.
+        d3 = await _document(u.id, 1)
+        async with async_session() as db:
+            pz = Payment(user_id=u.id, document_id=d3.id, pages=2, amount=150,
+                         currency="XAF", zone="A", status="SUCCESSFUL",
+                         provider_ref=uuid.uuid4().hex)
+            db.add(pz)
+            await db.commit()
+        async with async_session() as db:
+            charge = await db.get(Payment, pz.id)
+            async with async_session() as autre:
+                await autre.delete(await autre.get(Document, d3.id))
+                await autre.commit()
+            await _apply_credit(db, charge)
+        async with async_session() as db:
+            solde = (await db.get(User, u.id)).page_credits
+        ok("CREDIT  document supprime pendant le paiement : +2 au compte",
+           solde == 5, f"solde={solde}")
     finally:
         await _supprimer(u.id)
 

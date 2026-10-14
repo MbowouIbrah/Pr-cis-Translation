@@ -459,10 +459,16 @@ async def translate_endpoint(
     # pendant que le job de B démarre → les fichiers communs sont purgés sous
     # ses pieds ; (2) un cache-hit terminait le job avant que `document_id` ne
     # soit lié → le Document restait « translating » pour toujours.
-    await _save_document_for_user(current_user, db, job_id, filename,
-                                  target_lang, original_path, len(file_bytes),
-                                  paid=doc_is_paid, page_count=pages_facturees,
-                                  usage_kind=usage_kind)
+    try:
+        await _save_document_for_user(current_user, db, job_id, filename,
+                                      target_lang, original_path, len(file_bytes),
+                                      paid=doc_is_paid, page_count=pages_facturees,
+                                      usage_kind=usage_kind)
+    except HTTPException:
+        # Rien ne sera soumis : le job ouvert plus haut resterait « pending »
+        # en mémoire, sans document ni worker, jusqu'au ménage.
+        jobs.forget(job_id)
+        raise
 
     # File de PRIORITÉ, plus de thread lancé à la volée : l'ordonnanceur place le
     # job selon le niveau du plan (admin > pro > starter > gratuit) et le fait

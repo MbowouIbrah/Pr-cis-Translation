@@ -73,6 +73,9 @@ export default function Home() {
   // Les relances ne repassent pas l'écran en « chargement » (clignotement).
   const [previewPoll, setPreviewPoll] = useState(0);
   const enSuivi = useRef(false);
+  // Échecs d'affilée PENDANT le suivi : un raté réseau ne doit pas figer
+  // l'aperçu, mais un document disparu ne doit pas être redemandé sans fin.
+  const echecsSuivi = useRef(0);
   // Document de la BIBLIOTHÈQUE en cours d'aperçu (null = traduction en direct,
   // qui reçoit ses pages par le flux et n'a rien à redemander).
   const [libraryDocId, setLibraryDocId] = useState<string | null>(null);
@@ -210,6 +213,7 @@ export default function Home() {
       pageBlobCache.current.clear();
       fullDocFor.current = null;
       enSuivi.current = false;
+      echecsSuivi.current = 0;
       setLibraryDocId(req.docId);
       setCurrentPage(1);
       setPreviewLoading(true);
@@ -265,7 +269,11 @@ export default function Home() {
   //      (revenir sur une page relançait ~10 s de reconstruction serveur) ;
   //   3. sinon seulement, on demande la page au serveur.
   useEffect(() => {
-    if (!libraryDocId || !showPreview) return;
+    if (!libraryDocId || !showPreview) {
+      // Plus d'aperçu de bibliothèque : le suivi en cours n'a plus d'objet.
+      enSuivi.current = false; echecsSuivi.current = 0;
+      return;
+    }
     if (fullDocFor.current === libraryDocId) return;          // niveau 1
     const key = `${libraryDocId}:${currentPage}`;
     const hit = pageBlobCache.current.get(key);
@@ -277,12 +285,24 @@ export default function Home() {
     const token = ++pageToken.current;
     let relance: ReturnType<typeof setTimeout> | undefined;
     if (!enSuivi.current) setPreviewLoading(true);
+    const echec = () => {
+      if (pageToken.current !== token) return;
+      if (enSuivi.current && echecsSuivi.current < 3) {
+        echecsSuivi.current += 1;
+        relance = setTimeout(() => setPreviewPoll((n) => n + 1), 3000);
+      } else {
+        enSuivi.current = false;
+        echecsSuivi.current = 0;
+      }
+    };
     getPreviewBlob(libraryDocId, currentPage)
       .then((res) => {
         // Jeton : tourner vite les pages lance plusieurs requêtes, et rien ne
         // garantit qu'elles reviennent dans l'ordre. Sans lui, une page lente
         // demandée avant écrase la page rapide demandée après.
-        if (pageToken.current !== token || !res) return;
+        if (pageToken.current !== token) return;
+        if (!res) { echec(); return; }
+        echecsSuivi.current = 0;
         enSuivi.current = res.inProgress;
         if (res.inProgress) {
           // Document rouvert PENDANT sa traduction : on montre ce qui est
@@ -310,7 +330,7 @@ export default function Home() {
         setTranslatedBlob(res.blob);
         setTranslatedIsPdf(true);
       })
-      .catch(() => { /* le lecteur garde son écran d'attente */ })
+      .catch(() => { echec(); /* le lecteur garde son écran d'attente */ })
       .finally(() => { if (pageToken.current === token) setPreviewLoading(false); });
     return () => { if (relance) clearTimeout(relance); };
   }, [libraryDocId, currentPage, showPreview, getPreviewBlob, previewPoll]);

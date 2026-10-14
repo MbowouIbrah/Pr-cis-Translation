@@ -8,6 +8,10 @@ figé. On attend désormais :
     rastérisé pour un plan d'essai ;
   • rien de prêt → 202 `X-Render: pending`, sans corps ;
   • plus de job et pas de traduction → 404 ;
+  • job FINI mais base pas à jour (report échoué) → son rendu final
+    (`X-Render: full`) s'il réussit, 404 s'il échoue — jamais un partiel
+    redemandé sans fin ;
+  • une traduction interrompue par un redémarrage est REMBOURSÉE ;
   • dans AUCUN cas l'original déguisé en traduction.
 
 Exécution :  cd backend && venv/Scripts/python.exe tests/test_apercu_en_cours.py
@@ -30,7 +34,7 @@ from sqlalchemy.ext.asyncio import (                     # noqa: E402
 from sqlalchemy.pool import NullPool                     # noqa: E402
 
 from app.core.database import DATABASE_URL               # noqa: E402
-from app.models import User, Document                    # noqa: E402
+from app.models import User, Document, UsageRecord, KIND_CREDITS  # noqa: E402
 from app.core.security import create_access_token        # noqa: E402
 from app import config as cfg                            # noqa: E402
 from app import create_app                               # noqa: E402
@@ -92,6 +96,18 @@ async def run():
             db.add(d)
             await db.commit()
             docs[cle] = d.id
+        # Traduction payée en pages, en vol au moment d'un « arrêt » : le
+        # démarrage doit la marquer en erreur ET rembourser ses 2 pages.
+        coupe = Document(user_id=payant.id, original_name="doc.pdf",
+                         source_lang="auto", target_lang="en",
+                         original_path=orig, translated_path=None,
+                         size_bytes=1, status="translating")
+        db.add(coupe)
+        await db.flush()
+        db.add(UsageRecord(user_id=payant.id, document_id=coupe.id,
+                           kind=KIND_CREDITS, pages=2))
+        await db.commit()
+        docs["coupe"] = coupe.id
 
     def entetes(u):
         return {"X-API-Key": cfg.FRONTEND_API_KEY,
@@ -105,9 +121,14 @@ async def run():
             # perdu par construction) : on remet les nôtres en vol, comme un
             # job lancé APRÈS le démarrage.
             async with async_session() as db:
+                solde = (await db.get(User, payant.id)).page_credits
+                statut_coupe = (await db.get(Document, docs["coupe"])).status
                 for cle in ("vol", "vol_libre"):
                     (await db.get(Document, docs[cle])).status = "translating"
                 await db.commit()
+            ok("REDEMARRAGE : traduction interrompue en erreur et remboursee",
+               statut_coupe == "error" and solde == 2,
+               f"statut={statut_coupe} solde={solde}")
 
             jobs.set(job_id, document_id=docs["vol"], user_id=payant.id,
                      partial_path=partiel, pages=None)
@@ -144,7 +165,23 @@ async def run():
                and TRADUIT not in _texte(r.content),
                f"status={r.status_code}")
 
-            # 4. Plus de job, pas de traduction : 404, pas l'original.
+            # 4. Job FINI, base pas à jour (le report a échoué) : le rendu
+            # final du job, pas le partiel redemandé indéfiniment.
+            final = os.path.join(racine_dir, "render.pdf")
+            with open(final, "wb") as f:
+                f.write(_pdf(TRADUIT + "-FINAL"))
+            jobs.set(job_id, state="done", result_path=final)
+            r = client.get(url, headers=entetes(payant))
+            ok("FINI non consigne : rendu final servi (X-Render: full)",
+               r.status_code == 200 and r.headers.get("X-Render") == "full"
+               and TRADUIT + "-FINAL" in _texte(r.content),
+               f"status={r.status_code} render={r.headers.get('X-Render')}")
+            jobs.set(job_id, state="error", result_path=None)
+            r = client.get(url, headers=entetes(payant))
+            ok("ECHEC non consigne : 404, plus de partiel",
+               r.status_code == 404, f"status={r.status_code}")
+
+            # 5. Plus de job, pas de traduction : 404, pas l'original.
             r = client.get(f"/api/documents/{docs['mort']}/preview?page=1",
                            headers=entetes(payant))
             ok("SANS JOB ni traduction : 404", r.status_code == 404,

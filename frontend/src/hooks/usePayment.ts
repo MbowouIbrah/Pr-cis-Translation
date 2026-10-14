@@ -60,9 +60,11 @@ export function usePayment() {
   }, [stop]);
 
   /** Combien coûtera la traduction — AVANT de la lancer. */
-  const getQuote = useCallback(async (pages: number) => {
+  const getQuote = useCallback(async (pages: number, documentId?: string) => {
     setState((s) => ({ ...s, phase: 'quoting', error: null }));
-    const res = await api.post('/api/payments/quote', { pages });
+    const res = await api.post('/api/payments/quote', {
+      pages, document_id: documentId ?? null,
+    });
     if (!res.ok) {
       setState((s) => ({ ...s, phase: 'failed', error: 'Tarif indisponible.' }));
       return null;

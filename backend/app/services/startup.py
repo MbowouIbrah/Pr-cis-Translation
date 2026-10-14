@@ -42,7 +42,14 @@ async def reconcilier_jobs_orphelins():
                 .values(status="error")
                 .returning(Document.id)
             )
-            perdus = len(r.fetchall())
+            ids = [row[0] for row in r.fetchall()]
+            perdus = len(ids)
+            # Même sortie qu'un échec ordinaire (`jobs.error`) : la
+            # consommation est remboursée, sinon l'arrêt du serveur coûterait
+            # au client ses pages achetées ou son offre du mois.
+            from app.services.usage import refund_for_document
+            for doc_id in ids:
+                await refund_for_document(db, doc_id)
             await db.commit()
         if perdus:
             logger.warning(

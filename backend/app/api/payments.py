@@ -9,8 +9,10 @@ visible en clair et téléchargeable ; rien d'autre ne l'est.
 from __future__ import annotations
 
 import logging
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +22,7 @@ from app.models import User, Document, Payment
 from app.core.security import require_auth
 from app.core.pricing import (zone_for_country, CURRENCY, page_price,
                                billable_pages, MIN_PAYMENT_AMOUNT)
+from app.services.documents import count_pages
 from app.core.payment_gateway import (campay, CampayError, SUPPORTED_CURRENCY,
                            normalize_phone)
 
@@ -40,12 +43,52 @@ def _zone_of(request: Request, override: str | None = None) -> str:
     )
 
 
+async def _owned_unpaid_document(db: AsyncSession, user: User,
+                                 document_id: str | None) -> Document | None:
+    if not document_id:
+        return None
+    doc = await db.get(Document, document_id)
+    if doc is None or doc.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Document introuvable.")
+    if doc.paid:
+        raise HTTPException(status_code=409, detail="Ce document est déjà payé.")
+    return doc
+
+
+async def _document_pages(db: AsyncSession, doc: Document) -> int | None:
+    """Taille du document selon le SERVEUR, recomptée depuis le fichier si
+    elle n'a jamais été enregistrée.
+
+    Sans elle, le prix retomberait sur le nombre envoyé par le navigateur, et
+    `_apply_credit` ne saurait plus quelle part du paiement dépasse le
+    document : le surplus serait perdu pour le client.
+    """
+    if doc.page_count:
+        return doc.page_count
+    path = doc.original_path
+    if not path or not os.path.isfile(path):
+        return None
+    ext = os.path.splitext(doc.original_name)[1].lstrip(".").lower()
+
+    def _lire() -> int:
+        with open(path, "rb") as f:
+            return count_pages(f.read(), ext)
+
+    doc.page_count = await run_in_threadpool(_lire)
+    await db.commit()
+    return doc.page_count
+
+
 class QuoteBody(BaseModel):
     pages: int = Field(..., ge=1, le=MAX_PAGES_PER_PAYMENT)
+    # Même règle qu'à l'encaissement : un document identifié se chiffre à SA
+    # taille, sinon le devis et le débit divergeraient.
+    document_id: str | None = None
 
 
 @router.post("/quote")
-async def quote(body: QuoteBody, request: Request, user: User = Depends(require_auth)):
+async def quote(body: QuoteBody, request: Request, user: User = Depends(require_auth),
+                db: AsyncSession = Depends(get_db)):
     """Ce que coûtera la traduction, AVANT de la lancer.
 
     Le prix est annoncé ici et refacturé à l'identique à l'encaissement : le
@@ -53,9 +96,11 @@ async def quote(body: QuoteBody, request: Request, user: User = Depends(require_
     """
     zone = _zone_of(request)
     unit = page_price(zone)
-    billed = billable_pages(zone, body.pages)
+    doc = await _owned_unpaid_document(db, user, body.document_id)
+    pages = (await _document_pages(db, doc) if doc is not None else None) or body.pages
+    billed = billable_pages(zone, pages)
     return {
-        "pages": body.pages,
+        "pages": pages,
         # Peut dépasser `pages` : le montant minimum de l'opérateur l'impose.
         # Le surplus est crédité au compte (cf. `_apply_credit`).
         "billed_pages": billed,
@@ -95,17 +140,11 @@ async def collect(body: CollectBody, request: Request,
             detail="Le paiement mobile money n'est disponible que dans la zone FCFA.",
         )
 
-    doc = None
-    if body.document_id:
-        doc = await db.get(Document, body.document_id)
-        if doc is None or doc.user_id != user.id:
-            raise HTTPException(status_code=404, detail="Document introuvable.")
-        if doc.paid:
-            raise HTTPException(status_code=409, detail="Ce document est déjà payé.")
+    doc = await _owned_unpaid_document(db, user, body.document_id)
 
     # Le document se paie à SA taille, connue du serveur : le nombre de pages
     # envoyé par le navigateur ne fait pas le prix d'un document identifié.
-    pages = doc.page_count if doc is not None and doc.page_count else body.pages
+    pages = (await _document_pages(db, doc) if doc is not None else None) or body.pages
     # Arrondi au montant minimum de l'opérateur ; `_apply_credit` reverse au
     # compte les pages payées au-delà du document.
     billed = billable_pages(zone, pages)
@@ -192,7 +231,10 @@ async def _apply_credit(db: AsyncSession, payment: Payment) -> None:
                          .where(Document.id == payment.document_id)
                          .values(paid=True))
         doc = await db.get(Document, payment.document_id)
-        surplus = max(0, payment.pages - (doc.page_count or payment.pages)) if doc else 0
+        # Document supprimé entre-temps : rien à débloquer, tout le paiement
+        # revient au compte plutôt que de disparaître.
+        if doc is not None:
+            surplus = max(0, payment.pages - (doc.page_count or payment.pages))
     if surplus:
         # Incrément en SQL : deux paiements du même compte qui se croisent ne
         # doivent pas s'écraser l'un l'autre.
