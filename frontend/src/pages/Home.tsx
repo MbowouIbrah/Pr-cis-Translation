@@ -69,6 +69,10 @@ export default function Home() {
   // page, et muette côté réseau quand le serveur a livré tout le document.
   const pageBlobCache = useRef(new Map<string, Blob>());
   const fullDocFor = useRef<string | null>(null);
+  // Document rouvert pendant sa traduction : chaque tick redemande l'aperçu.
+  // Les relances ne repassent pas l'écran en « chargement » (clignotement).
+  const [previewPoll, setPreviewPoll] = useState(0);
+  const enSuivi = useRef(false);
   // Document de la BIBLIOTHÈQUE en cours d'aperçu (null = traduction en direct,
   // qui reçoit ses pages par le flux et n'a rien à redemander).
   const [libraryDocId, setLibraryDocId] = useState<string | null>(null);
@@ -205,6 +209,7 @@ export default function Home() {
       // potentiellement retraduite depuis.
       pageBlobCache.current.clear();
       fullDocFor.current = null;
+      enSuivi.current = false;
       setLibraryDocId(req.docId);
       setCurrentPage(1);
       setPreviewLoading(true);
@@ -270,13 +275,24 @@ export default function Home() {
     }
 
     const token = ++pageToken.current;
-    setPreviewLoading(true);
+    let relance: ReturnType<typeof setTimeout> | undefined;
+    if (!enSuivi.current) setPreviewLoading(true);
     getPreviewBlob(libraryDocId, currentPage)
       .then((res) => {
         // Jeton : tourner vite les pages lance plusieurs requêtes, et rien ne
         // garantit qu'elles reviennent dans l'ordre. Sans lui, une page lente
         // demandée avant écrase la page rapide demandée après.
         if (pageToken.current !== token || !res) return;
+        enSuivi.current = res.inProgress;
+        if (res.inProgress) {
+          // Document rouvert PENDANT sa traduction : on montre ce qui est
+          // traduit (rien en cache, ça change) et on redemande jusqu'au rendu
+          // final — sans quoi l'aperçu restait figé sur le premier état.
+          if (res.blob) { setTranslatedBlob(res.blob); setTranslatedIsPdf(true); }
+          relance = setTimeout(() => setPreviewPoll((n) => n + 1), 3000);
+          return;
+        }
+        if (!res.blob) return;
         if (res.full) {
           // Tout le document est là : les blobs par page n'ont plus d'objet.
           fullDocFor.current = libraryDocId;
@@ -296,7 +312,8 @@ export default function Home() {
       })
       .catch(() => { /* le lecteur garde son écran d'attente */ })
       .finally(() => { if (pageToken.current === token) setPreviewLoading(false); });
-  }, [libraryDocId, currentPage, showPreview, getPreviewBlob]);
+    return () => { if (relance) clearTimeout(relance); };
+  }, [libraryDocId, currentPage, showPreview, getPreviewBlob, previewPoll]);
 
   // ---- Download (le résultat complet, une fois la traduction terminée) ----
   const handleDownload = useCallback(() => {

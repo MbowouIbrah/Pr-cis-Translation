@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import TRANSLATIONS_DIR, logger
 from app.services import render_cache
+from app.services.jobs import jobs
 from app.services.office import convert_to_pdf_bytes
 from app.services.translation_runner import render_translation_bytes
 from app.core.database import get_db
@@ -394,14 +395,28 @@ async def preview_document(
 
     ext = os.path.splitext(doc.original_name)[1].lstrip(".").lower()
 
-    # Pas encore de traduction : on montre l'original (le fichier de l'utilisateur).
+    # Pas encore de traduction consignée : le document est EN COURS (la
+    # bibliothèque laisse « Aperçu » actif pendant la traduction). On renvoyait
+    # l'original à la place de la traduction : rouvert depuis la liste, l'aperçu
+    # montrait original/original et n'avançait plus. On sert désormais le PDF
+    # PARTIEL du job (les pages déjà traduites), ou « rien encore » — jamais
+    # l'original déguisé en traduction. `X-Render` dit au client de redemander.
     if not doc.translated_path:
-        if not doc.original_path or not os.path.isfile(doc.original_path):
-            raise HTTPException(status_code=404, detail="Le fichier n'est plus disponible. Réessayez ou rechargez la page.")
-        data = await run_in_threadpool(_lire, doc.original_path)
-        ext_orig = os.path.splitext(doc.original_name)[1].lstrip(".").lower()
-        media_orig = "application/pdf" if ext_orig == "pdf" else "application/octet-stream"
-        return Response(content=data, media_type=media_orig)
+        job = jobs.for_document(doc.id)
+        partiel = job.get("partial_path") if job else None
+        if not partiel or not os.path.isfile(partiel):
+            if doc.status != "translating":
+                raise HTTPException(status_code=404, detail="Traduction indisponible. Relancez-la depuis la bibliothèque.")
+            return Response(status_code=202, headers={"Cache-Control": "no-store",
+                                                      "X-Render": "pending"})
+        data = await run_in_threadpool(lambda: open(partiel, "rb").read())
+        if not _may_read_clear(user, doc):
+            # Même règle que /translate/partial : un plan d'essai ne reçoit
+            # que des pixels, et seules les pages traduites sont à protéger.
+            data = await run_in_threadpool(rasterize_for_trial, data, job.get("pages"))
+        return Response(content=data, media_type="application/pdf",
+                        headers={"Cache-Control": "no-store",
+                                 "X-Render": "partial"})
 
     # Un plan d'essai ne reçoit que du rastérisé, et seulement pour le PDF : un
     # format non-PDF ne peut pas être filigrané ici sans risque de le livrer en
