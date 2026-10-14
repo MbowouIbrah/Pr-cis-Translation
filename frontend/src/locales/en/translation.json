@@ -233,6 +233,7 @@
   "preview": {
     "source_label": "Original document",
     "target_label": "Translation",
+    "toggle_label": "Choose the page to display",
     "loading": "Preparing the preview…",
     "error": "Preview unavailable: {{error}}",
     "error_hint": "The translated document is still available for download.",

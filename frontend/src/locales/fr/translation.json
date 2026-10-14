@@ -233,6 +233,7 @@
   "preview": {
     "source_label": "Document original",
     "target_label": "Traduction",
+    "toggle_label": "Choisir la page affichée",
     "loading": "Préparation de l'aperçu…",
     "error": "Aperçu indisponible : {{error}}",
     "error_hint": "Le document traduit reste téléchargeable.",

@@ -3,6 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { motion } from 'motion/react';
 import { Loader2, Hourglass, Lock } from 'lucide-react';
 
+// Seuil des écrans où deux volets côte à côte deviennent illisibles.
+const COMPACT_QUERY = '(max-width: 767px)';
+
 interface PdfViewerProps {
   sourceFile?: Blob | null;
   translatedBlob?: Blob | null;
@@ -56,7 +59,21 @@ export default function PdfViewer({
   // portrait → panneaux côte à côte (horizontal). Détectée par page — un même
   // document peut mêler des pages paysage et portrait, et la disposition suit.
   const [isLandscape, setIsLandscape] = useState(false);
+  // Écran ÉTROIT (téléphone) : deux volets côte à côte n'y font que ~150 px
+  // chacun, texte illisible. On n'en montre alors qu'UN, en pleine largeur, et
+  // une bascule passe de l'un à l'autre — la traduction d'abord.
+  const [compact, setCompact] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia(COMPACT_QUERY).matches,
+  );
+  const [volet, setVolet] = useState<'source' | 'target'>('target');
   const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const mq = window.matchMedia(COMPACT_QUERY);
+    const suivre = () => setCompact(mq.matches);
+    mq.addEventListener('change', suivre);
+    return () => mq.removeEventListener('change', suivre);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -163,14 +180,17 @@ export default function PdfViewer({
           let containerHeight = 700;
           const scrollEl = document.getElementById('scroll');
           if (scrollEl) {
-            containerWidth = landscape
+            containerWidth = landscape || compact
               ? scrollEl.clientWidth - 24
               : (scrollEl.clientWidth - 70) / 2;
             // Hauteur disponible : le conteneur moins son padding (24px × 2) et
             // la hauteur du badge de langue au-dessus de chaque panneau (~34px).
             // Paysage : deux panneaux EMPILÉS → chacun a la MOITIÉ de la hauteur.
+            // Écran étroit : un seul volet visible, sous la bascule (~44px).
             const hDispo = scrollEl.clientHeight - 48 - 34;
-            containerHeight = landscape ? (hDispo - 24) / 2 : hDispo;
+            containerHeight = compact
+              ? hDispo - 44
+              : landscape ? (hDispo - 24) / 2 : hDispo;
           } else {
             containerWidth = canvas.parentElement?.clientWidth || 600;
           }
@@ -263,7 +283,7 @@ export default function PdfViewer({
         }
       });
     };
-  }, [currentPage, zoom, translatedBlob, sourceFile, isTrialMode, demoSource, demoTarget, onPagesLoaded, translatedPageReady, previewLoading]);
+  }, [currentPage, zoom, translatedBlob, sourceFile, isTrialMode, demoSource, demoTarget, onPagesLoaded, translatedPageReady, previewLoading, compact]);
 
   const [isHovering, setIsHovering] = useState(false);
 
@@ -273,15 +293,35 @@ export default function PdfViewer({
       className={className}
       style={{
         display: 'inline-flex',
-        flexDirection: isLandscape ? 'column' : 'row',
-        gap: isLandscape ? '24px' : '20px',
+        flexDirection: isLandscape || compact ? 'column' : 'row',
+        gap: compact ? '12px' : isLandscape ? '24px' : '20px',
         alignItems: 'center',
         justifyContent: 'center',   // panneaux avant/après centrés dans le cadre
         minWidth: '100%',
       }}
     >
+      {compact && (
+        <div className="cv-bascule" role="group" aria-label={t('preview.toggle_label')}>
+          {(['source', 'target'] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              aria-pressed={volet === v}
+              onClick={() => setVolet(v)}
+            >
+              {v === 'source'
+                ? sourceLabel ?? t('preview.source_label')
+                : targetLabel ?? t('preview.target_label')}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Original Panel */}
-      <div className="cv-wrap" style={{ flexShrink: 0 }}>
+      <div
+        className="cv-wrap"
+        style={{ flexShrink: 0, display: compact && volet !== 'source' ? 'none' : undefined }}
+      >
         <span className="cv-lang-badge fr">{sourceLabel ?? t('preview.source_label')}</span>
         <div className="cv" id="cv-fr">
           <canvas
@@ -295,6 +335,7 @@ export default function PdfViewer({
           vertical quand ils sont côte à côte (portrait) */}
       <div
         style={{
+          display: compact ? 'none' : undefined,
           width: isLandscape ? '100%' : '1px',
           height: isLandscape ? '1px' : undefined,
           alignSelf: 'stretch',
@@ -304,7 +345,10 @@ export default function PdfViewer({
       />
 
       {/* Translation Panel */}
-      <div className="cv-wrap" style={{ flexShrink: 0 }}>
+      <div
+        className="cv-wrap"
+        style={{ flexShrink: 0, display: compact && volet !== 'target' ? 'none' : undefined }}
+      >
         <span
           className="cv-lang-badge en"
           style={{ background: '#f0fdf4', color: '#15803d' }}
