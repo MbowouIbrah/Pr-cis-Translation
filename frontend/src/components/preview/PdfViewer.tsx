@@ -330,7 +330,9 @@ export default function PdfViewer({
               // Contient l'ombre portée géante du voile d'essai : elle ne doit
               // assombrir QUE le document, pas déborder autour.
               overflow: 'hidden',
-              cursor: isTrialMode ? 'none' : 'auto',
+              // Curseur masqué seulement là où le voile le remplace : sur l'écran
+              // « pages à régler » ou d'attente, l'utilisateur doit le voir.
+              cursor: isTrialMode && translatedShown ? 'none' : 'auto',
             }}
             onMouseMove={(e) => {
               if (!isTrialMode) return;
@@ -445,7 +447,7 @@ export default function PdfViewer({
           </div>
 
           {/* Trial banner — hors de la pile : bandeau collant en bas de cv-en */}
-          {isTrialMode && isHovering && (
+          {isTrialMode && isHovering && translatedShown && (
             <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
