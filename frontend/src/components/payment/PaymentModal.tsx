@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { X, Smartphone, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { usePayment } from '../../hooks/usePayment';
 import { usePricing, formatMoney } from '../../hooks/usePricing';
+import { detectOperator, OPERATOR_LABEL, OPERATOR_COLOR } from '../../lib/mobileMoney';
 
 interface PaymentModalProps {
   open: boolean;
@@ -30,6 +31,7 @@ export default function PaymentModal({
   const [phone, setPhone] = useState('');
   // Ce que le serveur facture réellement (montant minimum de l'opérateur).
   const billed = quote?.billed_pages ?? pages;
+  const op = detectOperator(phone);
 
   useEffect(() => {
     if (open) { reset(); getQuote(pages); }
@@ -185,11 +187,22 @@ export default function PaymentModal({
                     <input
                       type="tel" required inputMode="tel" autoFocus value={phone}
                       onChange={(e) => setPhone(e.target.value)}
-                      placeholder="237 6XX XX XX XX" style={input}
+                      placeholder="6XX XX XX XX" style={input}
+                      aria-describedby="pay-phone-hint"
                     />
                   </div>
-                  <p style={{ fontSize: '11.5px', color: 'var(--gray-400)', margin: '6px 0 16px' }}>
-                    Avec l’indicatif pays, sans le « + ».
+                  {/* Opérateur reconnu au préfixe : l'utilisateur sait sur quel
+                      compte l'invite arrivera. Indicatif seulement, jamais bloquant. */}
+                  <p id="pay-phone-hint" aria-live="polite"
+                     style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '11.5px',
+                              color: 'var(--gray-500)', margin: '6px 0 16px', minHeight: 16 }}>
+                    {op ? (
+                      <>
+                        <span aria-hidden style={{ width: 8, height: 8, borderRadius: '50%',
+                                                   background: OPERATOR_COLOR[op] }} />
+                        {OPERATOR_LABEL[op]}
+                      </>
+                    ) : 'Indicatif 237 facultatif.'}
                   </p>
 
                   <button type="submit" disabled={phase === 'starting' || !quote}
