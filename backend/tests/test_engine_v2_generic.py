@@ -705,6 +705,22 @@ def _p27_clips_et_ordre(eng):
     res.append(("P27  image libre puis image découpée : chacune sa découpe",
                 _proche(libre, VERT) and _proche(rognee, BLANC),
                 f"libre={libre} rognee={rognee}"))
+
+    # Page PIVOTÉE : les découpes se relèvent dans l'espace non pivoté, comme
+    # les bbox d'images. Sans dé-rotation, elles tombaient à côté de l'image.
+    def _clips(doc):
+        d = eng.extract_page_data(doc, 0, doc[0], embed_images=True)
+        return [repr(e.get("clips")) for e in d["elements"]
+                if e.get("type") == "image"]
+    droit = _clips(src)
+    pivots = {}
+    for rot in (90, 180, 270):
+        tourne = _p27_page()
+        tourne[0].set_rotation(rot)
+        pivots[rot] = _clips(tourne) == droit
+    res.append(("P27  page pivotée (90/180/270) : mêmes découpes qu'à plat",
+                all(pivots.values()) and any(c != "None" for c in droit),
+                str(pivots)))
     return res
 
 

@@ -285,7 +285,11 @@ def _image_clip_stacks(page):
         return []
     try:
         dev = _ImageClipDevice()
-        _mu.fz_run_page(page.this, dev, _mu.FzMatrix(), _mu.FzCookie())
+        # `fz_run_page` peint dans l'espace de la page PIVOTÉE ; le bboxlog et
+        # les bbox d'images sont dans l'espace NON pivoté. On dé-pivote, sans
+        # quoi une découpe de page `/Rotate 90` serait rejouée ailleurs.
+        _mu.fz_run_page(page.this, dev, _mu.FzMatrix(*page.derotation_matrix),
+                        _mu.FzCookie())
         return dev.images
     except Exception as exc:
         _log.warning("découpes d'images non relevées (page %s) : %s",
@@ -2796,6 +2800,10 @@ class PDFObjectEngine:
         poses = [(i, fitz.Rect(r)) for i, (k, r) in enumerate(log)
                  if k == "fill-image"]
         if len(piles) != len(poses):
+            if piles:
+                _log.warning("découpes d'images ignorées (page %s) : %d relevées "
+                             "pour %d images peintes", getattr(page, "number", "?"),
+                             len(piles), len(poses))
             piles = []          # appariement incertain : aucune découpe
         poses = [(seq, pr, piles[k][1] if piles else [])
                  for k, (seq, pr) in enumerate(poses)]
