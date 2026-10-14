@@ -7,6 +7,7 @@ import { Loader2, Hourglass, Lock } from 'lucide-react';
 // tombent sous ~300 px chacun : texte illisible. C'est le CADRE qui compte, pas
 // l'écran — une barre latérale peut le rétrécir sur un écran large.
 const COMPACT_MAX_PX = 680;
+const COMPACT_MARGE_PX = 24;
 
 const largeurCadre = () => document.getElementById('scroll')?.clientWidth ?? window.innerWidth;
 
@@ -80,7 +81,13 @@ export default function PdfViewer({
   const sansSurvol = typeof window !== 'undefined' && !!window.matchMedia?.('(hover: none)').matches;
 
   useEffect(() => {
-    const suivre = () => setCompact(largeurCadre() < COMPACT_MAX_PX);
+    // Hystérésis : la barre de défilement qui apparaît ou disparaît change la
+    // largeur de quelques pixels, de quoi faire osciller la bascule (et
+    // recharger le PDF à chaque fois) si l'entrée et la sortie coïncidaient.
+    const suivre = () => setCompact((c) => {
+      const l = largeurCadre();
+      return c ? l < COMPACT_MAX_PX + COMPACT_MARGE_PX : l < COMPACT_MAX_PX;
+    });
     suivre();   // le cadre a pu changer entre le premier rendu et cet effet
     const cadre = document.getElementById('scroll');
     if (cadre && typeof ResizeObserver !== 'undefined') {
