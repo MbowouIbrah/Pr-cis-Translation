@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import functools
 import html
+import math
 import logging
 
 import fitz
@@ -70,10 +71,20 @@ _MARK_ENSEIGNE = f"{BRAND_NAME} · {PUBLIC_SITE}"
 # Garamond, non embarquée). CJK, arabe et cyrillique passent par le repli de
 # polices de MuPDF (`insert_htmlbox`), qui met aussi l'arabe en forme.
 _MARK_FONT = BACKEND_DIR / "fonts" / "ptserif-Italic.ttf"
-_MARK_SIZE = 26           # corps des mots, en points
-_MARK_INTERLIGNE = 1.9    # pas vertical entre bandes, en multiples du corps
-_MARK_COLOR = "#0b1f4d"   # navy du décor de l'app
-_MARK_OPACITY = 0.11
+# Géométrie = celle du décor du site (`index.css`, `.hero-lang-lines` et
+# `.lang-line`), évaluée comme si la page était le viewport (1 pt = 1 px CSS) :
+# QUATRE bandes centrées, `rotate(-10deg) scale(1.15)`, corps
+# `clamp(1.8rem, 4vw, 3.6rem)`, écart `clamp(24px, 4vw, 48px)`. Une page couverte
+# de bandes serrées noyait le document ; le site, lui, n'en pose que quatre.
+_MARK_ANGLE = 10          # inclinaison, en degrés (sens anti-horaire, comme -10deg)
+_MARK_ECHELLE = 1.15
+_MARK_INTERLIGNE = 1.2    # `line-height: normal` de la police d'affichage
+_MARK_COLOR = "#0d1b3e"   # rgba(13, 27, 62) du décor
+_MARK_OPACITY = 0.16
+
+
+def _clamp(bas: float, val: float, haut: float) -> float:
+    return max(bas, min(val, haut))
 
 
 def rasterize_for_trial(pdf_bytes: bytes, pages=None,
@@ -165,29 +176,49 @@ def _calque(largeur: int, hauteur: int) -> bytes:
     les pixels de la page. Mis en cache en OCTETS : un Document fitz partagé
     entre threads n'est pas sûr.
     """
-    doc = fitz.open()
-    page = doc.new_page(width=largeur, height=hauteur)
+    corps_css = _clamp(28.8, 0.04 * largeur, 57.6)
+    corps = corps_css * _MARK_ECHELLE
+    ecart = _clamp(24, 0.04 * largeur, 48) * _MARK_ECHELLE
+    # Gouttière de 30 px entre un mot et sa puce, en espaces typographiques
+    # (insert_htmlbox n'a pas de `gap`) : cadratin ou demi-cadratin au plus près.
+    blanc = " " if 30 / corps_css > 0.75 else " "
+    sep = f"{blanc}•{blanc}"
+
+    # Les bandes sont composées À PLAT sur une planche carrée qui couvre la page
+    # quelle que soit l'inclinaison, puis la planche est posée tournée, centrée.
+    cote = math.hypot(largeur, hauteur) + 2 * corps
+    planche = fitz.open()
+    feuille = planche.new_page(width=cote, height=cote)
     archive = fitz.Archive()
     archive.add(fitz.Font(fontfile=str(_MARK_FONT)).buffer, "deco.ttf")
     css = ("@font-face {font-family: deco; src: url(deco.ttf);}"
            f"p {{font-family: deco, serif; font-style: italic; margin: 0;"
-           f" font-size: {_MARK_SIZE}px; color: {_MARK_COLOR};"
+           f" font-size: {corps:.2f}px; color: {_MARK_COLOR};"
            " white-space: nowrap;}")
-    pas = _MARK_SIZE * _MARK_INTERLIGNE
-    y, i = 0.0, 0
-    while y < hauteur:
-        bande = _BANDES[i % len(_BANDES)]
+    pas = corps * _MARK_INTERLIGNE
+    n = len(_BANDES)
+    y = (cote - (n * pas + (n - 1) * ecart)) / 2
+    for i, bande in enumerate(_BANDES):
         mots = bande[:3] + (_MARK_ENSEIGNE,) + bande[3:]
-        ligne = html.escape("  •  ".join(mots * 2))
+        ligne = html.escape(sep.join(mots * 3))
         # Décalage propre à chaque bande : figer le défilement, c'est figer
         # des bandes qui ne sont pas alignées entre elles.
-        dx = -float((i * 137) % 400)
-        page.insert_htmlbox(fitz.Rect(dx, y, dx + 6000, y + pas),
-                            f"<p>{ligne}</p>", css=css, archive=archive,
-                            opacity=_MARK_OPACITY)
-        y += pas
-        i += 1
+        dx = -float((i * 137) % 400) * corps / 30
+        feuille.insert_htmlbox(fitz.Rect(dx, y, dx + 40 * cote, y + pas),
+                               f"<p>{ligne}</p>", css=css, archive=archive,
+                               opacity=_MARK_OPACITY)
+        y += pas + ecart
+
+    doc = fitz.open()
+    page = doc.new_page(width=largeur, height=hauteur)
+    a = math.radians(_MARK_ANGLE)
+    emprise = cote * (math.cos(a) + math.sin(a))
+    cx, cy = largeur / 2, hauteur / 2
+    page.show_pdf_page(fitz.Rect(cx - emprise / 2, cy - emprise / 2,
+                                 cx + emprise / 2, cy + emprise / 2),
+                       planche, 0, rotate=_MARK_ANGLE)
     try:
         return page.get_pixmap(dpi=TRIAL_DPI, alpha=True).tobytes("png")
     finally:
         doc.close()
+        planche.close()
