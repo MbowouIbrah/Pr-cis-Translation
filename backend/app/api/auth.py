@@ -138,6 +138,9 @@ def _user_response(user: User) -> dict:
         "email_verified": user.email_verified,
         "avatar_url": user.avatar_url,
         "plan": user.plan,
+        # Fin de l'abonnement acheté (à renouveler avant) ; null = sans échéance.
+        "plan_expires_at": (user.plan_expires_at.isoformat()
+                            if user.plan_expires_at else None),
         "storage_used": user.storage_used,
         # La colonne `storage_limit` est un VESTIGE : c'est `get_plan_storage`
         # qui décide réellement de ce qui passe (cf. `_save_document_for_user`).

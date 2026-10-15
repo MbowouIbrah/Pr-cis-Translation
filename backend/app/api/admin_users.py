@@ -101,6 +101,9 @@ async def change_plan(
         raise HTTPException(status_code=404, detail="Compte introuvable.")
 
     target.plan = body.plan
+    # Un plan attribué par l'administration n'a pas d'échéance : garder celle
+    # d'un abonnement acheté le ferait retomber au Gratuit à cette date.
+    target.plan_expires_at = None
     # La limite de stockage suit le plan. Les réponses la dérivent déjà de
     # `get_plan_storage`, mais on garde la colonne cohérente pour tout code qui
     # la lirait directement.

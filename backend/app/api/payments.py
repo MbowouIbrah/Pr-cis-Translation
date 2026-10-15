@@ -8,8 +8,10 @@ visible en clair et téléchargeable ; rien d'autre ne l'est.
 """
 from __future__ import annotations
 
+import calendar
 import logging
 import os
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -18,10 +20,10 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.models import User, Document, Payment
+from app.models import User, Document, Payment, get_plan_storage
 from app.core.security import require_auth
 from app.core.pricing import (zone_for_country, CURRENCY, page_price,
-                               billable_pages, MIN_PAYMENT_AMOUNT)
+                               billable_pages, MIN_PAYMENT_AMOUNT, plan_price)
 from app.services.documents import count_pages
 from app.core.payment_gateway import (campay, CampayError, ProviderError,
                                       normalize_phone)
@@ -149,11 +151,33 @@ async def collect(body: CollectBody, request: Request,
     Le client interroge ensuite `GET /api/payments/{id}`.
     """
     zone = _zone_of(request)
-    method = body.method
+    method, phone, provider = _resolve_method(body.method, body.phone, zone)
+
+    doc = await _owned_unpaid_document(db, user, body.document_id)
+
+    # Le document se paie à SA taille, connue du serveur : le nombre de pages
+    # envoyé par le navigateur ne fait pas le prix d'un document identifié.
+    pages = (await _document_pages(db, doc) if doc is not None else None) or body.pages
+    # Arrondi au montant minimum de l'opérateur ; `_apply_credit` reverse au
+    # compte les pages payées au-delà du document.
+    billed = billable_pages(zone, pages)
+    amount = page_price(zone) * billed
+
+    payment = Payment(
+        user_id=user.id, document_id=body.document_id, pages=billed,
+        amount=amount, currency=CURRENCY[zone], zone=zone,
+        phone=phone, status="PENDING", provider=provider.name, method=method,
+    )
+    return await _start_payment(db, provider, payment, f"Précis — {billed} page(s)")
+
+
+def _resolve_method(method: str, raw_phone: str | None, zone: str):
+    """Moyen choisi → (moyen retenu, numéro normalisé, prestataire). Lève
+    l'erreur HTTP à renvoyer quand le moyen n'est pas ouvert."""
     # Normalisé ICI, une fois : ce qui part chez Campay et ce qu'on enregistre
     # doivent être le même numéro. Le faire côté navigateur laisserait les deux
     # diverger dès qu'un autre client appellerait l'API.
-    phone = normalize_phone(body.phone) if body.phone else None
+    phone = normalize_phone(raw_phone) if raw_phone else None
     if method in PHONE_METHODS:
         if not phone:
             raise HTTPException(status_code=422, detail="Numéro de téléphone requis.")
@@ -171,33 +195,23 @@ async def collect(body: CollectBody, request: Request,
             status_code=501 if reason == "currency" else 409,
             detail="Ce moyen de paiement n'est pas encore disponible.",
         )
+    return method, phone, provider
 
-    doc = await _owned_unpaid_document(db, user, body.document_id)
 
-    # Le document se paie à SA taille, connue du serveur : le nombre de pages
-    # envoyé par le navigateur ne fait pas le prix d'un document identifié.
-    pages = (await _document_pages(db, doc) if doc is not None else None) or body.pages
-    # Arrondi au montant minimum de l'opérateur ; `_apply_credit` reverse au
-    # compte les pages payées au-delà du document.
-    billed = billable_pages(zone, pages)
-    amount = page_price(zone) * billed
-
+async def _start_payment(db: AsyncSession, provider, payment: Payment,
+                         description: str) -> dict:
+    """Enregistre le paiement PUIS sollicite le prestataire."""
     # La trace existe AVANT l'appel. Si le réseau coupe juste après que Campay
     # a débité le client, on a de quoi réconcilier ; l'inverse perd l'argent
     # du client sans laisser la moindre trace chez nous.
-    payment = Payment(
-        user_id=user.id, document_id=body.document_id, pages=billed,
-        amount=amount, currency=CURRENCY[zone], zone=zone,
-        phone=phone, status="PENDING", provider=provider.name,
-    )
     db.add(payment)
     await db.commit()
     await db.refresh(payment)
 
     try:
         res = await provider.start(
-            amount=amount, currency=payment.currency, phone=phone,
-            description=f"Précis — {billed} page(s)", reference=payment.id,
+            amount=payment.amount, currency=payment.currency, phone=payment.phone,
+            description=description, reference=payment.id,
         )
     except ProviderError as e:
         # On journalise le détail, on n'en montre rien : la réponse d'un
@@ -214,13 +228,124 @@ async def collect(body: CollectBody, request: Request,
     return {
         "payment_id": payment.id,
         "status": "PENDING",
-        "amount": amount,
+        "amount": payment.amount,
         "currency": payment.currency,
         # À afficher : sur certains téléphones l'invite n'arrive pas et il faut
         # composer ce code à la main.
         "ussd_code": res.get("ussd_code"),
         "operator": res.get("operator"),
     }
+
+
+# Plans vendus en ligne. Entreprise se négocie (devis), admin s'attribue : ni
+# l'un ni l'autre ne s'achète.
+SELF_SERVE_PLANS: tuple[str, ...] = ("starter", "pro")
+# Rang d'un plan, pour refuser d'acheter moins que ce qu'on a déjà.
+_PLAN_RANK = {"free": 0, "starter": 1, "pro": 2}
+
+
+def _plan_offer(plan: str, annual: bool, zone: str) -> tuple[int, int, int]:
+    """(prix mensuel, nombre de mois, montant à encaisser). L'annuel se paie
+    d'avance : douze fois le prix mensuel affiché sur la carte."""
+    if plan not in SELF_SERVE_PLANS:
+        raise HTTPException(status_code=422, detail="Ce forfait ne s'achète pas en ligne.")
+    monthly = plan_price(plan, zone, annual=annual)
+    if not monthly:
+        raise HTTPException(status_code=422, detail="Ce forfait ne s'achète pas en ligne.")
+    months = 12 if annual else 1
+    return monthly, months, monthly * months
+
+
+def _check_can_buy(user: User, plan: str) -> None:
+    """Refuse un achat qui ferait PERDRE des droits au compte."""
+    rank = _PLAN_RANK.get(user.plan)
+    if rank is None or rank > _PLAN_RANK[plan] or (
+            user.plan == plan and user.plan_expires_at is None):
+        # Entreprise / admin, un plan supérieur en cours, ou ce même plan
+        # attribué sans échéance : l'achat le remplacerait par moins.
+        raise HTTPException(status_code=409,
+                            detail="Votre forfait actuel couvre déjà cette offre.")
+
+
+class PlanQuoteBody(BaseModel):
+    plan: str
+    annual: bool = False
+
+
+@router.post("/plan/quote")
+async def plan_quote(body: PlanQuoteBody, request: Request,
+                     user: User = Depends(require_auth)):
+    """Prix d'un abonnement, tel qu'il sera encaissé par `POST /plan`."""
+    zone = _zone_of(request)
+    monthly, months, amount = _plan_offer(body.plan, body.annual, zone)
+    _check_can_buy(user, body.plan)
+    return {"plan": body.plan, "annual": body.annual, "months": months,
+            "monthly_price": monthly, "amount": amount,
+            "currency": CURRENCY[zone], "zone": zone}
+
+
+class PlanBody(PlanQuoteBody):
+    method: str = MTN_MOMO
+    phone: str | None = Field(None, min_length=9, max_length=15)
+
+
+@router.post("/plan")
+async def buy_plan(body: PlanBody, request: Request,
+                   user: User = Depends(require_auth),
+                   db: AsyncSession = Depends(get_db)):
+    """Achète (ou renouvelle) un abonnement Starter / Pro.
+
+    Même chemin que l'achat de pages : trace AVANT l'appel, invite sur le
+    téléphone, puis `GET /{id}` jusqu'à l'issue. Le prix vient de
+    `pricing.py`, jamais du navigateur. Campay ne prélève pas de lui-même :
+    chaque mois (ou année) est un nouveau paiement, qui prolonge l'échéance.
+    """
+    zone = _zone_of(request)
+    _monthly, months, amount = _plan_offer(body.plan, body.annual, zone)
+    _check_can_buy(user, body.plan)
+    method, phone, provider = _resolve_method(body.method, body.phone, zone)
+    payment = Payment(
+        user_id=user.id, pages=0, amount=amount, currency=CURRENCY[zone],
+        zone=zone, phone=phone, status="PENDING", provider=provider.name,
+        method=method, plan=body.plan, months=months,
+    )
+    return await _start_payment(db, provider, payment,
+                                f"Précis — forfait {body.plan} ({months} mois)")
+
+
+def _add_months(d: datetime, months: int) -> datetime:
+    """Même jour, `months` mois plus tard (31 janv. + 1 mois = 28/29 févr.)."""
+    y, m = divmod(d.month - 1 + months, 12)
+    year, month = d.year + y, m + 1
+    return d.replace(year=year, month=month,
+                     day=min(d.day, calendar.monthrange(year, month)[1]))
+
+
+async def _apply_plan(db: AsyncSession, payment: Payment) -> None:
+    """Ouvre ou prolonge l'abonnement payé (dans la transaction du drapeau)."""
+    # Verrou de ligne : deux renouvellements du même compte crédités en même
+    # temps liraient la même échéance et n'en ajouteraient qu'un.
+    user = (await db.execute(
+        select(User).where(User.id == payment.user_id).with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalar_one_or_none()
+    if user is None:
+        return
+    if user.plan not in _PLAN_RANK:
+        # Passé entreprise / admin entre l'invite et la validation : ne pas
+        # le rétrograder. Le paiement reste tracé pour remboursement.
+        logger.warning("Paiement de plan %s sur un compte %s : non appliqué",
+                       payment.id, user.plan)
+        return
+    now = datetime.now(timezone.utc)
+    # Renouvellement anticipé du même plan : la durée s'AJOUTE à ce qui reste.
+    # Changement de plan : le nouveau commence maintenant.
+    start = (user.plan_expires_at
+             if user.plan == payment.plan and user.plan_expires_at
+             and user.plan_expires_at > now else now)
+    user.plan = payment.plan
+    user.plan_expires_at = _add_months(start, payment.months or 1)
+    user.storage_limit = get_plan_storage(payment.plan)
 
 
 async def _apply_credit(db: AsyncSession, payment: Payment) -> None:
@@ -249,6 +374,12 @@ async def _apply_credit(db: AsyncSession, payment: Payment) -> None:
     )
     if pris.rowcount != 1:
         await db.rollback()
+        return
+
+    if payment.plan:
+        await _apply_plan(db, payment)
+        await db.commit()
+        payment.credited = True
         return
 
     surplus = payment.pages
@@ -304,6 +435,7 @@ async def payment_status(payment_id: str, user: User = Depends(require_auth),
         "amount": payment.amount,
         "currency": payment.currency,
         "document_id": payment.document_id,
+        "plan": payment.plan,
     }
 
 

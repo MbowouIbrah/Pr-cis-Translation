@@ -48,6 +48,11 @@ class Payment(Base):
     # drapeau, un même paiement crédite deux fois.
     credited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     phone:    Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Moyen choisi par le client (mtn_momo, orange_money, card).
+    method:   Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Achat d'un ABONNEMENT : le plan et sa durée. NULL = achat de pages.
+    plan:     Mapped[str | None] = mapped_column(String(20), nullable=True)
+    months:   Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow,
