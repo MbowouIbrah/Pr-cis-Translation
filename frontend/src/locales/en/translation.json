@@ -316,12 +316,13 @@
     "buy_pages_label": "Unlock the translation of this document",
     "title": "Payment",
     "method_title": "Payment method",
-    "method_mtn_momo": "MTN MoMo",
-    "method_orange_money": "Orange Money",
-    "method_card": "Visa / Mastercard",
+    "method_card": "Bank card",
     "method_soon": "Not available yet",
     "no_method": "No payment method is available at the moment.",
-    "phone_label": "Phone number"
+    "phone_label": "Phone number",
+    "method_mobile": "Mobile Money",
+    "phone_hint": "MTN or Orange, detected from the number. 237 prefix optional.",
+    "pay": "Pay"
   },
   "common": {
     "preview_conv_failed": "Preview conversion failed.",

@@ -316,12 +316,13 @@
     "buy_pages_label": "Débloquez la traduction de ce document",
     "title": "Paiement",
     "method_title": "Moyen de paiement",
-    "method_mtn_momo": "MTN MoMo",
-    "method_orange_money": "Orange Money",
-    "method_card": "Carte Visa / Mastercard",
+    "method_card": "Carte bancaire",
     "method_soon": "Pas encore disponible",
     "no_method": "Aucun moyen de paiement n'est disponible pour le moment.",
-    "phone_label": "Numéro de téléphone"
+    "phone_label": "Numéro de téléphone",
+    "method_mobile": "Mobile Money",
+    "phone_hint": "MTN ou Orange, reconnu au numéro. Indicatif 237 facultatif.",
+    "pay": "Payer"
   },
   "common": {
     "preview_conv_failed": "La conversion de l'aperçu a échoué.",

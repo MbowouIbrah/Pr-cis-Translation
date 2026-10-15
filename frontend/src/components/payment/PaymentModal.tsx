@@ -4,7 +4,8 @@ import { useTranslation } from 'react-i18next';
 import { X, Smartphone, Loader2, CheckCircle2, AlertCircle, CreditCard } from 'lucide-react';
 import { usePayment, type PayMethodId } from '../../hooks/usePayment';
 import { usePricing, formatMoney } from '../../hooks/usePricing';
-import { detectOperator, OPERATOR_LABEL, OPERATOR_COLOR, type Operator } from '../../lib/mobileMoney';
+import { detectOperator, OPERATOR_LABEL, type Operator } from '../../lib/mobileMoney';
+import { MtnLogo, OrangeLogo, VisaLogo, MastercardLogo } from './PayLogos';
 
 interface PaymentModalProps {
   open: boolean;
@@ -20,9 +21,10 @@ interface PaymentModalProps {
 
 // Opérateur reconnu au numéro → moyen correspondant.
 const METHOD_OF: Record<Operator, PayMethodId> = { mtn: 'mtn_momo', orange: 'orange_money' };
-const METHOD_COLOR: Record<PayMethodId, string> = {
-  mtn_momo: OPERATOR_COLOR.mtn, orange_money: OPERATOR_COLOR.orange, card: 'var(--blue)',
-};
+const OPERATOR_LOGO: Record<Operator, typeof MtnLogo> = { mtn: MtnLogo, orange: OrangeLogo };
+// Deux choix pour le client : le mobile money (MTN et Orange réunis, l'opérateur
+// se lit sur le numéro) et la carte.
+type Kind = 'mobile' | 'card';
 
 const input: React.CSSProperties = {
   width: '100%', padding: '11px 12px 11px 38px', borderRadius: '10px',
@@ -39,32 +41,40 @@ export default function PaymentModal({
     phase, quote, methods, ussdCode, operator, error, getQuote, getMethods, pay, reset,
   } = usePayment();
   const [phone, setPhone] = useState('');
-  const [method, setMethod] = useState<PayMethodId | null>(null);
-  const chosen = methods?.find((m) => m.id === method && m.available) ?? null;
-  const noMethod = methods !== null && !methods.some((m) => m.available);
+  const [kind, setKind] = useState<Kind | null>(null);
+  const isOn = (id: PayMethodId) => !!methods?.some((m) => m.id === id && m.available);
+  const mobileOn = isOn('mtn_momo') || isOn('orange_money');
+  const cardOn = isOn('card');
+  const noMethod = methods !== null && !mobileOn && !cardOn;
   // Ce que le serveur facture réellement (montant minimum de l'opérateur).
   const billed = quote?.billed_pages ?? pages;
   // Taille retenue par le SERVEUR : pour un document, elle peut différer de
   // la prop (taille jamais consignée côté bibliothèque, recomptée au devis).
   const dues = quote?.pages ?? pages;
   const op = detectOperator(phone);
+  // Le numéro décide de l'opérateur (le serveur fait de même). Préfixe inconnu :
+  // on ne bloque pas, le premier moyen ouvert part et le serveur tranche.
+  const opMethod = op ? METHOD_OF[op] : null;
+  const opClosed = kind === 'mobile' && opMethod !== null && !isOn(opMethod);
+  const chosen: PayMethodId | null =
+    kind === 'card' ? (cardOn ? 'card' : null)
+    : kind === 'mobile'
+      ? (opMethod ? (isOn(opMethod) ? opMethod : null)
+         : isOn('mtn_momo') ? 'mtn_momo' : isOn('orange_money') ? 'orange_money' : null)
+      : null;
 
   useEffect(() => {
     if (open) { reset(); getQuote(pages, documentId); getMethods(); }
   }, [open, pages, documentId, reset, getQuote, getMethods]);
 
-  // Premier moyen disponible présélectionné : un clic de moins dans le cas
-  // courant, et jamais un moyen grisé.
+  // Premier choix ouvert présélectionné : un clic de moins dans le cas
+  // courant, et jamais un choix grisé.
   useEffect(() => {
-    if (methods && !chosen) setMethod(methods.find((m) => m.available)?.id ?? null);
-  }, [methods, chosen]);
-
-  // Un numéro Orange tapé sous « MTN » : on suit le numéro, c'est lui qui
-  // décide de l'opérateur chez le prestataire.
-  useEffect(() => {
-    const m = op && METHOD_OF[op];
-    if (m && methods?.some((x) => x.id === m && x.available)) setMethod(m);
-  }, [op, methods]);
+    if (!methods) return;
+    if (kind === 'mobile' && mobileOn) return;
+    if (kind === 'card' && cardOn) return;
+    setKind(mobileOn ? 'mobile' : cardOn ? 'card' : null);
+  }, [methods, kind, mobileOn, cardOn]);
 
   // Fermer pendant l'attente laisserait l'utilisateur sans retour sur un
   // paiement peut-être abouti. On ne verrouille rien, mais on prévient.
@@ -75,8 +85,8 @@ export default function PaymentModal({
     // Campay attend un numéro international sans « + ». On retire tout ce qui
     // n'est pas un chiffre : personne ne tape son numéro de la même façon.
     if (!chosen) return;
-    const digits = chosen.needs_phone ? phone.replace(/\D/g, '') : null;
-    const ok = await pay(pages, chosen.id, digits, documentId);
+    const digits = kind === 'mobile' ? phone.replace(/\D/g, '') : null;
+    const ok = await pay(pages, chosen, digits, documentId);
     if (ok) {
       onPaid();
       // On laisse la confirmation à l'écran une seconde : une fenêtre qui
@@ -218,30 +228,42 @@ export default function PaymentModal({
                       {t('payment.method_title')}
                     </legend>
                     <div role="radiogroup" style={{ display: 'grid', gap: 8,
-                                                    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}>
-                      {(methods ?? []).map((m) => {
-                        const on = chosen?.id === m.id;
+                                                    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
+                      {methods && ([
+                        { k: 'mobile' as const, avail: mobileOn, label: t('payment.method_mobile'),
+                          logos: (['mtn', 'orange'] as Operator[]).map((o) => {
+                            const Logo = OPERATOR_LOGO[o];
+                            // Le numéro reconnu : son opérateur ressort, l'autre s'efface.
+                            const dim = kind === 'mobile' && op !== null && op !== o;
+                            return <span key={o} style={{ display: 'flex', opacity: dim ? 0.25 : 1,
+                                                          transition: 'opacity .2s' }}><Logo /></span>;
+                          }) },
+                        { k: 'card' as const, avail: cardOn, label: t('payment.method_card'),
+                          logos: [<VisaLogo key="v" />, <MastercardLogo key="m" />] },
+                      ]).map(({ k, avail, label, logos }) => {
+                        const on = kind === k;
                         return (
-                          <button key={m.id} type="button" role="radio" aria-checked={on}
-                            disabled={!m.available || phase === 'starting'}
-                            onClick={() => setMethod(m.id)}
+                          <button key={k} type="button" role="radio" aria-checked={on}
+                            disabled={!avail || phase === 'starting'}
+                            onClick={() => setKind(k)}
                             style={{
-                              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 5,
-                              padding: '10px 6px', borderRadius: '10px', fontFamily: 'inherit',
+                              display: 'flex', flexDirection: 'column', alignItems: 'center',
+                              justifyContent: 'center', gap: 7,
+                              padding: '12px 8px', borderRadius: '10px', fontFamily: 'inherit',
                               border: `1.5px solid ${on ? 'var(--blue)' : 'var(--gray-200)'}`,
                               background: on ? 'var(--gray-50)' : 'white',
-                              cursor: m.available ? 'pointer' : 'not-allowed',
-                              opacity: m.available ? 1 : 0.55, minHeight: 64,
+                              cursor: avail ? 'pointer' : 'not-allowed',
+                              opacity: avail ? 1 : 0.55, minHeight: 84,
                             }}>
-                            {m.id === 'card'
-                              ? <CreditCard size={18} color="var(--gray-600)" />
-                              : <span aria-hidden style={{ width: 14, height: 14, borderRadius: '50%',
-                                                          background: METHOD_COLOR[m.id] }} />}
-                            <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--gray-800)',
-                                           lineHeight: 1.2, textAlign: 'center' }}>
-                              {t(`payment.method_${m.id}`)}
+                            <span aria-hidden style={{ display: 'flex', alignItems: 'center', gap: 6,
+                                                       height: 22 }}>
+                              {logos}
                             </span>
-                            {!m.available && (
+                            <span style={{ fontSize: '12.5px', fontWeight: 600, color: 'var(--gray-800)',
+                                           lineHeight: 1.2, textAlign: 'center' }}>
+                              {label}
+                            </span>
+                            {!avail && (
                               <span style={{ fontSize: '10.5px', color: 'var(--gray-500)', lineHeight: 1.2,
                                              textAlign: 'center' }}>
                                 {t('payment.method_soon')}
@@ -258,7 +280,7 @@ export default function PaymentModal({
                     )}
                   </fieldset>
 
-                  {chosen?.needs_phone && (<>
+                  {kind === 'mobile' && (<>
                   <label htmlFor="pay-phone" style={{ display: 'block', fontSize: '13px', fontWeight: 500,
                                   color: 'var(--gray-700)', marginBottom: 5 }}>
                     {t('payment.phone_label')}
@@ -278,13 +300,17 @@ export default function PaymentModal({
                   <p id="pay-phone-hint" aria-live="polite"
                      style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '11.5px',
                               color: 'var(--gray-500)', margin: '6px 0 16px', minHeight: 16 }}>
-                    {op ? (
-                      <>
-                        <span aria-hidden style={{ width: 8, height: 8, borderRadius: '50%',
-                                                   background: OPERATOR_COLOR[op] }} />
-                        {OPERATOR_LABEL[op]}
-                      </>
-                    ) : 'Indicatif 237 facultatif.'}
+                    {op ? (() => {
+                      const Logo = OPERATOR_LOGO[op];
+                      return (
+                        <>
+                          <Logo height={14} />
+                          {OPERATOR_LABEL[op]}
+                          {opClosed && <span style={{ color: 'var(--red, #c0392b)' }}>
+                            — {t('payment.method_soon').toLowerCase()}</span>}
+                        </>
+                      );
+                    })() : t('payment.phone_hint')}
                   </p>
                   </>)}
 
@@ -296,8 +322,8 @@ export default function PaymentModal({
                              opacity: phase === 'starting' || !quote || !chosen ? 0.6 : 1 }}>
                     {phase === 'starting'
                       ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
-                      : chosen?.id === 'card' ? <CreditCard size={16} /> : <Smartphone size={16} />}
-                    Payer {quote && pricing
+                      : chosen === 'card' ? <CreditCard size={16} /> : <Smartphone size={16} />}
+                    {t('payment.pay')} {quote && pricing
                       ? formatMoney(quote.amount, quote.currency, pricing.decimals, 'fr')
                       : ''}
                   </button>
