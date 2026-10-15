@@ -25,6 +25,7 @@ import os
 import fitz
 
 from .engine import PDFObjectEngine
+from .version import ENGINE_VERSION
 from . import translate
 
 
@@ -159,6 +160,26 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
             has_translation = bool(page_data) and (debug or any(
                 e.get("tr_tagged") for e in page_data.get("elements", [])
                 if e.get("type") == "paragraph"))
+            if (has_translation and page_data.get("moteur") != ENGINE_VERSION
+                    and page_data.get("amelioration") != ENGINE_VERSION):
+                # Page découpée par une AUTRE version du moteur : elle rejouerait
+                # les décisions d'avant le correctif. On la redécoupe ; la
+                # traduction suit si le texte est retrouvé à l'identique, sinon
+                # la page ancienne reste (aucun texte changé sans accord).
+                _emit(on_event, {"type": "page", "page": human,
+                                 "status": "extracting",
+                                 "done": human - 1, "total": total})
+                neuve = eng.extract_page_data(
+                    src, page_num, src[page_num], images_par_reference=True)
+                if debug or translate.reattacher_traductions(neuve, page_data):
+                    page_data = neuve
+                else:
+                    # Le texte changerait : la page garde sa version, et la
+                    # mise à jour reste PROPOSÉE (pas retentée à chaque visite).
+                    page_data["amelioration"] = ENGINE_VERSION
+                if cache_path:
+                    cached_pages[human] = page_data
+                    _ecrire_cache()
             if not has_translation:
                 _emit(on_event, {"type": "page", "page": human,
                                  "status": "extracting",

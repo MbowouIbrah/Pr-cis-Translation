@@ -31,6 +31,7 @@ from collections import defaultdict
 import fitz  # PyMuPDF >= 1.23
 
 from . import reflow
+from .version import ENGINE_VERSION
 
 _log = logging.getLogger(__name__)
 
@@ -496,6 +497,10 @@ class PDFObjectEngine:
             "page_num": page_num + 1,
             "width": page.rect.width,
             "height": page.rect.height,
+            # Version qui a DÉCOUPÉ la page : une page sauvegardée rejoue les
+            # décisions de ce moteur-là (paragraphes, alignements, cadres).
+            # Un autre numéro la désigne comme à redécouper (cf. stream.py).
+            "moteur": ENGINE_VERSION,
             "elements": [],
         }
         # Ordre de peinture (du fond vers l'avant), pour que les

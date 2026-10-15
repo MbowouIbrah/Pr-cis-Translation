@@ -101,6 +101,36 @@ def _plain_key(tagged):
     return " ".join(plain.split())
 
 
+def reattacher_traductions(nouvelle, ancienne):
+    """Pose sur la page REDÉCOUPÉE `nouvelle` les traductions de `ancienne`.
+
+    Un correctif de découpage ne doit ni repayer la traduction, ni changer en
+    silence le texte que l'utilisateur a lu. On réattache donc par le texte
+    source balisé : un paragraphe redécoupé à l'identique retrouve sa
+    traduction mot pour mot. Tout ou rien : si UN paragraphe est nouveau (texte
+    regroupé autrement), rien n'est posé et la page ancienne reste en place —
+    la retraduire est une décision de l'utilisateur, pas la nôtre.
+
+    Renvoie True si toutes les traductions ont été posées (zéro appel IA).
+    """
+    connues = {}
+    for el in ancienne.get("elements", []):
+        if el.get("type") == "paragraph" and el.get("tr_tagged") is not None:
+            connues[tagging.tag_paragraph(el)[0]] = el["tr_tagged"]
+    poses = []
+    for el in nouvelle.get("elements", []):
+        if el.get("type") != "paragraph":
+            continue
+        tagged, meta = tagging.tag_paragraph(el)
+        if tagged.strip() and tagged not in connues:
+            return False
+        poses.append((el, meta, connues.get(tagged, tagged)))
+    for el, meta, tr in poses:
+        el["tr_segments"] = meta
+        el["tr_tagged"] = tr
+    return True
+
+
 def translate_extraction(data, target_lang="fr", max_pages=None,
                          batch_size=40, progress=None, doc_memory=None):
     """Traduit les paragraphes des `max_pages` premières pages de `data` (dict
