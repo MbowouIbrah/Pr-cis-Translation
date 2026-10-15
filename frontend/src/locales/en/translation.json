@@ -242,9 +242,9 @@
     "status_rendering": "Rebuilding the layout…",
     "page_pending": "This page is waiting to be translated.",
     "credits_needed": "{{count}} more page(s) to pay for to translate this document.",
-    "trial_hover": "Trial version — Hover to preview",
-    "trial_touch": "Trial version — Touch the page to preview",
-    "trial_buy": "Buy to download"
+    "trial_hover": "Trial: hover over the page to read it",
+    "trial_touch": "Trial: tap the page to read it",
+    "trial_buy": "Unlock"
   },
   "account": {
     "default_name": "User",

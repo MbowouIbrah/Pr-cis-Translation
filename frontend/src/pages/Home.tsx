@@ -129,9 +129,11 @@ export default function Home() {
   // défiler jusqu'à lui. En le fermant, on revient sur le formulaire de
   // traduction, quel que soit l'endroit d'où l'aperçu a été ouvert.
   const apercuEtaitOuvert = useRef(false);
+  const retourVers = useRef<'story' | 'pricing'>('story');
   useEffect(() => {
     if (apercuEtaitOuvert.current && !showPreview) {
-      document.getElementById('story')?.scrollIntoView({ behavior: 'instant' });
+      document.getElementById(retourVers.current)?.scrollIntoView({ behavior: 'instant' });
+      retourVers.current = 'story';
     }
     apercuEtaitOuvert.current = showPreview;
   }, [showPreview]);
@@ -364,6 +366,13 @@ export default function Home() {
     setPreviewLoading(false);
   }, [stream]);
 
+  // « Débloquer » depuis l'essai : les tarifs sont sous la surcouche d'aperçu,
+  // il faut la fermer pour les montrer.
+  const handleUnlock = useCallback(() => {
+    retourVers.current = 'pricing';
+    handleBack();
+  }, [handleBack]);
+
   // Aperçu du panneau « traduit » : blob final si dispo, sinon PDF partiel
   // (pages déjà prêtes), mis à jour au fil de l'eau pendant le streaming.
   const previewTranslatedBlob = translatedBlob ?? stream.partialBlob;
@@ -481,6 +490,7 @@ export default function Home() {
           focus={previewFocus}
           onStartTranslate={handleStartTranslate}
           onBack={handleBack}
+          onUnlock={handleUnlock}
           onToggleFocus={toggleFocus}
           onZoomChange={setZoom}
           onPageChange={setCurrentPage}

@@ -46,6 +46,8 @@ interface StorySectionProps {
   focus?: boolean;
   onStartTranslate: (config: TranslateConfig) => void;
   onBack: () => void;
+  /** Essai : quitter l'aperçu pour les tarifs. */
+  onUnlock?: () => void;
   onToggleFocus?: () => void;
   onZoomChange: (z: number) => void;
   onPageChange: (p: number) => void;
@@ -78,6 +80,7 @@ export default function StorySection({
   focus = false,
   onStartTranslate,
   onBack,
+  onUnlock,
   onToggleFocus,
   onZoomChange,
   onPageChange,
@@ -472,6 +475,7 @@ export default function StorySection({
                       // à la place du message « page en attente ».
                       creditsNeeded={creditsNeeded}
                       onBuyPages={onBuyPages}
+                      onUnlock={onUnlock}
                     />
                   </div>
                 </div>

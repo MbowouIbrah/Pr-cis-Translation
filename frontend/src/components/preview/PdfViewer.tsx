@@ -34,6 +34,8 @@ interface PdfViewerProps {
    *  l'invitation à payer, avec le bouton dessous, au lieu du message d'attente. */
   creditsNeeded?: number | null;
   onBuyPages?: (pages: number) => void;
+  /** Essai : quitter l'aperçu pour les tarifs. */
+  onUnlock?: () => void;
 }
 
 export default function PdfViewer({
@@ -55,6 +57,7 @@ export default function PdfViewer({
   previewLoading = false,
   creditsNeeded,
   onBuyPages,
+  onUnlock,
 }: PdfViewerProps) {
   const { t } = useTranslation();
   const [cursorPos, setCursorPos] = useState<{ x: number; y: number } | null>(null);
@@ -550,33 +553,39 @@ export default function PdfViewer({
 
           </div>
 
-          {/* Trial banner — hors de la pile : bandeau collant en bas de cv-en */}
-          {isTrialMode && isHovering && translatedShown && (
+          {/* Bandeau d'essai — hors de la pile, collant en bas de cv-en. Affiché
+              dès que la page traduite l'est (pas seulement au survol : c'est lui
+              qui dit QU'il faut survoler). Une seule ligne, jamais plus large
+              que la page : la consigne se tronque, le lien reste entier. */}
+          {isTrialMode && translatedShown && (
             <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
               style={{
                 position: 'sticky',
                 bottom: '0',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                width: '100%', boxSizing: 'border-box', minWidth: 0,
                 background: 'rgba(13,27,62,0.92)',
                 color: 'white',
-                padding: '8px 16px',
+                padding: '7px 10px',
                 fontSize: '12px',
-                textAlign: 'center',
+                whiteSpace: 'nowrap',
                 zIndex: 30,
                 backdropFilter: 'blur(4px)',
               }}
             >
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', justifyContent: 'center' }}>
-                <Lock size={13} strokeWidth={2.2} />
-                {t(sansSurvol ? 'preview.trial_touch' : 'preview.trial_hover')} ·{' '}
-                <a
-                  href="#pricing"
-                  style={{ color: '#93c5fd', textDecoration: 'underline' }}
-                >
-                  {t('preview.trial_buy')}
-                </a>
+              <Lock size={12} strokeWidth={2.2} style={{ flexShrink: 0 }} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>
+                {t(sansSurvol ? 'preview.trial_touch' : 'preview.trial_hover')}
               </span>
+              <a
+                href="#pricing"
+                onClick={(e) => { if (onUnlock) { e.preventDefault(); onUnlock(); } }}
+                style={{ color: '#93c5fd', textDecoration: 'underline', flexShrink: 0 }}
+              >
+                {t('preview.trial_buy')}
+              </a>
             </motion.div>
           )}
         </div>

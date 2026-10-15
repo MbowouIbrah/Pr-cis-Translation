@@ -29,6 +29,8 @@ interface DocumentPreviewProps {
   creditsNeeded?: number | null;
   /** Ouvre le paiement à la page pour `n` pages. */
   onBuyPages?: (pages: number) => void;
+  /** Essai : quitter l'aperçu pour les tarifs. */
+  onUnlock?: () => void;
 }
 
 /**
@@ -52,6 +54,7 @@ export default function DocumentPreview({
   previewLoading,
   creditsNeeded,
   onBuyPages,
+  onUnlock,
 }: DocumentPreviewProps) {
   const { t } = useTranslation();
   const { sourcePdf, translatedPdf, loading, error } = usePdfPreview(sourceFile, translatedBlob, ext, translatedExt);
@@ -122,6 +125,7 @@ export default function DocumentPreview({
       targetLabel={targetLabel}
       creditsNeeded={creditsNeeded}
       onBuyPages={onBuyPages}
+      onUnlock={onUnlock}
     />
   );
 }
