@@ -186,6 +186,11 @@ Le `/health` ne prouve que le démarrage. Faire le parcours réel, une fois :
 - **Paiements en mode DEMO** tant que `CAMPAY_ENV=DEMO`. Aucun encaissement
   réel. Les clés de production s'activent par un simple changement de `.env` et
   un redémarrage — pas besoin de redéployer.
+- **Moyens de paiement** : `PAYMENT_METHODS` (défaut
+  `mtn_momo=campay,orange_money=campay,card=`) relie chaque moyen à son
+  prestataire. Un moyen sans prestataire, ou dont le prestataire n'est pas
+  configuré, s'affiche grisé « Pas encore disponible ». La carte attend son
+  prestataire (ZitoPay pressenti).
 - **Aucune expiration automatique des fichiers traduits.** Le volume ne fait que
   croître ; surveiller et purger (voir ci-dessous).
 - **Documents scannés exclus** : détectés, refusés, non facturés. L'OCR est une

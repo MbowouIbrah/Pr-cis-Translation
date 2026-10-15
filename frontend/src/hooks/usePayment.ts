@@ -22,11 +22,22 @@ export interface Quote {
   zone: string;
 }
 
-export type PayPhase = 'idle' | 'quoting' | 'starting' | 'waiting' | 'done' | 'failed';
+export type PayMethodId = 'mtn_momo' | 'orange_money' | 'card';
+
+/** Moyen de paiement de la zone. Indisponible = affiché grisé, jamais caché. */
+export interface PayMethod {
+  id: PayMethodId;
+  available: boolean;
+  needs_phone: boolean;
+}
+
+export type PayPhase ='idle' | 'quoting' | 'starting' | 'waiting' | 'done' | 'failed';
 
 export interface PaymentState {
   phase: PayPhase;
   quote: Quote | null;
+  /** `null` tant que la liste n'est pas arrivée. */
+  methods: PayMethod[] | null;
   /** Code à composer si l'invite n'arrive pas d'elle-même. */
   ussdCode: string | null;
   operator: string | null;
@@ -41,7 +52,7 @@ const TIMEOUT_MS = 180_000;
 
 export function usePayment() {
   const [state, setState] = useState<PaymentState>({
-    phase: 'idle', quote: null, ussdCode: null, operator: null, error: null,
+    phase: 'idle', quote: null, methods: null, ussdCode: null, operator: null, error: null,
   });
   const timer = useRef<number | null>(null);
   const startedAt = useRef(0);
@@ -56,7 +67,7 @@ export function usePayment() {
 
   const reset = useCallback(() => {
     stop();
-    setState({ phase: 'idle', quote: null, ussdCode: null, operator: null, error: null });
+    setState({ phase: 'idle', quote: null, methods: null, ussdCode: null, operator: null, error: null });
   }, [stop]);
 
   /** Combien coûtera la traduction — AVANT de la lancer. */
@@ -74,17 +85,26 @@ export function usePayment() {
     return quote;
   }, []);
 
+  /** Moyens proposés dans la zone du client. Un échec n'en propose aucun :
+   *  mieux vaut ne rien offrir que d'offrir ce que le serveur refusera. */
+  const getMethods = useCallback(async () => {
+    const res = await api.get('/api/payments/methods');
+    const methods = res.ok ? ((res.data as any)?.methods as PayMethod[]) ?? [] : [];
+    setState((s) => ({ ...s, methods }));
+    return methods;
+  }, []);
+
   /**
    * Déclenche l'invite sur le téléphone, puis suit le paiement jusqu'à son
    * issue. Résout à `true` seulement si l'encaissement a RÉUSSI.
    */
   const pay = useCallback(async (
-    pages: number, phone: string, documentId?: string,
+    pages: number, method: PayMethodId, phone: string | null, documentId?: string,
   ): Promise<boolean> => {
     setState((s) => ({ ...s, phase: 'starting', error: null }));
 
     const res = await api.post('/api/payments/collect', {
-      pages, phone, document_id: documentId ?? null,
+      pages, method, phone, document_id: documentId ?? null,
     });
     if (!res.ok) {
       const detail = (res.data as any)?.detail;
@@ -132,5 +152,5 @@ export function usePayment() {
     });
   }, [stop]);
 
-  return { ...state, getQuote, pay, reset };
+  return { ...state, getQuote, getMethods, pay, reset };
 }

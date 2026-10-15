@@ -66,7 +66,20 @@ def normalize_phone(raw: str, default_cc: str = "237") -> str:
     return digits
 
 
-class CampayError(RuntimeError):
+class ProviderError(RuntimeError):
+    """Échec d'un appel à un prestataire de paiement, quel qu'il soit.
+
+    Les routes n'attrapent que celle-ci : un nouveau prestataire n'a pas à
+    leur apprendre le nom de ses propres erreurs."""
+
+    def __init__(self, message: str, user_message: str | None = None):
+        super().__init__(message)
+        self.user_message = user_message or (
+            "Le paiement n'a pas pu être initié. Réessayez."
+        )
+
+
+class CampayError(ProviderError):
     """Échec d'un appel Campay.
 
     `message` va aux journaux (il peut contenir des détails de l'API) ;
@@ -74,12 +87,6 @@ class CampayError(RuntimeError):
     ce qui permet à l'utilisateur de CORRIGER. « ER101 » ne dit à personne
     qu'il a oublié l'indicatif pays.
     """
-
-    def __init__(self, message: str, user_message: str | None = None):
-        super().__init__(message)
-        self.user_message = user_message or (
-            "Le paiement n'a pas pu être initié. Réessayez."
-        )
 
 
 def _as_campay_error(fn):

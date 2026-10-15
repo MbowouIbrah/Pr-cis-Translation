@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Smartphone, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
-import { usePayment } from '../../hooks/usePayment';
+import { useTranslation } from 'react-i18next';
+import { X, Smartphone, Loader2, CheckCircle2, AlertCircle, CreditCard } from 'lucide-react';
+import { usePayment, type PayMethodId } from '../../hooks/usePayment';
 import { usePricing, formatMoney } from '../../hooks/usePricing';
-import { detectOperator, OPERATOR_LABEL, OPERATOR_COLOR } from '../../lib/mobileMoney';
+import { detectOperator, OPERATOR_LABEL, OPERATOR_COLOR, type Operator } from '../../lib/mobileMoney';
 
 interface PaymentModalProps {
   open: boolean;
@@ -17,6 +18,12 @@ interface PaymentModalProps {
   onPaid: () => void;
 }
 
+// Opérateur reconnu au numéro → moyen correspondant.
+const METHOD_OF: Record<Operator, PayMethodId> = { mtn: 'mtn_momo', orange: 'orange_money' };
+const METHOD_COLOR: Record<PayMethodId, string> = {
+  mtn_momo: OPERATOR_COLOR.mtn, orange_money: OPERATOR_COLOR.orange, card: 'var(--blue)',
+};
+
 const input: React.CSSProperties = {
   width: '100%', padding: '11px 12px 11px 38px', borderRadius: '10px',
   fontSize: '15px', outline: 'none', border: '1.5px solid var(--gray-200)',
@@ -26,9 +33,15 @@ const input: React.CSSProperties = {
 export default function PaymentModal({
   open, onClose, pages, documentId, label, onPaid,
 }: PaymentModalProps) {
+  const { t } = useTranslation();
   const { pricing } = usePricing();
-  const { phase, quote, ussdCode, operator, error, getQuote, pay, reset } = usePayment();
+  const {
+    phase, quote, methods, ussdCode, operator, error, getQuote, getMethods, pay, reset,
+  } = usePayment();
   const [phone, setPhone] = useState('');
+  const [method, setMethod] = useState<PayMethodId | null>(null);
+  const chosen = methods?.find((m) => m.id === method && m.available) ?? null;
+  const noMethod = methods !== null && !methods.some((m) => m.available);
   // Ce que le serveur facture réellement (montant minimum de l'opérateur).
   const billed = quote?.billed_pages ?? pages;
   // Taille retenue par le SERVEUR : pour un document, elle peut différer de
@@ -37,8 +50,21 @@ export default function PaymentModal({
   const op = detectOperator(phone);
 
   useEffect(() => {
-    if (open) { reset(); getQuote(pages, documentId); }
-  }, [open, pages, documentId, reset, getQuote]);
+    if (open) { reset(); getQuote(pages, documentId); getMethods(); }
+  }, [open, pages, documentId, reset, getQuote, getMethods]);
+
+  // Premier moyen disponible présélectionné : un clic de moins dans le cas
+  // courant, et jamais un moyen grisé.
+  useEffect(() => {
+    if (methods && !chosen) setMethod(methods.find((m) => m.available)?.id ?? null);
+  }, [methods, chosen]);
+
+  // Un numéro Orange tapé sous « MTN » : on suit le numéro, c'est lui qui
+  // décide de l'opérateur chez le prestataire.
+  useEffect(() => {
+    const m = op && METHOD_OF[op];
+    if (m && methods?.some((x) => x.id === m && x.available)) setMethod(m);
+  }, [op, methods]);
 
   // Fermer pendant l'attente laisserait l'utilisateur sans retour sur un
   // paiement peut-être abouti. On ne verrouille rien, mais on prévient.
@@ -48,8 +74,9 @@ export default function PaymentModal({
     e.preventDefault();
     // Campay attend un numéro international sans « + ». On retire tout ce qui
     // n'est pas un chiffre : personne ne tape son numéro de la même façon.
-    const digits = phone.replace(/\D/g, '');
-    const ok = await pay(pages, digits, documentId);
+    if (!chosen) return;
+    const digits = chosen.needs_phone ? phone.replace(/\D/g, '') : null;
+    const ok = await pay(pages, chosen.id, digits, documentId);
     if (ok) {
       onPaid();
       // On laisse la confirmation à l'écran une seconde : une fenêtre qui
@@ -68,14 +95,19 @@ export default function PaymentModal({
             style={{ position: 'fixed', inset: 0, background: 'rgba(13,27,62,0.45)',
                      zIndex: 1200, backdropFilter: 'blur(3px)' }}
           />
+          {/* Centrage par flex : `motion` réécrit `transform` pour animer
+              y/scale, un translate(-50%,-50%) y serait perdu. */}
+          <div style={{ position: 'fixed', inset: 0, zIndex: 1201, display: 'flex',
+                        alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
           <motion.div
             initial={{ opacity: 0, y: 20, scale: 0.97 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 10, scale: 0.98 }}
             style={{
-              position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
-              width: 'min(400px, 92vw)', background: 'white', borderRadius: '18px',
-              boxShadow: '0 24px 70px rgba(13,27,62,0.28)', zIndex: 1201, padding: '26px 24px',
+              position: 'relative', pointerEvents: 'auto',
+              width: 'min(400px, 92vw)', maxHeight: '92vh', overflowY: 'auto',
+              background: 'white', borderRadius: '18px',
+              boxShadow: '0 24px 70px rgba(13,27,62,0.28)', padding: '26px 24px',
             }}
           >
             {!busy && (
@@ -133,7 +165,7 @@ export default function PaymentModal({
               /* ── Saisie ─────────────────────────────────────────────────── */
               <>
                 <h2 style={{ fontSize: '18px', fontWeight: 700, margin: '0 0 4px' }}>
-                  Paiement mobile money
+                  {t('payment.title')}
                 </h2>
                 <p style={{ fontSize: '13.5px', color: 'var(--gray-500)', margin: '0 0 18px' }}>
                   {label}
@@ -180,15 +212,62 @@ export default function PaymentModal({
                 )}
 
                 <form onSubmit={submit}>
-                  <label style={{ display: 'block', fontSize: '13px', fontWeight: 500,
+                  <fieldset style={{ border: 'none', margin: '0 0 16px', padding: 0 }}>
+                    <legend style={{ fontSize: '13px', fontWeight: 500, color: 'var(--gray-700)',
+                                     marginBottom: 6, padding: 0 }}>
+                      {t('payment.method_title')}
+                    </legend>
+                    <div role="radiogroup" style={{ display: 'grid', gap: 8,
+                                                    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}>
+                      {(methods ?? []).map((m) => {
+                        const on = chosen?.id === m.id;
+                        return (
+                          <button key={m.id} type="button" role="radio" aria-checked={on}
+                            disabled={!m.available || phase === 'starting'}
+                            onClick={() => setMethod(m.id)}
+                            style={{
+                              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 5,
+                              padding: '10px 6px', borderRadius: '10px', fontFamily: 'inherit',
+                              border: `1.5px solid ${on ? 'var(--blue)' : 'var(--gray-200)'}`,
+                              background: on ? 'var(--gray-50)' : 'white',
+                              cursor: m.available ? 'pointer' : 'not-allowed',
+                              opacity: m.available ? 1 : 0.55, minHeight: 64,
+                            }}>
+                            {m.id === 'card'
+                              ? <CreditCard size={18} color="var(--gray-600)" />
+                              : <span aria-hidden style={{ width: 14, height: 14, borderRadius: '50%',
+                                                          background: METHOD_COLOR[m.id] }} />}
+                            <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--gray-800)',
+                                           lineHeight: 1.2, textAlign: 'center' }}>
+                              {t(`payment.method_${m.id}`)}
+                            </span>
+                            {!m.available && (
+                              <span style={{ fontSize: '10.5px', color: 'var(--gray-500)', lineHeight: 1.2,
+                                             textAlign: 'center' }}>
+                                {t('payment.method_soon')}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {noMethod && (
+                      <p style={{ fontSize: '12.5px', color: 'var(--gray-500)', margin: '8px 0 0' }}>
+                        {t('payment.no_method')}
+                      </p>
+                    )}
+                  </fieldset>
+
+                  {chosen?.needs_phone && (<>
+                  <label htmlFor="pay-phone" style={{ display: 'block', fontSize: '13px', fontWeight: 500,
                                   color: 'var(--gray-700)', marginBottom: 5 }}>
-                    Numéro MTN MoMo ou Orange Money
+                    {t('payment.phone_label')}
                   </label>
                   <div style={{ position: 'relative' }}>
                     <Smartphone size={15} style={{ position: 'absolute', left: 12, top: '50%',
                                                    transform: 'translateY(-50%)', color: 'var(--gray-400)' }} />
                     <input
-                      type="tel" required inputMode="tel" autoFocus value={phone}
+                      id="pay-phone" type="tel" required inputMode="tel" autoFocus value={phone}
                       onChange={(e) => setPhone(e.target.value)}
                       placeholder="6XX XX XX XX" style={input}
                       aria-describedby="pay-phone-hint"
@@ -207,16 +286,17 @@ export default function PaymentModal({
                       </>
                     ) : 'Indicatif 237 facultatif.'}
                   </p>
+                  </>)}
 
-                  <button type="submit" disabled={phase === 'starting' || !quote}
+                  <button type="submit" disabled={phase === 'starting' || !quote || !chosen}
                     style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center',
                              gap: 8, padding: '12px', borderRadius: '10px', border: 'none',
                              background: 'var(--blue)', color: 'white', fontWeight: 600,
                              fontSize: '14.5px', cursor: 'pointer', fontFamily: 'inherit',
-                             opacity: phase === 'starting' || !quote ? 0.6 : 1 }}>
+                             opacity: phase === 'starting' || !quote || !chosen ? 0.6 : 1 }}>
                     {phase === 'starting'
                       ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
-                      : <Smartphone size={16} />}
+                      : chosen?.id === 'card' ? <CreditCard size={16} /> : <Smartphone size={16} />}
                     Payer {quote && pricing
                       ? formatMoney(quote.amount, quote.currency, pricing.decimals, 'fr')
                       : ''}
@@ -225,6 +305,7 @@ export default function PaymentModal({
               </>
             )}
           </motion.div>
+          </div>
         </>
       )}
     </AnimatePresence>

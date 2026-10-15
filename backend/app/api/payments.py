@@ -23,8 +23,10 @@ from app.core.security import require_auth
 from app.core.pricing import (zone_for_country, CURRENCY, page_price,
                                billable_pages, MIN_PAYMENT_AMOUNT)
 from app.services.documents import count_pages
-from app.core.payment_gateway import (campay, CampayError, SUPPORTED_CURRENCY,
-                           normalize_phone)
+from app.core.payment_gateway import (campay, CampayError, ProviderError,
+                                      normalize_phone)
+from app.core.payment_methods import (MTN_MOMO, PHONE_METHODS, PROVIDERS,
+                                      list_methods, method_of_phone, provider_for)
 
 logger = logging.getLogger(__name__)
 
@@ -112,10 +114,25 @@ async def quote(body: QuoteBody, request: Request, user: User = Depends(require_
     }
 
 
+@router.get("/methods")
+async def methods(request: Request, user: User = Depends(require_auth)):
+    """Moyens de paiement de la zone du client, disponibles ou non.
+
+    Tous sont listés : un moyen indisponible s'affiche grisé « pas encore
+    disponible » plutôt que de disparaître, le client sait ce qui viendra."""
+    currency = CURRENCY[_zone_of(request)]
+    return {"currency": currency, "methods": list_methods(currency)}
+
+
 class CollectBody(BaseModel):
     pages: int = Field(..., ge=1, le=MAX_PAGES_PER_PAYMENT)
-    # Numéro au format international sans « + » (ex. 237670000000).
-    phone: str = Field(..., min_length=9, max_length=15)
+    # Moyen choisi par le client (cf. `payment_methods.METHODS`). Absent :
+    # ancien client, mobile money — Campay ne distingue pas MTN d'Orange,
+    # c'est le numéro qui décide de l'opérateur.
+    method: str = MTN_MOMO
+    # Numéro au format international sans « + » (ex. 237670000000). Exigé
+    # pour le mobile money seulement.
+    phone: str | None = Field(None, min_length=9, max_length=15)
     # Paiement destiné à débloquer un document DÉJÀ traduit (la traduction
     # offerte, typiquement). Absent = achat de pages d'avance.
     document_id: str | None = None
@@ -132,12 +149,27 @@ async def collect(body: CollectBody, request: Request,
     Le client interroge ensuite `GET /api/payments/{id}`.
     """
     zone = _zone_of(request)
-    if CURRENCY[zone] != SUPPORTED_CURRENCY:
-        # Campay n'encaisse qu'en francs CFA. Le dire franchement vaut mieux
-        # que de convertir en douce un prix affiché en euros.
+    method = body.method
+    # Normalisé ICI, une fois : ce qui part chez Campay et ce qu'on enregistre
+    # doivent être le même numéro. Le faire côté navigateur laisserait les deux
+    # diverger dès qu'un autre client appellerait l'API.
+    phone = normalize_phone(body.phone) if body.phone else None
+    if method in PHONE_METHODS:
+        if not phone:
+            raise HTTPException(status_code=422, detail="Numéro de téléphone requis.")
+        # Le numéro, pas la tuile cochée, décide de l'opérateur chez le
+        # prestataire : un numéro Orange envoyé sous « MTN » sera encaissé par
+        # Orange Money, c'est donc ce moyen-là qui doit être ouvert.
+        method = method_of_phone(phone) or method
+    provider, reason = provider_for(method, CURRENCY[zone])
+    if provider is None:
+        # Moyen affiché grisé dans l'interface : n'y arriver que par l'API.
+        # Une devise que le prestataire n'encaisse pas se refuse franchement,
+        # plutôt que de convertir en douce un prix affiché en euros.
+        logger.info("Moyen %s refusé (%s, zone %s)", method, reason, zone)
         raise HTTPException(
-            status_code=501,
-            detail="Le paiement mobile money n'est disponible que dans la zone FCFA.",
+            status_code=501 if reason == "currency" else 409,
+            detail="Ce moyen de paiement n'est pas encore disponible.",
         )
 
     doc = await _owned_unpaid_document(db, user, body.document_id)
@@ -149,10 +181,6 @@ async def collect(body: CollectBody, request: Request,
     # compte les pages payées au-delà du document.
     billed = billable_pages(zone, pages)
     amount = page_price(zone) * billed
-    # Normalisé ICI, une fois : ce qui part chez Campay et ce qu'on enregistre
-    # doivent être le même numéro. Le faire côté navigateur laisserait les deux
-    # diverger dès qu'un autre client appellerait l'API.
-    phone = normalize_phone(body.phone)
 
     # La trace existe AVANT l'appel. Si le réseau coupe juste après que Campay
     # a débité le client, on a de quoi réconcilier ; l'inverse perd l'argent
@@ -160,27 +188,27 @@ async def collect(body: CollectBody, request: Request,
     payment = Payment(
         user_id=user.id, document_id=body.document_id, pages=billed,
         amount=amount, currency=CURRENCY[zone], zone=zone,
-        phone=phone, status="PENDING",
+        phone=phone, status="PENDING", provider=provider.name,
     )
     db.add(payment)
     await db.commit()
     await db.refresh(payment)
 
     try:
-        res = await campay.collect(
-            amount=amount, phone=phone,
-            description=f"Précis — {billed} page(s)",
-            external_reference=payment.id,
+        res = await provider.start(
+            amount=amount, currency=payment.currency, phone=phone,
+            description=f"Précis — {billed} page(s)", reference=payment.id,
         )
-    except CampayError as e:
+    except ProviderError as e:
         # On journalise le détail, on n'en montre rien : la réponse d'un
         # fournisseur de paiement peut contenir des éléments de compte.
-        logger.warning("Campay collect échoué (paiement %s) : %s", payment.id, e)
+        logger.warning("%s : encaissement échoué (paiement %s) : %s",
+                       provider.name, payment.id, e)
         payment.status = "FAILED"
         await db.commit()
         raise HTTPException(status_code=502, detail=e.user_message)
 
-    payment.provider_ref = res.get("reference")
+    payment.provider_ref = res.get("provider_ref")
     await db.commit()
 
     return {
@@ -257,16 +285,17 @@ async def payment_status(payment_id: str, user: User = Depends(require_auth),
     # ne jamais arriver (pare-feu, environnement de développement sans URL
     # publique). Ne dépendre QUE du webhook, c'est laisser des clients payés
     # sans rien recevoir.
-    if payment.status == "PENDING" and payment.provider_ref:
+    provider = PROVIDERS.get(payment.provider)
+    if payment.status == "PENDING" and payment.provider_ref and provider:
         try:
-            res = await campay.transaction_status(payment.provider_ref)
-            new_status = res.get("status", "PENDING")
+            new_status = await provider.status(payment.provider_ref)
             if new_status != payment.status:
                 payment.status = new_status
                 await db.commit()
                 await _apply_credit(db, payment)
-        except CampayError as e:
-            logger.warning("Statut Campay indisponible (%s) : %s", payment_id, e)
+        except ProviderError as e:
+            logger.warning("Statut %s indisponible (%s) : %s",
+                           payment.provider, payment_id, e)
 
     return {
         "payment_id": payment.id,
@@ -335,6 +364,11 @@ async def campay_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         return {"ok": True}
 
     if payment.status != "PENDING" or not payment.provider_ref:
+        return {"ok": True}
+    if payment.provider != "campay":
+        # Campay n'a rien à dire d'un paiement d'un autre prestataire.
+        logger.warning("Webhook Campay pour un paiement %s : %s",
+                       payment.provider, payment.id)
         return {"ok": True}
 
     try:
