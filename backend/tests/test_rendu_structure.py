@@ -1,4 +1,8 @@
-"""Un document en mode STRUCTURE se rouvre en mode structure.
+"""Rouvrir un document reconstruit le rendu depuis ses SAUVEGARDES.
+
+Original + JSON stocké suffisent : rouvrir ne doit jamais rappeler l'IA
+(crédits), ni ré-extraire les pages (temps), et le rendu de fin de job doit
+être gardé pour que la réouverture n'ait même pas à reconstruire.
 
 LE DÉFAUT QUE CETTE SUITE VERROUILLE
 ------------------------------------
@@ -23,8 +27,13 @@ import fitz
 
 import racine  # noqa: F401  -- met backend/ sur le chemin
 
-from app.services.translation_runner import render_translation_bytes  # noqa: E402
+from app.services import render_cache  # noqa: E402
+from app.services.jobs import jobs  # noqa: E402
+from app.services.translation_runner import (  # noqa: E402
+    render_translation_bytes, run_pdf_v2_job)
 from engines.pdf import stream as pdf_v2_stream  # noqa: E402
+from engines.translation_ai import TranslatorAI  # noqa: E402
+from engines.pdf.engine import PDFObjectEngine  # noqa: E402
 
 resultats: list[bool] = []
 
@@ -77,6 +86,51 @@ with tempfile.TemporaryDirectory() as tmp:
         sans = [len(p.get_drawings()) for p in r]
     check("NORMAL   une traduction ordinaire ne trace aucun contour", sans == orig,
           f"original {orig}, rendu {sans}")
+
+# ── Réouverture = aucune IA, aucune extraction ─────────────────────────────
+appels = {"ia": 0, "extraction": 0}
+
+
+def _ia_factice(self, batch, lang_name, progress=None):
+    appels["ia"] += 1
+    for b in batch:
+        b["translated_text"] = b["text"].upper()
+
+
+_extraire = PDFObjectEngine.extract_page_data
+
+
+def _extraction_comptee(self, *a, **k):
+    appels["extraction"] += 1
+    return _extraire(self, *a, **k)
+
+
+TranslatorAI._translate_batch = _ia_factice
+PDFObjectEngine.extract_page_data = _extraction_comptee
+
+with tempfile.TemporaryDirectory() as tmp:
+    original = os.path.join(tmp, "original.pdf")
+    _pdf_synthetique(original)
+    for nom, debug in (("pages.json", False), ("pages_debug.json", True)):
+        mode = "STRUCTURE" if debug else "TRADUIT  "
+        cache = os.path.join(tmp, nom)
+        # Le job, avec ses vrais chemins : il doit garder son rendu.
+        job_id = jobs.create()
+        sortie = os.path.join(tmp, f"render_{job_id[:8]}.pdf")
+        run_pdf_v2_job(job_id, b"", original, sortie,
+                       f"doc_{mode.strip()}_p1.pdf",
+                       os.path.join(tmp, f"partial_{job_id[:8]}.pdf"),
+                       cache, "en", None, debug)
+        check(f"{mode} le job s'est terminé", os.path.isfile(sortie))
+        check(f"{mode} le rendu du job est gardé pour la réouverture",
+              render_cache.cache_valid(cache) is not None)
+
+        appels.update(ia=0, extraction=0)
+        render_translation_bytes(original, cache, "pdf", "en")
+        check(f"{mode} rouvrir ne rappelle pas l'IA", appels["ia"] == 0,
+              f"{appels['ia']} lot(s)")
+        check(f"{mode} rouvrir ne ré-extrait aucune page",
+              appels["extraction"] == 0, f"{appels['extraction']} page(s)")
 
 print(f"\n  {sum(resultats)}/{len(resultats)}")
 sys.exit(0 if all(resultats) else 1)

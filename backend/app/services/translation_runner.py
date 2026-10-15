@@ -664,17 +664,20 @@ def run_pdf_v2_job(
         # Le rendu complet vient d'être produit — on le CONSERVE au lieu de le
         # laisser au GC des transitoires. C'est lui qui rend l'aperçu et le
         # téléchargement instantanés ensuite (mesuré : 280 s à reconstruire
-        # sur 285 pages). Seule la sortie CANONIQUE est conservée : un rendu
-        # de débogage ou remis en page ne doit jamais être resservi comme la
-        # traduction fidèle.
-        if not debug and "_STRUCTURE" not in output_filename \
-                and output_filename.endswith(".pdf") \
-                and "_TRADUIT." in output_filename:
-            try:
-                with open(output_path, "rb") as f:
-                    render_cache.store_render(f.read(), translation_path)
-            except OSError as e:
-                logger.warning("Rendu du job non conservé : %s", e)
+        # sur 285 pages).
+        #
+        # On le conserve pour TOUT job PDF. Le filtre « sortie canonique »
+        # (`_TRADUIT.` dans le nom) écartait aussi la qualité précise, les
+        # plages de pages et le mode structure : leur première réouverture
+        # refaisait un rendu identique à celui-ci. Aucun mélange possible : la
+        # clé est `translation_path`, qui porte déjà la qualité, la plage et
+        # `_debug` ; et ce moteur ne reçoit pas les options de mise en forme,
+        # donc son rendu est exactement celui que recalculerait l'aperçu.
+        try:
+            with open(output_path, "rb") as f:
+                render_cache.store_render(f.read(), translation_path)
+        except OSError as e:
+            logger.warning("Rendu du job non conservé : %s", e)
 
         jobs.done(job_id, output_path, output_filename,
                   translation_path=translation_path)

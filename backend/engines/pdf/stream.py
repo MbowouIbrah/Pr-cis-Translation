@@ -121,9 +121,12 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
                 continue
 
             page_data = cached_pages.get(human)
-            has_translation = bool(page_data) and any(
+            # En mode structure, l'EXTRACTION sauvegardée suffit : elle n'a pas
+            # de `tr_tagged` à attendre. Sans ce cas, chaque réouverture
+            # ré-extrayait toutes les pages et réécrivait le cache.
+            has_translation = bool(page_data) and (debug or any(
                 e.get("tr_tagged") for e in page_data.get("elements", [])
-                if e.get("type") == "paragraph")
+                if e.get("type") == "paragraph"))
             if not has_translation:
                 _emit(on_event, {"type": "page", "page": human,
                                  "status": "extracting",
