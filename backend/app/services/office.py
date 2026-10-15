@@ -47,7 +47,13 @@ def convert_to_pdf_bytes(file_bytes: bytes, ext: str,
         cache_path = os.path.join(PREVIEW_CACHE_DIR, f"{file_hash}.pdf")
         if os.path.exists(cache_path):
             with open(cache_path, "rb") as f:
-                return f.read()
+                data = f.read()
+            # Servi = récent : la borne du cache efface d'abord les plus anciens.
+            try:
+                os.utime(cache_path)
+            except OSError:
+                pass
+            return data
 
     from engines.office import convert_to_pdf
     data = convert_to_pdf(file_bytes, ext)
@@ -55,4 +61,6 @@ def convert_to_pdf_bytes(file_bytes: bytes, ext: str,
     if cache_path:
         with open(cache_path, "wb") as f:
             f.write(data)
+        from app.services.stockage import limiter_apercus
+        limiter_apercus()
     return data

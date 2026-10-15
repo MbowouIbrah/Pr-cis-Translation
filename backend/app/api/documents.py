@@ -14,7 +14,7 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import TRANSLATIONS_DIR, logger
-from app.services import render_cache
+from app.services import render_cache, stockage
 from app.services.jobs import jobs
 from app.services.office import convert_to_pdf_bytes
 from app.services.translation_runner import render_translation_bytes
@@ -106,11 +106,26 @@ async def _purge_if_orphan(db: AsyncSession, path: str) -> bool:
     conservateur, mais de la rétention de disque plutôt que la perte du
     fichier d'autrui.
     """
-    if not _inside_store(path):
+    if await _racine_orpheline(db, path) is None:
         return False
+    real = os.path.realpath(path)
+    if not os.path.isfile(real):
+        return False
+    try:
+        os.remove(real)
+    except OSError:
+        return False
+    _prune_empty_dirs(os.path.dirname(real))
+    return True
+
+
+async def _racine_orpheline(db: AsyncSession, path: str) -> str | None:
+    """Racine du job de `path` si plus AUCUN Document n'y renvoie, sinon None."""
+    if not _inside_store(path):
+        return None
     racine = _job_root(path)
     if racine is None:
-        return False
+        return None
     prefixe = racine + os.sep
     refs = await db.execute(
         select(func.count()).select_from(Document).where(
@@ -123,16 +138,8 @@ async def _purge_if_orphan(db: AsyncSession, path: str) -> bool:
         )
     )
     if (refs.scalar() or 0) > 0:
-        return False                      # quelqu'un d'autre tient encore au job
-    real = os.path.realpath(path)
-    if not os.path.isfile(real):
-        return False
-    try:
-        os.remove(real)
-    except OSError:
-        return False
-    _prune_empty_dirs(os.path.dirname(real))
-    return True
+        return None                       # quelqu'un d'autre tient encore au job
+    return racine
 
 
 def _prune_empty_dirs(start: str) -> None:
@@ -547,7 +554,6 @@ async def delete_document(
     # faisait descendre `storage_used` sous la réalité à chaque suppression.
     charge = doc.storage_charged or 0
     original_path = doc.original_path
-    translated_path = doc.translated_path
     await db.delete(doc)
 
     # Libérer le quota
@@ -557,10 +563,14 @@ async def delete_document(
     # Purge par comptage de références. Le commit ci-dessus est INDISPENSABLE
     # avant de compter : tant que la suppression n'est pas validée, la ligne
     # courante se compterait elle-même et rien ne serait jamais orphelin.
+    #
+    # C'est TOUT le dossier du job qui part, pas les deux seuls chemins connus
+    # de la base : rendus en cache, extractions, autres plages et sorties de
+    # job restaient sinon sur le disque pour toujours (mesuré : 70 Mo sur 90).
     purged = 0
-    for path in (translated_path, original_path):
-        if path and await _purge_if_orphan(db, path):
-            purged += 1
+    racine = await _racine_orpheline(db, original_path)
+    if racine and stockage.purger_racine(racine):
+        purged = 1
 
     return {"message": "Document supprimé.", "storage_freed": charge,
             "files_purged": purged}

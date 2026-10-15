@@ -24,6 +24,7 @@ from app.core.database import async_session                      # noqa: E402
 from app.models import User, Document                       # noqa: E402
 from app.api.documents import (                          # noqa: E402
     STORAGE_BASE, _purge_if_orphan, _inside_store, _prune_empty_dirs,
+    delete_document,
 )
 
 import racine  # noqa: F401
@@ -135,6 +136,38 @@ async def run():
         ok("FENÊTRE  B traduit (translated NULL) : le rendu partagé survit",
            purge_trad is False and os.path.isfile(ctx["trad"]),
            "un comptage au fichier près purgeait le rendu en cours de production")
+    finally:
+        await _demonter(ctx)
+
+    # ── Suppression : TOUT le dossier part avec le dernier document ───────────
+    # Avant, seuls les deux chemins connus de la base partaient : rendus en
+    # cache, extraction, autres plages et sorties de job restaient pour toujours.
+    def _annexes(ctx):
+        d = os.path.dirname(ctx["trad"])
+        chemins = [ctx["trad"] + ".render.v1.0.4.pdf",
+                   os.path.join(ctx["racine"], "extraction.json"),
+                   os.path.join(d, "pages_p1.json"),
+                   os.path.join(d, "render_p1_6fca45f9.pdf")]
+        for p in chemins:
+            with open(p, "wb") as f:
+                f.write(b"annexe")
+        return chemins
+
+    async def _supprimer(ctx, i):
+        async with async_session() as db:
+            u = await db.get(User, ctx["users"][i])
+            return await delete_document(ctx["ids"][i], user=u, db=db)
+
+    ctx = await _monter_partage()
+    try:
+        annexes = _annexes(ctx)
+        await _supprimer(ctx, 0)
+        ok("SUPPR  B tient encore au job : rien n'est effacé, annexes comprises",
+           all(map(os.path.isfile, annexes + [ctx["trad"], ctx["orig"]])))
+        r = await _supprimer(ctx, 1)
+        ok("SUPPR  le dernier document parti : le dossier ENTIER disparaît",
+           not os.path.exists(ctx["racine"]) and r["files_purged"] == 1,
+           str(r))
     finally:
         await _demonter(ctx)
 

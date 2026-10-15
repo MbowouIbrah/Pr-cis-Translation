@@ -133,6 +133,14 @@ os.makedirs(TRANSLATIONS_DIR, exist_ok=True)
 # headless. La conversion ne sert QUE l'aperçu — le téléchargement garde le
 # format d'origine. Résultats mis en cache disque (clé = hash du contenu).
 PREVIEW_CACHE_DIR = os.path.join(TRANSLATIONS_DIR, "_previews")
+# Plafond de ce cache : au-delà, les conversions les moins récemment servies
+# sont effacées (elles se refont à la demande). Sans borne, il ne faisait que
+# grossir.
+PREVIEW_CACHE_MAX_BYTES = int(os.getenv("PREVIEW_CACHE_MAX_MB", "500")) * 1024 * 1024
+# Une traduction que plus aucun Document ne cite est effacée au démarrage passé
+# ce délai : le temps qu'une relance après échec reprenne les pages déjà
+# traduites (et payées en appels IA) au lieu de tout refaire.
+TRADUCTION_ORPHELINE_GRACE_S = int(os.getenv("TRADUCTION_ORPHELINE_GRACE_JOURS", "7")) * 86400
 
 # ── Rétention des jobs ───────────────────────────────────────────────────────
 # Un job terminé reste consultable (partiel/résultat) pendant cette durée, puis
