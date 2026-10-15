@@ -2236,31 +2236,48 @@ footer {
     box-sizing: border-box;
   }
 
-  /* ── APERÇU (normal) : tenir EXACTEMENT sur une hauteur d'écran ──────────
-     `.app` fait déjà `calc(100vh - var(--nav-h))`. Il suffit donc que la
-     section d'aperçu ne garde en haut que le dégagement de la navbar (et rien
-     en bas) : navbar (72) + app (100vh-72) = 100vh pile → la section snappe
-     proprement, sans débordement. */
-  html.preview-active .story-band {
-    padding-top: var(--nav-h) !important;
-    padding-bottom: 0 !important;
-    justify-content: flex-start;
-  }
-
-  /* ── MODE AGRANDI (focus) : l'aperçu prend tout le cadre sous la navbar ──
-     Surcouche fixe, pleine largeur (on retire le cadre de 1240px pour exploiter
-     l'écran), snap coupé (géré sur `html.preview-focus` plus haut). */
-  html.preview-focus .story-band {
-    position: fixed;
-    inset: var(--nav-h) 0 0 0;
-    z-index: 900;
-    min-height: 0;
-    padding: 0 !important;
-  }
+  /* ── MODE AGRANDI (focus) : pleine largeur, on retire le cadre de 1240px ── */
   html.preview-focus .story-band .section-inner {
     max-width: none !important;
     padding: 0 !important;
   }
+}
+
+/* ── APERÇU : une vue à part entière, à toutes les largeurs ──────────────────
+   L'aperçu ne vit plus DANS le défilement de la page : la section devient une
+   surcouche fixe sous la navbar, exactement à la hauteur de l'écran. La page
+   derrière ne défile plus ; seul le document défile (`.scroll`). `inset` et non
+   `100vh` : sur mobile, 100vh inclut la barre d'adresse et coupait le bas.
+   `!important` sur `position` : la section porte `position: relative` en ligne. */
+html.preview-active,
+html.preview-active body {
+  overflow: hidden;
+  scroll-snap-type: none;
+}
+html.preview-active .story-band {
+  position: fixed !important;
+  inset: var(--nav-h) 0 0 0;
+  z-index: 900;
+  height: auto;
+  min-height: 0;
+  padding: 0 !important;
+}
+html.preview-active .story-band .section-inner {
+  height: 100%;
+  min-height: 0;
+}
+html.preview-active .content-viewer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+html.preview-active .app {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+html.preview-active .scroll {
+  overscroll-behavior: contain;
 }
 
 /* ============================

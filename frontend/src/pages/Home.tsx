@@ -125,6 +125,17 @@ export default function Home() {
     };
   }, [showPreview, previewFocus]);
 
+  // L'aperçu est une surcouche fixe (index.css) : l'ouvrir ne demande plus de
+  // défiler jusqu'à lui. En le fermant, on revient sur le formulaire de
+  // traduction, quel que soit l'endroit d'où l'aperçu a été ouvert.
+  const apercuEtaitOuvert = useRef(false);
+  useEffect(() => {
+    if (apercuEtaitOuvert.current && !showPreview) {
+      document.getElementById('story')?.scrollIntoView({ behavior: 'instant' });
+    }
+    apercuEtaitOuvert.current = showPreview;
+  }, [showPreview]);
+
   const toggleFocus = useCallback(() => setPreviewFocus((v) => !v), []);
 
   // ---- Nav click handler ----
@@ -218,10 +229,6 @@ export default function Home() {
       setCurrentPage(1);
       setPreviewLoading(true);
       setShowLibrary(false);
-      // Ramener l'utilisateur sur la section de traduction AVANT d'ouvrir
-      // l'aperçu : s'il était sur les tarifs ou à propos, le panneau de
-      // prévisualisation s'ouvrirait hors de l'écran sans ce scroll.
-      document.getElementById('story')?.scrollIntoView({ behavior: 'smooth' });
       setShowPreview(true);   // ← l'aperçu est visible AVANT le premier octet
 
       // La source arrive DÉJÀ CONVERTIE en PDF (`?as=pdf`) : le panneau gauche
@@ -247,8 +254,6 @@ export default function Home() {
       if (!blob) return;
       const file = new File([blob], doc.originalName);
       deleteDocument(doc.id);
-      // Scroll vers la section de traduction avant de lancer
-      document.getElementById('story')?.scrollIntoView({ behavior: 'smooth' });
       handleStartTranslate({
         file,
         targetLang: doc.targetLang,
