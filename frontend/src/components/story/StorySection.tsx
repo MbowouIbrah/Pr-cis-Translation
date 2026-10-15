@@ -3,7 +3,7 @@ import { motion, useScroll, useTransform } from 'motion/react';
 import { useRef } from 'react';
 import TranslationSection from '../upload/TranslationSection';
 import type { TranslateConfig } from '../upload/TranslationSection';
-import ViewerToolbar, { PageNav } from '../preview/ViewerToolbar';
+import ViewerToolbar from '../preview/ViewerToolbar';
 import DocumentPreview from '../preview/DocumentPreview';
 import type { PageStatus } from '../../hooks/useStreamingTranslation';
 import { baseCode } from '../../lib/languages';
@@ -474,9 +474,6 @@ export default function StorySection({
                       onBuyPages={onBuyPages}
                     />
                   </div>
-                  {/* Téléphone : pagination sous le document, barre fine. */}
-                  <PageNav className="viewer-pied" currentPage={currentPage}
-                    numPages={numPages} onPageChange={onPageChange} />
                 </div>
               </div>
             </div>

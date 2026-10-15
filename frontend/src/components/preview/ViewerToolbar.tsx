@@ -239,9 +239,9 @@ export default function ViewerToolbar({
   );
 }
 
-/** Pagination ‹ n / N ›. Dans la barre du haut sur grand écran ; sur téléphone,
- *  dans la barre fine sous le document (`.viewer-pied`, voir index.css). */
-export function PageNav({ className, currentPage, numPages, onPageChange }: {
+/** Pagination ‹ n / N › de la barre du haut. Sur téléphone, masquée : la bande
+ *  de miniatures sous le document en tient lieu (voir index.css). */
+function PageNav({ className, currentPage, numPages, onPageChange }: {
   className: string;
   currentPage: number;
   numPages: number;
