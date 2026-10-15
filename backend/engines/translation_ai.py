@@ -13,14 +13,88 @@ except ImportError:                             # ... ou à plat (sys.path backe
 
 load_dotenv()
 
+class FournisseursIndisponibles(Exception):
+    """Aucun fournisseur ne peut répondre (solde, clé ou quota épuisés).
+    Ni une relance ni une scission du lot n'y changent rien : on s'arrête."""
+
+
+# ── Fournisseurs de traduction ───────────────────────────────────────────────
+#
+# Un solde épuisé (402) bloquait TOUTE l'app, et pire : l'erreur était traitée
+# comme un incident passager — 3 relances, puis scission du lot en deux,
+# récursivement, soit des dizaines d'appels voués à l'échec par page.
+#
+# Ces statuts disent que CE fournisseur ne répondra pas tout de suite. On le
+# met donc hors service un moment et on passe au suivant, sans relancer.
+# Durées : un quota par minute (429) se rouvre vite ; un solde ou une clé
+# (401/402/403) demande une action humaine, inutile de réessayer avant.
+_HORS_SERVICE_S = {401: 600, 402: 600, 403: 600, 429: 60}
+
+# Échéances PARTAGÉES par nom de fournisseur : le moteur PDF crée un
+# TranslatorAI par page ; un état porté par l'instance oublierait le 402 à la
+# page suivante et redépenserait une requête (et du quota) pour le réapprendre.
+_hors_service: dict[str, float] = {}
+
+
+class _Fournisseur:
+    def __init__(self, nom, client, modele=None, modeles_secours=(),
+                 max_sortie=None):
+        self.nom = nom
+        self.client = client
+        # None = le modèle demandé par l'appelant (DeepSeek : rapide/précis).
+        # Un secours a SON modèle : un nom DeepSeek n'existe pas ailleurs.
+        self.modele = modele
+        self.modeles_secours = list(modeles_secours)
+        self.max_sortie = max_sortie
+
+    @property
+    def hors_service_jusqua(self):
+        return _hors_service.get(self.nom, 0.0)
+
+    @hors_service_jusqua.setter
+    def hors_service_jusqua(self, t):
+        _hors_service[self.nom] = t
+
+
+def _fournisseurs_depuis_env():
+    """Chaîne ordonnée : DeepSeek (principal) puis OpenRouter (secours).
+    `TRADUCTION_FOURNISSEURS` (ex. « openrouter,deepseek ») réordonne ou
+    restreint la chaîne — le banc de comparaison s'en sert."""
+    dispo = {}
+    cle = os.getenv("DEEPSEEK_API_KEY")
+    if cle:
+        dispo["deepseek"] = _Fournisseur("deepseek", OpenAI(
+            api_key=cle,
+            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            timeout=120.0))
+    cle = os.getenv("OPENROUTER_API_KEY")
+    if cle:
+        # Plusieurs modèles : OpenRouter essaie le suivant si le premier est
+        # indisponible chez son hébergeur (paramètre `models`). Le quota
+        # quotidien des modèles :free, lui, est commun au compte.
+        modeles = [m.strip() for m in os.getenv(
+            "OPENROUTER_MODELS", "google/gemma-4-31b-it:free").split(",")
+            if m.strip()]
+        dispo["openrouter"] = _Fournisseur(
+            "openrouter",
+            OpenAI(api_key=cle,
+                   base_url=os.getenv("OPENROUTER_BASE_URL",
+                                      "https://openrouter.ai/api/v1"),
+                   timeout=180.0,
+                   default_headers={"X-Title": os.getenv("BRAND_NAME", "PRÉCIS")}),
+            modele=modeles[0], modeles_secours=modeles[1:],
+            max_sortie=int(os.getenv("OPENROUTER_MAX_TOKENS", "32768")))
+    ordre = [n.strip() for n in os.getenv(
+        "TRADUCTION_FOURNISSEURS", "deepseek,openrouter").split(",") if n.strip()]
+    return [dispo[n] for n in ordre if n in dispo]
+
+
 class TranslatorAI:
     def __init__(self):
-        api_key = os.getenv("DEEPSEEK_API_KEY")
-        if not api_key:
-            raise ValueError("La clé DEEPSEEK_API_KEY est manquante dans le fichier .env")
-
-        base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+        self.fournisseurs = _fournisseurs_depuis_env()
+        if not self.fournisseurs:
+            raise ValueError("Aucune clé d'API de traduction (DEEPSEEK_API_KEY "
+                             "ou OPENROUTER_API_KEY) dans le fichier .env")
         # Modèle de REPLI (fallback). Le vrai choix se fait PAR REQUÊTE via le
         # paramètre `quality` du formulaire (rapide vs précis) : app.py sélectionne
         # le modèle et le passe à translate_json(). Ici, défaut = rapide/stable.
@@ -105,6 +179,41 @@ class TranslatorAI:
             text = text.split("```")[1].split("```")[0]
         return text.strip()
 
+    def _appel(self, messages, model, max_tokens, progress_callback):
+        """Un appel de complétion, sur le premier fournisseur en service."""
+        fournisseurs = getattr(self, "fournisseurs", None)
+        if fournisseurs is None:
+            # Instance montée à la main (tests) : un seul client, sans chaîne.
+            return self.client.chat.completions.create(
+                model=model or self.model, messages=messages, temperature=0.1,
+                max_tokens=max_tokens, response_format={"type": "json_object"})
+        ecartes = []
+        for f in fournisseurs:
+            if time.monotonic() < f.hors_service_jusqua:
+                ecartes.append(f"{f.nom} (hors service)")
+                continue
+            kw = dict(model=f.modele or model or self.model, messages=messages,
+                      temperature=0.1, max_tokens=max_tokens,
+                      response_format={"type": "json_object"})
+            if f.max_sortie:
+                kw["max_tokens"] = min(max_tokens, f.max_sortie)
+            if f.modeles_secours:
+                kw["extra_body"] = {"models": [f.modele] + f.modeles_secours}
+            try:
+                return f.client.chat.completions.create(**kw)
+            except Exception as e:
+                statut = getattr(e, "status_code", None)
+                if statut not in _HORS_SERVICE_S:
+                    raise                     # incident passager : relance
+                f.hors_service_jusqua = time.monotonic() + _HORS_SERVICE_S[statut]
+                ecartes.append(f"{f.nom} ({statut})")
+                if progress_callback:
+                    progress_callback(f"Fournisseur {f.nom} indisponible "
+                                      f"({statut}) : bascule sur le suivant.")
+        raise FournisseursIndisponibles(
+            "Aucun fournisseur de traduction disponible (solde, clé ou quota "
+            "épuisé) : " + ", ".join(ecartes))
+
     def _translate_batch(self, batch, target_lang, progress_callback, retries=3,
                          model=None, max_tokens=8192, passes=1):
         """`passes` : passes de QUALITÉ encore autorisées (cf. _passe_qualite).
@@ -145,21 +254,15 @@ class TranslatorAI:
 
         for attempt in range(retries):
             try:
-                response = self.client.chat.completions.create(
-                    model=model or self.model,
-                    messages=[
-                        {"role": "system", "content": self.system_instruction},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.1,
-                    # max_tokens dépend du mode (passé par translate_json) :
-                    #  • rapide (non-raisonnant)  → 8192 suffit ;
-                    #  • précis (raisonnement)    → 65536, car le modèle consomme
-                    #    d'abord ~12-14k tokens de "réflexion" AVANT d'écrire la
-                    #    réponse ; un budget trop bas tronque tout avant la sortie.
-                    max_tokens=max_tokens,
-                    response_format={"type": "json_object"}
-                )
+                # max_tokens dépend du mode (passé par translate_json) :
+                #  • rapide (non-raisonnant)  → 8192 suffit ;
+                #  • précis (raisonnement)    → 65536, car le modèle consomme
+                #    d'abord ~12-14k tokens de "réflexion" AVANT d'écrire la
+                #    réponse ; un budget trop bas tronque tout avant la sortie.
+                response = self._appel(
+                    [{"role": "system", "content": self.system_instruction},
+                     {"role": "user", "content": prompt}],
+                    model, max_tokens, progress_callback)
 
                 # Réponse coupée à max_tokens : le JSON est tronqué, inutile de
                 # réessayer le même lot — on le scinde en deux directement.
@@ -183,9 +286,11 @@ class TranslatorAI:
 
                 content = response.choices[0].message.content
                 if not content:
-                    raise ValueError("Réponse vide de DeepSeek.")
+                    raise ValueError("Réponse vide du modèle.")
 
-                translated_data = json.loads(content)
+                # Un modèle de secours peut ignorer `response_format` et
+                # entourer le JSON d'une clôture ```json.
+                translated_data = json.loads(self._clean_json_text(content))
 
                 # Le modèle ne respecte pas toujours {"translations": [...]} :
                 # il renvoie parfois une liste à la racine, ou un objet avec une
@@ -233,6 +338,11 @@ class TranslatorAI:
                                     retries, model, max_tokens, passes)
                 return True
 
+            except FournisseursIndisponibles as e:
+                # Ni relance ni scission : chaque morceau échouerait pareil.
+                if progress_callback:
+                    progress_callback(f"⚠️ {e}")
+                return False
             except Exception as e:
                 if progress_callback:
                     progress_callback(f"⚠️ Erreur lot (tentative {attempt+1}/{retries}) : {e}")
