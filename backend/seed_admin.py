@@ -1,54 +1,66 @@
-r"""Seed : promeut mbowouibrah@gmail.com en admin (compte existant ou creation).
+r"""Amorcage du compte administrateur : le cree, ou le promeut s'il existe.
 
-Usage unique :
+Idempotent : lance a chaque demarrage du conteneur (docker-entrypoint.sh),
+apres les migrations. Une base neuve en production a donc son admin des le
+premier demarrage, sans console ni requete SQL a la main.
+
+L'adresse vient de ADMIN_EMAIL (defaut : mbowouibrah@gmail.com). Le compte n'a
+pas de mot de passe : il se connecte par code envoye par e-mail, ou par Google.
+
+A la main :
     backend\venv\Scripts\python.exe backend\seed_admin.py
+    docker compose exec backend python seed_admin.py
 
-Sans accents ni emoji : la console Windows est en cp1252, et un caractere hors
-de cette page fait planter le script APRES que la base a ete modifiee -- une
-erreur qui ment alors sur ce qui s'est reellement passe.
+Sans accents ni emoji dans les sorties : la console Windows est en cp1252, et
+un caractere hors de cette page fait planter le script APRES que la base a ete
+modifiee -- une erreur qui ment alors sur ce qui s'est reellement passe.
 """
-import os, asyncio
+import os
+import asyncio
 
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from app.models import User
 from app.core.database import async_session as _asm, engine
 
-ADMIN_EMAIL = "mbowouibrah@gmail.com"
+DEFAULT_ADMIN_EMAIL = "mbowouibrah@gmail.com"
 ADMIN_NAME = "Ibrahim Mbowou"
 
-async def main():
+
+def admin_email() -> str:
+    return (os.getenv("ADMIN_EMAIL") or DEFAULT_ADMIN_EMAIL).strip().lower()
+
+
+async def ensure_admin(email: str | None = None) -> User:
+    email = (email or admin_email()).strip().lower()
     async with _asm() as db:
-        result = await db.execute(select(User).where(User.email == ADMIN_EMAIL))
-        user = result.scalar_one_or_none()
-
-        if user is None:
-            user = User(
-                email=ADMIN_EMAIL,
-                name=ADMIN_NAME,
-                email_verified=True,
-                plan="admin",
-                storage_limit=0,  # 0 = illimite (traite specialement)
-            )
+        user = (await db.execute(
+            select(User).where(func.lower(User.email) == email))).scalar_one_or_none()
+        created = user is None
+        if created:
+            user = User(email=email, name=ADMIN_NAME)
             db.add(user)
-            await db.commit()
-            await db.refresh(user)
-            print(f"OK  Compte admin cree : {user.email}")
-        else:
-            user.plan = "admin"
-            user.email_verified = True
-            user.storage_limit = 0  # 0 = illimite
-            user.name = user.name or ADMIN_NAME
-            await db.commit()
-            await db.refresh(user)
-            print(f"OK  Compte promu admin : {user.email}")
+        user.plan = "admin"
+        user.email_verified = True
+        user.storage_limit = 0  # 0 = illimite
+        # Plan attribue, pas achete : sans echeance.
+        user.plan_expires_at = None
+        user.plan_started_at = None
+        user.name = user.name or ADMIN_NAME
+        await db.commit()
+        await db.refresh(user)
+    print(f"OK  Compte admin {'cree' if created else 'a jour'} : {user.email}")
+    return user
 
-        print(f"   Plan    : {user.plan}")
-        print(f"   Stockage: {'Illimite' if user.storage_limit == 0 else f'{user.storage_limit / 1024 / 1024:.0f} Mo'}")
-        print(f"   Verifie : {user.email_verified}")
 
-    await engine.dispose()
+async def main() -> None:
+    try:
+        await ensure_admin()
+    finally:
+        await engine.dispose()
 
-asyncio.run(main())
+
+if __name__ == "__main__":
+    asyncio.run(main())

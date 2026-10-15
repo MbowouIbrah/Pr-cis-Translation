@@ -166,5 +166,18 @@ async def main() -> None:
     print("OK — journal des erreurs conforme")
 
 
+async def _purger() -> None:
+    """Filet de sécurité : un test interrompu ne laisse ni admin (destinataire
+    des alertes) ni erreurs de test en base."""
+    async with async_session() as db:
+        await db.execute(delete(ErrorLog).where(ErrorLog.message.like(f"%{TOKEN}%")))
+        await db.execute(delete(User).where(User.email.like(f"%{TOKEN}%")))
+        await db.commit()
+    await _eng.dispose()
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    finally:
+        asyncio.run(_purger())

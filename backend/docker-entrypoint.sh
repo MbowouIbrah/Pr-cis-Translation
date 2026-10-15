@@ -36,6 +36,10 @@ until alembic upgrade head; do
 done
 echo "[precis] Migrations a jour."
 
+# Compte administrateur (ADMIN_EMAIL) : cree sur une base neuve, sinon remis
+# admin. Idempotent ; un echec ici arrete le demarrage comme une migration.
+python seed_admin.py
+
 # ── UN SEUL worker, et ce n'est pas négociable ───────────────────────────────
 # Le registre des travaux de traduction vit EN MÉMOIRE, et l'ordonnanceur de
 # priorité aussi. Avec deux workers, chacun aurait son propre registre : un

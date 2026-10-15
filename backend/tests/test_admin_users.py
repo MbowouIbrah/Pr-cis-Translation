@@ -116,5 +116,17 @@ async def main() -> None:
     print("OK — administration des comptes conforme")
 
 
+async def _purger() -> None:
+    """Filet de sécurité : un test interrompu ne laisse pas d'admin en base
+    (l'alerte du journal d'erreurs part à TOUS les admins)."""
+    async with async_session() as db:
+        await db.execute(delete(User).where(User.email.like(f"%{TOKEN}%")))
+        await db.commit()
+    await _eng.dispose()
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    finally:
+        asyncio.run(_purger())

@@ -32,6 +32,11 @@ interface ReportOptions {
   context?: Record<string, unknown>;
 }
 
+// Avertissements du navigateur qui ne sont pas des pannes : « ResizeObserver
+// loop… » signale qu'un rappel de redimensionnement a été reporté d'une image,
+// sans effet visible. Les remonter noyait le journal (40 sur 50 erreurs).
+const BENIGN = [/^ResizeObserver loop/];
+
 function shouldSend(signature: string): boolean {
   const now = Date.now();
   const last = _lastSent.get(signature) ?? 0;
@@ -48,6 +53,7 @@ function shouldSend(signature: string): boolean {
 export function reportClientError(message: string, opts: ReportOptions = {}): void {
   try {
     const msg = String(message || 'Erreur inconnue').slice(0, 2000);
+    if (BENIGN.some((re) => re.test(msg))) return;
     const signature = `${msg}|${opts.component || opts.url || ''}`;
     if (!shouldSend(signature)) return;
 
