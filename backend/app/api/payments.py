@@ -8,22 +8,23 @@ visible en clair et téléchargeable ; rien d'autre ne l'est.
 """
 from __future__ import annotations
 
-import calendar
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.models import User, Document, Payment, get_plan_storage
 from app.core.security import require_auth
 from app.core.pricing import (zone_for_country, CURRENCY, page_price,
-                               billable_pages, MIN_PAYMENT_AMOUNT, plan_price)
+                               billable_pages, MIN_PAYMENT_AMOUNT, plan_price,
+                               PLAN_RANK, SELF_SERVE_PLANS)
+from app.services.usage import add_months
 from app.services.documents import count_pages
 from app.core.payment_gateway import (campay, CampayError, ProviderError,
                                       normalize_phone)
@@ -237,11 +238,10 @@ async def _start_payment(db: AsyncSession, provider, payment: Payment,
     }
 
 
-# Plans vendus en ligne. Entreprise se négocie (devis), admin s'attribue : ni
-# l'un ni l'autre ne s'achète.
-SELF_SERVE_PLANS: tuple[str, ...] = ("starter", "pro")
-# Rang d'un plan, pour refuser d'acheter moins que ce qu'on a déjà.
-_PLAN_RANK = {"free": 0, "starter": 1, "pro": 2}
+# Une invite Campay reste ouverte environ 3 min (le client cesse d'interroger
+# au même terme) : un second achat de forfait pendant ce temps est un double
+# clic ou un deuxième onglet, pas une intention.
+PENDING_PLAN_WINDOW = timedelta(minutes=3)
 
 
 def _plan_offer(plan: str, annual: bool, zone: str) -> tuple[int, int, int]:
@@ -256,13 +256,24 @@ def _plan_offer(plan: str, annual: bool, zone: str) -> tuple[int, int, int]:
     return monthly, months, monthly * months
 
 
+def _loses_rights(user: User, plan: str, now: datetime | None = None) -> bool:
+    """L'achat de `plan` ferait-il PERDRE des droits au compte ?
+
+    Entreprise / admin, un plan supérieur en cours, ou ce même plan attribué
+    sans échéance : l'achat le remplacerait par moins. Un abonnement échu
+    (pas encore ramené au Gratuit) compte comme le Gratuit. Vérifié à l'achat
+    ET au crédit : le compte peut changer entre l'invite et la validation."""
+    now = now or datetime.now(timezone.utc)
+    current = user.plan
+    if user.plan_expires_at is not None and user.plan_expires_at <= now:
+        current = "free"
+    rank = PLAN_RANK.get(current)
+    return rank is None or rank > PLAN_RANK[plan] or (
+        current == plan and user.plan_expires_at is None)
+
+
 def _check_can_buy(user: User, plan: str) -> None:
-    """Refuse un achat qui ferait PERDRE des droits au compte."""
-    rank = _PLAN_RANK.get(user.plan)
-    if rank is None or rank > _PLAN_RANK[plan] or (
-            user.plan == plan and user.plan_expires_at is None):
-        # Entreprise / admin, un plan supérieur en cours, ou ce même plan
-        # attribué sans échéance : l'achat le remplacerait par moins.
+    if _loses_rights(user, plan):
         raise HTTPException(status_code=409,
                             detail="Votre forfait actuel couvre déjà cette offre.")
 
@@ -303,6 +314,16 @@ async def buy_plan(body: PlanBody, request: Request,
     zone = _zone_of(request)
     _monthly, months, amount = _plan_offer(body.plan, body.annual, zone)
     _check_can_buy(user, body.plan)
+    en_attente = await db.scalar(
+        select(func.count()).select_from(Payment).where(
+            Payment.user_id == user.id, Payment.plan.is_not(None),
+            Payment.status == "PENDING",
+            Payment.created_at >= datetime.now(timezone.utc) - PENDING_PLAN_WINDOW,
+        ))
+    if en_attente:
+        raise HTTPException(
+            status_code=409,
+            detail="Un paiement de forfait attend déjà votre validation sur le téléphone.")
     method, phone, provider = _resolve_method(body.method, body.phone, zone)
     payment = Payment(
         user_id=user.id, pages=0, amount=amount, currency=CURRENCY[zone],
@@ -313,12 +334,19 @@ async def buy_plan(body: PlanBody, request: Request,
                                 f"Précis — forfait {body.plan} ({months} mois)")
 
 
-def _add_months(d: datetime, months: int) -> datetime:
-    """Même jour, `months` mois plus tard (31 janv. + 1 mois = 28/29 févr.)."""
-    y, m = divmod(d.month - 1 + months, 12)
-    year, month = d.year + y, m + 1
-    return d.replace(year=year, month=month,
-                     day=min(d.day, calendar.monthrange(year, month)[1]))
+def _carry_over(user: User, payment: Payment, now: datetime) -> timedelta:
+    """Reste payé de l'ancien plan, converti au prix du nouveau.
+
+    Passer de Starter à Pro avec 20 jours restants ne les jette pas : ils
+    valent 20 × prix Starter / prix Pro jours de Pro, ajoutés à l'échéance."""
+    if (user.plan == payment.plan or user.plan_expires_at is None
+            or user.plan_expires_at <= now):
+        return timedelta(0)
+    old = plan_price(user.plan, payment.zone)
+    new = plan_price(payment.plan, payment.zone)
+    if not old or not new:
+        return timedelta(0)
+    return (user.plan_expires_at - now) * (old / new)
 
 
 async def _apply_plan(db: AsyncSession, payment: Payment) -> None:
@@ -331,20 +359,28 @@ async def _apply_plan(db: AsyncSession, payment: Payment) -> None:
     )).scalar_one_or_none()
     if user is None:
         return
-    if user.plan not in _PLAN_RANK:
-        # Passé entreprise / admin entre l'invite et la validation : ne pas
-        # le rétrograder. Le paiement reste tracé pour remboursement.
-        logger.warning("Paiement de plan %s sur un compte %s : non appliqué",
-                       payment.id, user.plan)
-        return
     now = datetime.now(timezone.utc)
-    # Renouvellement anticipé du même plan : la durée s'AJOUTE à ce qui reste.
-    # Changement de plan : le nouveau commence maintenant.
-    start = (user.plan_expires_at
-             if user.plan == payment.plan and user.plan_expires_at
-             and user.plan_expires_at > now else now)
+    if _loses_rights(user, payment.plan, now):
+        # Le compte a changé entre l'invite et la validation (passé entreprise,
+        # plan supérieur acheté ou attribué) : ne pas le rétrograder. L'argent
+        # est encaissé : le paiement est marqué dû, le client en est averti.
+        logger.warning("Paiement de plan %s sur un compte %s : non appliqué, "
+                       "à rembourser", payment.id, user.plan)
+        await db.execute(update(Payment).where(Payment.id == payment.id)
+                         .values(refund_due=True))
+        return
+    if (user.plan == payment.plan and user.plan_expires_at
+            and user.plan_expires_at > now):
+        # Renouvellement anticipé du même plan : la durée s'AJOUTE à ce qui
+        # reste, et la période de quota garde son jour.
+        start = user.plan_expires_at
+        user.plan_started_at = user.plan_started_at or now
+    else:
+        # Nouveau plan : il commence maintenant, avec le reste de l'ancien.
+        start = now + _carry_over(user, payment, now)
+        user.plan_started_at = now
     user.plan = payment.plan
-    user.plan_expires_at = _add_months(start, payment.months or 1)
+    user.plan_expires_at = add_months(start, payment.months or 1)
     user.storage_limit = get_plan_storage(payment.plan)
 
 
@@ -436,6 +472,7 @@ async def payment_status(payment_id: str, user: User = Depends(require_auth),
         "currency": payment.currency,
         "document_id": payment.document_id,
         "plan": payment.plan,
+        "refund_due": payment.refund_due,
     }
 
 

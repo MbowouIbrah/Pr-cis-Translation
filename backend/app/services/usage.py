@@ -9,6 +9,7 @@ supprime, une consommation non (cf. `app.models.usage`).
 """
 from __future__ import annotations
 
+import calendar
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
@@ -21,6 +22,34 @@ from app.models import (KIND_CREDITS, KIND_FREE_OFFER, KIND_LEGACY, UsageRecord,
 def month_start(now: datetime | None = None) -> datetime:
     now = now or datetime.now(timezone.utc)
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def add_months(d: datetime, months: int) -> datetime:
+    """Même jour, `months` mois plus tard (31 janv. + 1 mois = 28/29 févr.)."""
+    y, m = divmod(d.month - 1 + months, 12)
+    year, month = d.year + y, m + 1
+    return d.replace(year=year, month=month,
+                     day=min(d.day, calendar.monthrange(year, month)[1]))
+
+
+def quota_period(user: User, now: datetime | None = None) -> tuple[datetime, datetime]:
+    """Fenêtre du quota de pages en cours : [début, fin).
+
+    Abonnement acheté : de date à date depuis la souscription (souscrit le 28,
+    le quota repart chaque 28). Au mois civil, un achat du 28 donnerait deux
+    quotas en quatre jours. Sans souscription (gratuit, plan attribué par
+    l'administration) : le mois civil. Chaque borne se calcule depuis le
+    début, jamais de proche en proche : le 31 ne dérive pas vers le 28."""
+    now = now or datetime.now(timezone.utc)
+    start = user.plan_started_at
+    if start is None or user.plan_expires_at is None:
+        debut = month_start(now)
+        return debut, add_months(debut, 1)
+    # `start + k` tombe dans le mois de `now` : au plus un pas en arrière.
+    k = max(0, (now.year - start.year) * 12 + now.month - start.month)
+    if k > 0 and add_months(start, k) > now:
+        k -= 1
+    return add_months(start, k), add_months(start, k + 1)
 
 
 def _du_mois(user_id: str):
@@ -43,13 +72,17 @@ async def free_offer_used(db: AsyncSession, user_id: str) -> bool:
     return (r.scalar() or 0) >= 1
 
 
-async def pages_used_this_month(db: AsyncSession, user_id: str) -> int:
-    """Pages consommées ce mois au titre du quota d'un plan.
+async def pages_used_this_month(db: AsyncSession, user: User) -> int:
+    """Pages consommées dans la période de quota en cours (`quota_period`).
 
     Les pages ACHETÉES à l'unité ne sont pas du quota : elles sont payées."""
+    debut, _fin = quota_period(user)
     r = await db.execute(
         select(func.coalesce(func.sum(UsageRecord.pages), 0)).where(
-            *_du_mois(user_id), UsageRecord.kind != KIND_CREDITS,
+            UsageRecord.user_id == user.id,
+            UsageRecord.created_at >= debut,
+            UsageRecord.refunded.is_(False),
+            UsageRecord.kind != KIND_CREDITS,
         )
     )
     return int(r.scalar() or 0)
@@ -119,14 +152,14 @@ async def usage_summary(db: AsyncSession, user: User) -> dict:
             "resets_at": _mois_suivant().isoformat(),
         }
     quota = get_plan_monthly_pages(plan)
-    utilise = await pages_used_this_month(db, user.id)
+    utilise = await pages_used_this_month(db, user)
     return {
         "kind": "plan",
         "monthly_pages": quota,
         "pages_used": utilise,
         "pages_remaining": None if quota is None else max(0, quota - utilise),
         "page_credits": user.page_credits,
-        "resets_at": _mois_suivant().isoformat(),
+        "resets_at": quota_period(user)[1].isoformat(),
     }
 
 

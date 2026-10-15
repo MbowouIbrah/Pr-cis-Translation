@@ -316,6 +316,7 @@
     "pay_launch_failed": "Le paiement n'a pas pu être lancé.",
     "pay_expired": "L'invite a expiré sans validation. Aucun montant n'a été prélevé.",
     "pay_refused": "Paiement refusé ou annulé. Aucun montant n'a été prélevé.",
+    "refund_due": "Paiement reçu, mais votre forfait actuel couvre déjà cette offre : il n'a pas été modifié. Le montant vous sera remboursé ; contactez l'assistance si besoin.",
     "buy_pages_label": "Débloquez la traduction de ce document",
     "title": "Paiement",
     "method_title": "Moyen de paiement",

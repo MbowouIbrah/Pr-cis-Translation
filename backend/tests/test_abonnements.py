@@ -12,7 +12,12 @@ Ce qui est MESURÉ :
   • le paiement réussi pose le plan et l'échéance UNE seule fois, sans toucher
     au solde de pages ; un renouvellement anticipé s'AJOUTE à ce qui reste ;
     deux renouvellements crédités en même temps comptent tous les deux ;
-  • l'échéance passée ramène le compte au Gratuit au premier appel authentifié ;
+  • l'échéance passée ramène le compte au Gratuit au premier appel authentifié,
+    et la liste d'administration ne montre pas de plan échu ;
+  • un changement de plan reporte le reste payé de l'ancien, au prorata des prix ;
+  • un crédit qui rétrograderait le compte n'est pas appliqué mais marqué dû ;
+  • un second achat de forfait pendant qu'un premier attend est refusé ;
+  • le quota de pages court de date à date depuis la souscription ;
   • le moyen choisi est enregistré sur le paiement.
 
 Exécution :  backend/venv/Scripts/python.exe backend/tests/test_abonnements.py
@@ -35,13 +40,16 @@ from sqlalchemy.pool import NullPool                     # noqa: E402
 from fastapi.testclient import TestClient                # noqa: E402
 
 from app.core.database import DATABASE_URL               # noqa: E402
-from app.models import User, Payment                     # noqa: E402
+from app.models import (User, Payment, UsageRecord,     # noqa: E402
+                        KIND_PLAN, get_plan_storage)
 from app import config as cfg                            # noqa: E402
 from app import create_app                               # noqa: E402
 from app.core.security import create_access_token        # noqa: E402
 from app.core.payment_gateway import campay              # noqa: E402
 from app.core.pricing import plan_price, ZONE_AFRICA     # noqa: E402
-from app.api.payments import _apply_credit, _add_months  # noqa: E402
+from app.api.payments import _apply_credit               # noqa: E402
+from app.services.usage import (add_months as _add_months,  # noqa: E402
+                                quota_period, pages_used_this_month)
 
 _eng = create_async_engine(DATABASE_URL, poolclass=NullPool)
 async_session = async_sessionmaker(_eng, class_=AsyncSession,
@@ -76,6 +84,9 @@ async def _supprimer(ids):
             for p in (await db.execute(select(Payment).where(
                     Payment.user_id == uid))).scalars():
                 await db.delete(p)
+            for r in (await db.execute(select(UsageRecord).where(
+                    UsageRecord.user_id == uid))).scalars():
+                await db.delete(r)
             obj = await db.get(User, uid)
             if obj:
                 await db.delete(obj)
@@ -109,6 +120,19 @@ def check_dates(ok):
        _add_months(d, 1).date().isoformat() == "2027-02-28"
        and _add_months(d, 12).date().isoformat() == "2028-01-31",
        f"{_add_months(d, 1)} {_add_months(d, 12)}")
+
+    u = User(plan="starter", plan_started_at=d, plan_expires_at=_add_months(d, 12))
+    p = quota_period(u, datetime(2027, 3, 15, tzinfo=timezone.utc))
+    ok("QUOTA   souscrit le 31/01 : période du 28/02 au 31/03 (pas de dérive)",
+       p == (datetime(2027, 2, 28, 10, tzinfo=timezone.utc),
+             datetime(2027, 3, 31, 10, tzinfo=timezone.utc)), f"{p}")
+    p = quota_period(u, datetime(2027, 1, 31, 10, tzinfo=timezone.utc))
+    ok("QUOTA   le jour même de la souscription : première période",
+       p == (d, _add_months(d, 1)), f"{p}")
+    p = quota_period(User(plan="pro"), datetime(2027, 3, 15, 8, tzinfo=timezone.utc))
+    ok("QUOTA   plan sans souscription : mois civil",
+       p == (datetime(2027, 3, 1, tzinfo=timezone.utc),
+             datetime(2027, 4, 1, tzinfo=timezone.utc)), f"{p}")
 
 
 async def check_routes(client, ok, a_nettoyer):
@@ -179,7 +203,7 @@ async def check_routes(client, ok, a_nettoyer):
         ok("CREDIT  réussite : plan Starter, échéance à +1 mois, solde de pages intact",
            r.json().get("status") == "SUCCESSFUL" and r.json().get("plan") == "starter"
            and c.plan == "starter" and _proche(echeance, _add_months(avant, 1))
-           and c.page_credits == 3,
+           and _proche(c.plan_started_at, avant) and c.page_credits == 3,
            f"{r.json()} {c.plan} {echeance} credits={c.page_credits}")
 
         await _crediter(ps[0])
@@ -196,8 +220,9 @@ async def check_routes(client, ok, a_nettoyer):
         p2 = await _credit_paiement(u.id, "starter", 1)
         await _crediter(p2)
         c = await _compte(u.id)
-        ok("RENOUV. anticipé : +1 mois À PARTIR de l'échéance en cours",
-           c.plan == "starter" and _proche(c.plan_expires_at, _add_months(echeance, 1)),
+        ok("RENOUV. anticipé : +1 mois À PARTIR de l'échéance en cours, même période",
+           c.plan == "starter" and _proche(c.plan_expires_at, _add_months(echeance, 1))
+           and _proche(c.plan_started_at, avant),
            f"{c.plan_expires_at} attendu {_add_months(echeance, 1)}")
 
         # Deux renouvellements crédités en même temps : les deux comptent.
@@ -211,6 +236,7 @@ async def check_routes(client, ok, a_nettoyer):
            f"{c.plan_expires_at} attendu {_add_months(base, 2)}")
 
         # ── Montée en gamme : Pro annuel commence maintenant ───────────────
+        reste = c.plan_expires_at
         n = len(appels)
         r = client.post("/api/payments/plan",
                         json={"plan": "pro", "annual": True, "phone": PHONE},
@@ -219,11 +245,15 @@ async def check_routes(client, ok, a_nettoyer):
         avant = datetime.now(timezone.utc)
         client.get(f"/api/payments/{pid}", headers=ent(u))
         c = await _compte(u.id)
-        ok("MONTEE  Starter -> Pro annuel : plan Pro, échéance à +12 mois",
+        report = (reste - avant) * (plan_price("starter", ZONE_AFRICA)
+                                    / plan_price("pro", ZONE_AFRICA))
+        attendu = _add_months(avant + report, 12)
+        ok("MONTEE  Starter -> Pro annuel : +12 mois + reste Starter au prorata",
            r.status_code == 200 and len(appels) == n + 1
            and appels[-1].get("amount") == 12 * plan_price("pro", ZONE_AFRICA, annual=True)
-           and c.plan == "pro" and _proche(c.plan_expires_at, _add_months(avant, 12)),
-           f"{r.status_code} {c.plan} {c.plan_expires_at}")
+           and c.plan == "pro" and report > timedelta(days=7)
+           and _proche(c.plan_expires_at, attendu) and _proche(c.plan_started_at, avant),
+           f"{r.status_code} {c.plan} {c.plan_expires_at} attendu {attendu}")
 
         # ── Achats qui feraient perdre des droits ──────────────────────────
         n, nb = len(appels), len(await _paiements(u.id))
@@ -247,9 +277,37 @@ async def check_routes(client, ok, a_nettoyer):
         # Passé admin entre l'invite et la validation : pas rétrogradé.
         w = await _utilisateur(plan="admin")
         a_nettoyer.append(w.id)
-        await _crediter(await _credit_paiement(w.id, "starter", 1))
-        ok("CREDIT  compte admin au moment du crédit : plan intact",
-           (await _compte(w.id)).plan == "admin")
+        pw = await _credit_paiement(w.id, "starter", 1)
+        await _crediter(pw)
+        r = client.get(f"/api/payments/{pw.id}", headers=ent(w))
+        ok("CREDIT  compte admin au moment du crédit : plan intact, paiement dû",
+           (await _compte(w.id)).plan == "admin" and r.json().get("refund_due") is True,
+           f"{r.text[:160]}")
+
+        # Pro acheté entre l'invite Starter et sa validation : pas rétrogradé.
+        fin = datetime.now(timezone.utc) + timedelta(days=20)
+        s = await _utilisateur(plan="pro", expires=fin)
+        a_nettoyer.append(s.id)
+        ps_ = await _credit_paiement(s.id, "starter", 1)
+        await _crediter(ps_)
+        cs = await _compte(s.id)
+        async with async_session() as db:
+            du = (await db.get(Payment, ps_.id)).refund_due
+        ok("CREDIT  Starter validé sur un compte Pro : Pro intact, paiement dû",
+           cs.plan == "pro" and _proche(cs.plan_expires_at, fin) and du,
+           f"{cs.plan} {cs.plan_expires_at} du={du}")
+
+        # Second achat pendant qu'une invite attend : refusé.
+        k = await _utilisateur()
+        a_nettoyer.append(k.id)
+        n = len(appels)
+        r1 = client.post("/api/payments/plan",
+                         json={"plan": "starter", "phone": PHONE}, headers=ent(k))
+        r2 = client.post("/api/payments/plan",
+                         json={"plan": "pro", "phone": PHONE}, headers=ent(k))
+        ok("REFUS   second achat de forfait pendant une invite en attente : 409",
+           r1.status_code == 200 and r2.status_code == 409 and len(appels) == n + 1
+           and len(await _paiements(k.id)) == 1, f"{r1.status_code} {r2.status_code}")
 
         # Paiement échoué : rien.
         x = await _utilisateur()
@@ -261,6 +319,9 @@ async def check_routes(client, ok, a_nettoyer):
         # ── Échéance ───────────────────────────────────────────────────────
         y = await _utilisateur(plan="pro",
                                expires=datetime.now(timezone.utc) - timedelta(minutes=1))
+        async with async_session() as db:
+            (await db.get(User, y.id)).plan_started_at = datetime.now(timezone.utc)
+            await db.commit()
         z = await _utilisateur(plan="pro",
                                expires=datetime.now(timezone.utc) + timedelta(days=3))
         a_nettoyer += [y.id, z.id]
@@ -268,11 +329,45 @@ async def check_routes(client, ok, a_nettoyer):
         cy = await _compte(y.id)
         ok("ECHEANCE passée : retour au Gratuit au premier appel, sans échéance",
            r.status_code == 200 and r.json().get("plan") == "free"
-           and cy.plan == "free" and cy.plan_expires_at is None and cy.storage_limit == 0,
+           and cy.plan == "free" and cy.plan_expires_at is None
+           and cy.plan_started_at is None and cy.storage_limit == get_plan_storage("free"),
            f"{r.json().get('plan')} {cy.plan} {cy.plan_expires_at}")
         client.get("/api/auth/me", headers=ent(z))
         ok("ECHEANCE future : plan conservé",
            (await _compte(z.id)).plan == "pro")
+
+        # Liste d'administration : le compte échu n'est jamais passé par
+        # require_auth, il ne doit pas y apparaître avec son ancien plan.
+        y2 = await _utilisateur(plan="starter",
+                                expires=datetime.now(timezone.utc) - timedelta(hours=1))
+        adm = await _utilisateur(plan="admin")
+        a_nettoyer += [y2.id, adm.id]
+        r = client.get("/api/admin/users", params={"q": y2.email}, headers=ent(adm))
+        vus = [x.get("plan") for x in r.json().get("users", [])]
+        ok("ECHEANCE liste admin : un abonnement échu s'affiche Gratuit",
+           r.status_code == 200 and vus == ["free"], f"{r.status_code} {vus}")
+
+        # Quota : seules les pages de la période en cours comptent.
+        q = await _utilisateur(plan="starter",
+                               expires=datetime.now(timezone.utc) + timedelta(days=20))
+        a_nettoyer.append(q.id)
+        maintenant = datetime.now(timezone.utc)
+        async with async_session() as db:
+            cq = await db.get(User, q.id)
+            # Souscrit il y a une heure : la ligne d'il y a deux heures est du
+            # même mois civil (sauf dans les deux premières heures du mois)
+            # mais d'avant la souscription.
+            cq.plan_started_at = maintenant - timedelta(hours=1)
+            db.add_all([
+                UsageRecord(user_id=q.id, kind=KIND_PLAN, pages=5,
+                            created_at=maintenant - timedelta(hours=2)),
+                UsageRecord(user_id=q.id, kind=KIND_PLAN, pages=3,
+                            created_at=maintenant - timedelta(minutes=10)),
+            ])
+            await db.commit()
+            used = await pages_used_this_month(db, cq)
+        ok("QUOTA   pages d'avant la souscription non comptées",
+           used == 3, f"{used}")
 
         # Le moyen est désormais tracé aussi sur l'achat de pages.
         r = client.post("/api/payments/collect",

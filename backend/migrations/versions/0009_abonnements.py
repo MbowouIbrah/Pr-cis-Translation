@@ -9,6 +9,11 @@ passée, le compte revient au forfait Gratuit. `NULL` = plan sans échéance
 pages. `payments.method` : le moyen choisi par le client (MTN, Orange, carte),
 jusqu'ici perdu une fois le prestataire déduit.
 
+`users.plan_started_at` : début de l'abonnement en cours ; le quota de pages
+court de date à date depuis ce jour, pas du 1er du mois. `payments.refund_due` :
+paiement encaissé mais non appliqué (le compte a changé entre l'invite et la
+validation) — à rembourser, jamais à oublier.
+
 Revision ID: 0009_abonnements
 Revises: 0008_usage_records
 Create Date: 2026-10-15
@@ -26,6 +31,10 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     op.add_column("users", sa.Column("plan_expires_at", sa.DateTime(timezone=True),
                                      nullable=True))
+    op.add_column("users", sa.Column("plan_started_at", sa.DateTime(timezone=True),
+                                     nullable=True))
+    op.add_column("payments", sa.Column("refund_due", sa.Boolean(), nullable=False,
+                                        server_default=sa.false()))
     op.add_column("payments", sa.Column("plan", sa.String(20), nullable=True))
     op.add_column("payments", sa.Column("months", sa.Integer(), nullable=True))
     op.add_column("payments", sa.Column("method", sa.String(20), nullable=True))
@@ -35,4 +44,6 @@ def downgrade() -> None:
     op.drop_column("payments", "method")
     op.drop_column("payments", "months")
     op.drop_column("payments", "plan")
+    op.drop_column("payments", "refund_due")
+    op.drop_column("users", "plan_started_at")
     op.drop_column("users", "plan_expires_at")

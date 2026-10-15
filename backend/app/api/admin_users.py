@@ -17,7 +17,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import require_admin
+from app.core.security import expire_due_plans, require_admin
 from app.models import (ASSIGNABLE_PLANS, User, get_plan_priority,
                         get_plan_storage)
 
@@ -49,6 +49,7 @@ async def list_users(
     """Liste des comptes, du plus récent au plus ancien. `q` filtre sur l'e-mail
     ou le nom (sous-chaîne insensible à la casse)."""
     limit = max(1, min(limit, 200))
+    await expire_due_plans(db)
     conds = []
     if q:
         like = f"%{q}%"
@@ -104,6 +105,7 @@ async def change_plan(
     # Un plan attribué par l'administration n'a pas d'échéance : garder celle
     # d'un abonnement acheté le ferait retomber au Gratuit à cette date.
     target.plan_expires_at = None
+    target.plan_started_at = None
     # La limite de stockage suit le plan. Les réponses la dérivent déjà de
     # `get_plan_storage`, mais on garde la colonne cohérente pour tout code qui
     # la lirait directement.

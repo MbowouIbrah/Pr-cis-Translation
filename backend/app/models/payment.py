@@ -53,6 +53,10 @@ class Payment(Base):
     # Achat d'un ABONNEMENT : le plan et sa durée. NULL = achat de pages.
     plan:     Mapped[str | None] = mapped_column(String(20), nullable=True)
     months:   Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Encaissé mais NON appliqué : le compte a changé entre l'invite et la
+    # validation (passé entreprise, plan supérieur). Dû au client.
+    refund_due: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False,
+                                             server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow,

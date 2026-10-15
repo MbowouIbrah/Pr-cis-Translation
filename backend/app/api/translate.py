@@ -373,14 +373,15 @@ async def translate_endpoint(
             await db.execute(
                 select(User).where(User.id == current_user.id).with_for_update()
             )
-            deja = await usage.pages_used_this_month(db, current_user.id)
+            deja = await usage.pages_used_this_month(db, current_user)
             demande = len(pages_set) if pages_set else count_pages(file_bytes, ext)
             if deja + demande > monthly:
+                _debut, repart = usage.quota_period(current_user)
                 raise HTTPException(
                     status_code=402,
-                    detail=(f"Vous avez déjà traduit {deja} page(s) ce mois-ci "
+                    detail=(f"Vous avez déjà traduit {deja} page(s) sur cette période "
                             f"(limite : {monthly}). Ce document en demande {demande}. "
-                            "Le compteur repart le 1er du mois prochain."),
+                            f"Le compteur repart le {repart:%d/%m/%Y}."),
                 )
 
     # Ce qui sera RÉELLEMENT traduit — enregistré sur le Document, sinon le

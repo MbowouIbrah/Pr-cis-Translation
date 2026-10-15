@@ -316,6 +316,7 @@
     "pay_launch_failed": "The payment could not be started.",
     "pay_expired": "The prompt expired without validation. No amount was charged.",
     "pay_refused": "Payment refused or cancelled. No amount was charged.",
+    "refund_due": "Payment received, but your current plan already covers this offer, so it was left unchanged. The amount will be refunded; contact support if needed.",
     "buy_pages_label": "Unlock the translation of this document",
     "title": "Payment",
     "method_title": "Payment method",

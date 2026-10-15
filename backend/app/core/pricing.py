@@ -146,6 +146,14 @@ def plan_price(plan: str, zone: str, annual: bool = False) -> int | None:
     return entry["annual" if annual else "monthly"]
 
 
+# Plans vendus en ligne. Entreprise se négocie (devis), admin s'attribue : ni
+# l'un ni l'autre ne s'achète.
+SELF_SERVE_PLANS: tuple[str, ...] = ("starter", "pro")
+# Rang d'un plan dans la grille d'achat, pour refuser d'acheter moins que ce
+# qu'on a déjà. Exposé par `/api/pricing` : les cartes n'en ont pas de copie.
+PLAN_RANK: dict[str, int] = {"free": 0, "starter": 1, "pro": 2}
+
+
 def page_price(zone: str) -> int:
     """Prix d'une page à l'unité, en unités mineures."""
     return PAGE_PRICE.get(zone, PAGE_PRICE[DEFAULT_ZONE])

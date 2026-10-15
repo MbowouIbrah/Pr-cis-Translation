@@ -34,6 +34,10 @@ class User(Base):
     # attribué par l'administration).
     plan_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),
                                                              nullable=True)
+    # Début de l'abonnement acheté en cours : le quota de pages repart chaque
+    # mois à cette date (`usage.quota_period`). NULL = mois civil.
+    plan_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),
+                                                             nullable=True)
     storage_used:  Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     storage_limit: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     # Pages achetées à l'unité et pas encore consommées (forfait Gratuit).

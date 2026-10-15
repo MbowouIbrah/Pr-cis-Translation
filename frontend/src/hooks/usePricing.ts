@@ -20,6 +20,10 @@ export interface PricingPlan {
   /** Niveau de VITESSE vendu : 0 = file standard, 1 = prioritaire, 2 = max,
    *  3 = dédié. L'application réelle attend le chantier « file de priorité ». */
   priority: number;
+  /** Rang dans la grille d'achat (null = hors grille : entreprise). */
+  rank: number | null;
+  /** S'achète en ligne (Starter, Pro). */
+  for_sale: boolean;
 }
 
 export interface Pricing {

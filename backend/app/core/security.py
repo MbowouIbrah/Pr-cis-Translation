@@ -18,7 +18,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.models import User, RefreshToken
+from app.models import User, RefreshToken, get_plan_storage
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -152,11 +152,30 @@ async def _expire_plan_if_due(db: AsyncSession, user: User) -> None:
     await db.execute(
         update(User)
         .where(User.id == user.id, User.plan_expires_at <= now)
-        .values(plan="free", plan_expires_at=None, storage_limit=0)
+        .values(**_back_to_free())
         .execution_options(synchronize_session=False)
     )
     await db.commit()
     await db.refresh(user)
+
+
+def _back_to_free() -> dict:
+    return {"plan": "free", "plan_expires_at": None, "plan_started_at": None,
+            "storage_limit": get_plan_storage("free")}
+
+
+async def expire_due_plans(db: AsyncSession) -> None:
+    """Applique TOUTES les échéances passées, pour les vues qui lisent d'autres
+    comptes que le sien (liste d'administration) : l'échéance paresseuse ne
+    touche que le compte qui se connecte."""
+    res = await db.execute(
+        update(User)
+        .where(User.plan_expires_at <= datetime.now(timezone.utc))
+        .values(**_back_to_free())
+        .execution_options(synchronize_session=False)
+    )
+    if res.rowcount:
+        await db.commit()
 
 
 async def optional_auth(

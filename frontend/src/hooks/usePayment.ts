@@ -162,7 +162,14 @@ export function usePayment() {
         if (!st.ok) return;
 
         const status = (st.data as any)?.status;
-        if (status === 'SUCCESSFUL') {
+        if (status === 'SUCCESSFUL' && (st.data as any)?.refund_due) {
+          // Encaissé mais non appliqué : le compte a changé entre-temps.
+          stop();
+          setState((s) => ({
+            ...s, phase: 'failed', error: i18n.t('payment.refund_due'),
+          }));
+          resolve(false);
+        } else if (status === 'SUCCESSFUL') {
           stop();
           setState((s) => ({ ...s, phase: 'done' }));
           resolve(true);

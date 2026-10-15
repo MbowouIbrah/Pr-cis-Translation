@@ -32,10 +32,6 @@ import PaymentModal from '../payment/PaymentModal';
 import { openSupport } from '../support/supportBus';
 import type { PlanChoice } from '../../hooks/usePayment';
 
-// Rang des plans vendus en ligne : on n'achète pas moins que ce qu'on a (le
-// serveur refuse de même). Entreprise / admin sont hors grille d'achat.
-const RANK: Record<string, number> = { free: 0, starter: 1, pro: 2 };
-
 interface PricingCardsProps {
   isAnnual: boolean;
 }
@@ -134,7 +130,11 @@ export default function PricingCards({ isAnnual }: PricingCardsProps) {
   }
 
   const locale = i18n.language || 'fr';
-  const userRank = user ? (RANK[user.plan] ?? Infinity) : -1;
+  // Rang dans la grille d'achat, fourni par le serveur (qui refuse de même
+  // d'acheter moins que ce qu'on a). Hors grille (entreprise, admin) : tout
+  // ce qui s'achète en ligne est déjà inclus.
+  const rankOf = (key: string) => pricing.plans.find((p) => p.key === key)?.rank ?? null;
+  const userRank = user ? (rankOf(user.plan) ?? Infinity) : -1;
   // Abonnement acheté : il a une fin, à renouveler avant (Campay ne prélève pas).
   const until = user?.plan_expires_at
     ? new Date(user.plan_expires_at).toLocaleDateString(locale, { dateStyle: 'long' })
@@ -148,9 +148,9 @@ export default function PricingCards({ isAnnual }: PricingCardsProps) {
         const isPopular = plan.key === 'pro';
         const amount = isAnnual ? plan.annual : plan.monthly;
         const onQuote = amount === null;
-        const forSale = plan.key in RANK && plan.key !== 'free' && !onQuote;
+        const forSale = plan.for_sale && !onQuote;
         const renew = isActive && forSale && until !== null;
-        const included = !!user && forSale && !isActive && userRank > RANK[plan.key];
+        const included = !!user && plan.rank !== null && !isActive && userRank > plan.rank;
         // Visiteur : tout bouton mène à la connexion, sauf l'offre gratuite
         // déjà active pour personne. Connecté : le bouton agit sur place.
         const toLogin = !user && (plan.key === 'free' || forSale || onQuote);
