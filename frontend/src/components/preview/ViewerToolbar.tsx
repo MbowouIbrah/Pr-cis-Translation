@@ -106,7 +106,7 @@ export default function ViewerToolbar({
 
       {/* Fil du document : source → traduction */}
       {(sourceFilename || translatedFilename) ? (
-        <div style={{
+        <div className="docbar-fil" style={{
           display: 'flex', alignItems: 'center', gap: '7px',
           borderLeft: '1px solid var(--color-border-secondary)', paddingLeft: '12px', marginLeft: '6px',
           flex: 1, overflow: 'hidden', minWidth: 0,
@@ -177,33 +177,14 @@ export default function ViewerToolbar({
       )}
 
       {/* Pagination */}
-      <div className="pg-ctrl">
-        <button
-          className="pg-arrow"
-          onClick={() => onPageChange(Math.max(1, currentPage - 1))}
-          disabled={currentPage <= 1}
-          aria-label={t('viewer.prev_page', 'Page précédente')}
-        >
-          <ChevronLeft size={14} strokeWidth={2.4} />
-        </button>
-        <span className="pg-num" style={{ fontVariantNumeric: 'tabular-nums' }}>
-          {currentPage} / {numPages}
-        </span>
-        <button
-          className="pg-arrow"
-          onClick={() => onPageChange(Math.min(numPages, currentPage + 1))}
-          disabled={currentPage >= numPages}
-          aria-label={t('viewer.next_page', 'Page suivante')}
-        >
-          <ChevronRight size={14} strokeWidth={2.4} />
-        </button>
-      </div>
+      <PageNav className="pg-ctrl docbar-pages" currentPage={currentPage}
+        numPages={numPages} onPageChange={onPageChange} />
 
       {/* Mode agrandi (focus) — exploite tout l'écran, barre du haut allégée */}
       {onToggleFocus && (
         <button
           onClick={onToggleFocus}
-          className="tb-btn ghost"
+          className="tb-btn ghost docbar-agrandir"
           aria-label={focus ? t('viewer.exit_enlarge', 'Réduire') : t('viewer.enlarge', 'Agrandir')}
           title={focus ? t('viewer.exit_enlarge', 'Réduire') : t('viewer.enlarge', 'Agrandir')}
           style={{ display: 'flex', alignItems: 'center', padding: '6px' }}
@@ -253,6 +234,40 @@ export default function ViewerToolbar({
         }}
       >
         {isTrialMode ? <Lock size={15} strokeWidth={2.2} /> : <Download size={15} strokeWidth={2.2} />}
+      </button>
+    </div>
+  );
+}
+
+/** Pagination ‹ n / N ›. Dans la barre du haut sur grand écran ; sur téléphone,
+ *  dans la barre fine sous le document (`.viewer-pied`, voir index.css). */
+export function PageNav({ className, currentPage, numPages, onPageChange }: {
+  className: string;
+  currentPage: number;
+  numPages: number;
+  onPageChange: (page: number) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className={className}>
+      <button
+        className="pg-arrow"
+        onClick={() => onPageChange(Math.max(1, currentPage - 1))}
+        disabled={currentPage <= 1}
+        aria-label={t('viewer.prev_page', 'Page précédente')}
+      >
+        <ChevronLeft size={14} strokeWidth={2.4} />
+      </button>
+      <span className="pg-num" style={{ fontVariantNumeric: 'tabular-nums' }}>
+        {currentPage} / {numPages}
+      </span>
+      <button
+        className="pg-arrow"
+        onClick={() => onPageChange(Math.min(numPages, currentPage + 1))}
+        disabled={currentPage >= numPages}
+        aria-label={t('viewer.next_page', 'Page suivante')}
+      >
+        <ChevronRight size={14} strokeWidth={2.4} />
       </button>
     </div>
   );

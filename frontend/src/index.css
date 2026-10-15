@@ -3132,3 +3132,30 @@ html.preview-active .scroll {
 .cv-bascule button{min-height:36px;padding:6px 16px;border:0;border-radius:999px;background:transparent;color:var(--color-text-secondary,#475569);font-size:13px;font-weight:500;cursor:pointer}
 .cv-bascule button[aria-pressed="true"]{background:var(--color-background-primary,#fff);color:var(--color-text-primary,#0f172a);box-shadow:0 1px 2px rgba(15,23,42,.12)}
 .cv-bascule button:focus-visible{outline:2px solid #2563eb;outline-offset:2px}
+
+/* ── APERÇU SUR TÉLÉPHONE : visionneuse bord à bord ─────────────────────────
+   Aucun cadre ni marge : le document prend toute la largeur de l'écran (le
+   calage en largeur est dans PdfViewer) et défile verticalement. Les
+   miniatures disparaissent ; la pagination quitte la barre du haut pour une
+   barre fine SOUS le document (`.viewer-pied`). Seuil = COMPACT_MAX_PX. */
+.viewer-pied{display:none}
+@media (max-width: 680px) {
+  html.preview-active .story-band .section-inner { padding: 0 !important; }
+  html.preview-active .content-viewer { padding-right: 0 !important; }
+  html.preview-active .app { border: 0; border-radius: 0; }
+  html.preview-active .sidebar { display: none; }
+  html.preview-active .scroll { padding: 0; align-items: flex-start; }
+  html.preview-active .cv { border: 0; border-radius: 0; }
+  .docbar { padding: 0 6px; gap: 4px; }
+  .docbar-pages, .docbar-fil, .docbar-agrandir { display: none !important; }
+  .cv-bascule { margin-top: 8px; }
+  .cv-bascule button { min-height: 32px; padding: 4px 14px; white-space: nowrap; }
+  .viewer-pied {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    flex-shrink: 0; min-height: 44px; padding-bottom: env(safe-area-inset-bottom);
+    background: var(--color-background-primary);
+    border-top: 0.5px solid var(--color-border-tertiary);
+  }
+  .viewer-pied .pg-arrow { width: 44px; height: 40px; }
+  .viewer-pied .pg-num { font-size: 13px; }
+}

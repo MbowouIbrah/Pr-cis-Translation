@@ -204,9 +204,15 @@ export default function PdfViewer({
           let containerHeight = 700;
           const scrollEl = document.getElementById('scroll');
           if (scrollEl) {
-            containerWidth = landscape || compact
-              ? scrollEl.clientWidth - 24
-              : (scrollEl.clientWidth - 70) / 2;
+            // Écran étroit : le cadre n'a plus de marge (index.css), le volet
+            // prend toute la largeur utile — on la lit, on ne la suppose pas.
+            const cs = getComputedStyle(scrollEl);
+            const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+            containerWidth = compact
+              ? scrollEl.clientWidth - padX
+              : landscape
+                ? scrollEl.clientWidth - 24
+                : (scrollEl.clientWidth - 70) / 2;
             // Hauteur disponible : le conteneur moins son padding (24px × 2) et
             // la hauteur du badge de langue au-dessus de chaque panneau (~34px).
             // Paysage : deux panneaux EMPILÉS → chacun a la MOITIÉ de la hauteur.
@@ -225,19 +231,32 @@ export default function PdfViewer({
           // Caler sur la dimension la PLUS CONTRAIGNANTE : la page tient alors
           // ENTIÈREMENT dans le cadre (largeur ET hauteur) — plus de débordement,
           // « tient sur une page ». `zoom` agrandit ensuite au-delà si besoin.
-          const baseScale = Math.max(0.05, Math.min(
-            containerWidth / unscaledViewport.width,
-            containerHeight / unscaledViewport.height,
-          ));
+          // Écran étroit : calé sur la LARGEUR, comme une visionneuse — une page
+          // entière en hauteur y serait illisible ; on défile verticalement.
+          const baseScale = Math.max(0.05, compact
+            ? containerWidth / unscaledViewport.width
+            : Math.min(
+              containerWidth / unscaledViewport.width,
+              containerHeight / unscaledViewport.height,
+            ));
           const scale = baseScale * zoom;
           const viewport = page.getViewport({ scale });
           const context = canvas.getContext('2d');
           if (!context) return;
 
-          canvas.height = viewport.height;
-          canvas.width = viewport.width;
+          // Rendu à la densité de l'écran (×2, ×3 sur téléphone), affiché à la
+          // taille CSS du viewport : sans cela le texte est flou. Le voile et le
+          // curseur d'essai se calent sur la taille AFFICHÉE, inchangée.
+          const dpr = Math.min(window.devicePixelRatio || 1, 3);
+          canvas.width = Math.floor(viewport.width * dpr);
+          canvas.height = Math.floor(viewport.height * dpr);
+          canvas.style.width = `${Math.floor(viewport.width)}px`;
+          canvas.style.height = `${Math.floor(viewport.height)}px`;
 
-          const renderContext = { canvasContext: context, viewport };
+          const renderContext = {
+            canvasContext: context, viewport,
+            transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
+          };
           const renderTask = page.render(renderContext);
           renderTasks.push(renderTask);
           await renderTask.promise;
@@ -273,6 +292,8 @@ export default function PdfViewer({
           if (canvas && origCanvas) {
             canvas.width = origCanvas.width;
             canvas.height = origCanvas.height;
+            canvas.style.width = origCanvas.style.width;
+            canvas.style.height = origCanvas.style.height;
             const ctx = canvas.getContext('2d');
             if (ctx) { ctx.fillStyle = '#f8fafc'; ctx.fillRect(0, 0, canvas.width, canvas.height); }
           }
