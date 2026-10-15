@@ -1,16 +1,28 @@
 """Version du moteur XLSX.
 
-Le suivi part de **0.1.0**, et pas de 1.0.0 comme les trois autres moteurs :
-le squelette accepte un classeur, le traverse et le réassemble, mais ne couvre
-pas encore tout ce qu'un fichier Excel peut porter (voir `CONTEXTE.md`, section
-« Ce qui n'est pas encore fait »).
+**0.2.0** — la couverture du TEXTE est complète, la FIDÉLITÉ ne l'est pas.
 
-Une version majeure dit « le contrat est stable ». Ici il ne l'est pas encore,
-et l'annoncer en 1.0.0 ferait croire l'inverse à quiconque lit `/health`.
+Les dix endroits où Excel range du texte sont traités : chaînes partagées et
+en ligne, noms d'onglets, graphiques, zones de texte, les deux formats de
+commentaires, en-têtes de tableaux structurés, croisés dynamiques, formats de
+nombre personnalisés et propriétés du document. `couverture()` ne déclare plus
+aucun manque.
 
-Il passera en 1.0.0 quand les chaînes en ligne, les graphiques et les tableaux
-croisés dynamiques seront traités — c'est-à-dire quand un classeur quelconque
-en ressortira traduit sans surprise.
+POURQUOI PAS 1.0.0
+------------------
+La version 0.1.0 promettait le passage en 1.0.0 « quand les chaînes en ligne,
+les graphiques et les tableaux croisés seront traités ». Ils le sont — mais
+cette condition était incomplète, et le dire vaut mieux que la tenir à la
+lettre.
+
+Il reste un défaut de RENDU : **l'expansion n'est pas gérée**. Une traduction
+plus longue que sa source déborde de sa colonne ou s'affiche en `#####`. Le
+texte est juste ; sa présentation ne l'est pas toujours. Les moteurs PDF et
+PPTX ajustent, celui-ci pas encore.
+
+Une version majeure dit « le contrat est stable ». Qui lit « 1.0.0 » dans
+`/health` comprend « ce moteur rend un classeur fidèle » — ce qui n'est pas
+encore vrai. D'où 0.2.0 : la couverture a franchi un palier, la fidélité non.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

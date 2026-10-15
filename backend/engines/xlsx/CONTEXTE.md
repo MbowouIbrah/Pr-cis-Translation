@@ -1,19 +1,25 @@
 # Moteur XLSX — contexte
 
-Version **0.1.0** · `engines/xlsx/` · inscrit au registre sous `xlsx`
+Version **0.2.0** · `engines/xlsx/` · inscrit au registre sous `xlsx`
 
-> ## ⚠ C'est un SQUELETTE
+> ## La couverture du TEXTE est complète — la FIDÉLITÉ ne l'est pas
 >
 > Le **chemin** est complet : un classeur est accepté, décompressé, parcouru,
 > ses chaînes relevées et balisées, la traduction réinjectée, le fichier
 > réassemblé. Un `.xlsx` entre et ressort ouvrable par Excel.
 >
-> La **couverture du format** ne l'est pas. Excel range du texte à une dizaine
-> d'endroits ; deux sont traités. Les autres sont recensés plus bas — pas
-> oubliés, pas masqués.
+> La **couverture du format** l'est désormais aussi : les **dix** endroits où
+> Excel range du texte sont traités (table ci-dessous). `couverture()` ne
+> déclare plus aucun manque.
 >
-> D'où le **0.1.0** et non 1.0.0 : une version majeure dit « le contrat est
-> stable ». Le déclarer en 1.0.0 ferait croire l'inverse à qui lit `/health`.
+> Ce qui reste n'est plus une question de couverture mais de **rendu** :
+> **l'expansion n'est pas gérée**. Une traduction plus longue que sa source
+> déborde de sa colonne ou s'affiche en `#####`. Le texte est juste ; sa
+> présentation ne l'est pas toujours.
+>
+> D'où **0.2.0** et non 1.0.0 : la couverture est faite, mais un utilisateur
+> qui lit « 1.0.0 » dans `/health` comprendrait « ce moteur rend un classeur
+> fidèle », ce qui n'est pas encore vrai.
 
 > À lire d'abord : [`../CONTEXTE.md`](../CONTEXTE.md) — la règle
 > d'indépendance, l'instance par opération, les balises de runs.
@@ -68,35 +74,220 @@ que là. C'est précisément pourquoi la preuve se fait sur du synthétique.
 |---|---|
 | `xl/sharedStrings.xml` | ✅ le gros du texte — Excel y déduplique les chaînes |
 | Cellules `t="inlineStr"` | ✅ chaîne écrite dans la feuille, sans magasin partagé |
+| `xl/workbook.xml` — noms d'onglets | ✅ renommage **et** réécriture des références, d'un seul geste |
+| `xl/charts/chart*.xml` | ✅ titres, noms d'axes, étiquettes en dur — **jamais** les caches |
+| `xl/drawings/drawing*.xml` | ✅ zones de texte et formes — **jamais** le `name=` |
+| `comments*.xml` + `threadedComments/*` | ✅ les **deux** formats — **jamais** les `<author>` |
+| `xl/tables/table*.xml` | ✅ en-têtes **alignés** sur la cellule, jamais retraduits |
+| `pivotCache/*` + `pivotTables/*` | ✅ libellés traduits, cache **aligné** — index intacts |
+| `xl/styles.xml` — formats de nombre | ✅ les **littéraux** entre guillemets, jamais la syntaxe |
+| `docProps/core.xml` | ✅ titre, sujet, mots-clés — **jamais** `dc:creator` |
 
 La seconde n'est pas un détail : beaucoup d'exports automatiques n'utilisent
 **que** cette forme et ne produisent aucun `sharedStrings.xml`. Ne lire que le
 magasin partagé rendrait ces classeurs **inchangés sans lever d'erreur** — le
 pire des échecs, celui qui se croit réussi.
 
+
+### Annotations : on traduit ce qui s'affiche, jamais ce qui identifie
+
+Deux formats de commentaires **coexistent** : `comments*.xml` (historique,
+celui qui porte le texte affiché) et `threadedComments/*` (moderne, les fils).
+Excel maintient les deux — n'en traiter qu'un laisse la moitié des notes en
+langue source.
+
+Deux choses ne sont jamais traduites, et ce ne sont pas des oublis :
+
+* `name="TextBox 1"` — identifiant **interne** d'une forme, jamais affiché,
+  cité par les macros ;
+* `<author>` — un **nom de personne**, et `authorId` y renvoie **par index** :
+  toucher à cette liste réattribuerait les notes.
+
+### Les tableaux structurés : aligner, et surtout ne pas retraduire
+
+Un en-tête de tableau vit à **deux** endroits qui doivent rester
+rigoureusement identiques : `<tableColumn name="Produit">` et la **cellule**
+de la ligne d'en-tête. Excel refuse d'ouvrir un classeur où les deux divergent
+— pas une colonne fautive, un fichier qui ne s'ouvre pas.
+
+Or la cellule est **déjà** traduite via `sharedStrings`. Relever l'en-tête
+comme un texte de plus le soumettrait une **seconde** fois au modèle, qui peut
+rendre « Product » ici et « Article » là : on fabriquerait la divergence qu'on
+veut éviter, et on la paierait deux fois.
+
+La règle est donc l'**inverse d'un relevé** : rien n'est traduit dans le
+fichier de tableau, on y **recopie** ce que la cellule affiche désormais. D'où
+l'ordre, qui est tout l'enjeu — **l'alignement s'exécute APRÈS les injections
+de chaînes**, jamais avant.
+
+| Ne bouge pas | Pourquoi |
+|---|---|
+| `name="Tableau1"` | identifiant, cité par `Tableau1[Produit]` |
+| colonne sans cellule d'en-tête lisible | aucune preuve de ce qu'elle doit devenir |
+| `[#Totals]`, `[#Headers]` | **spécificateurs** du format, pas des noms de colonne |
+
+Les références structurées (`Tableau1[Produit]`, `[@Produit]`) sont réécrites
+du même geste : c'est le piège déjà payé sur les noms d'onglets, et il se
+traite de la même façon.
+
+### Les formats de nombre : un mini-langage, pas une phrase
+
+Un format peut afficher du texte à côté du chiffre — `#,##0" F CFA"`. C'est du
+visible : une colonne de montants qui garde « F CFA » dans un document traduit
+en anglais se remarque tout de suite.
+
+Mais **seul est du texte ce qui est entre guillemets**. Le reste est de la
+syntaxe :
+
+| morceau | ce que c'est |
+|---|---|
+| `#,##0` `0.0%` | emplacements de chiffres |
+| `;` | sépare les sections **positif / négatif / zéro / texte** |
+| `[Red]` | une couleur |
+| `[$-40C]` | une locale |
+| `@` | le texte de la cellule |
+
+**Et l'erreur ne se voit pas.** Un format invalide n'ouvre aucune boîte de
+dialogue : Excel le remplace **silencieusement** par « Standard », et toute la
+colonne change d'apparence. C'est le même genre d'échec que la cellule vidée du
+« piège déjà payé » — il se croit réussi.
+
+Deux conséquences dans le code :
+
+* `#,##0" unites";[Red]-#,##0" unites"` porte **deux fois** le même littéral,
+  un par section. Chacun est une balise distincte, et les deux suivent —
+  n'en traduire qu'un afficherait les **nombres négatifs** dans l'autre langue ;
+* un guillemet arrivant dans la traduction fermerait le littéral et couperait
+  le format en deux : il est retiré.
+
+Les formats **intégrés** d'Excel (`numFmtId < 164`) ne sont pas dans le
+fichier — Excel les localise lui-même. Il n'y a rien à y faire.
+
+### Les croisés dynamiques : le texte y est dupliqué, et les deux moitiés ne se traitent pas pareil
+
+Un croisé range son texte à deux endroits qui ne jouent pas le même rôle :
+
+| | contenu | traitement |
+|---|---|---|
+| **la table** (`pivotTable1.xml`) | `dataCaption`, `rowHeaderCaption`, le `name=` d'un `<dataField>` | **traduits** — ils n'existent que là |
+| **le cache** (`pivotCacheDefinition1.xml`) | `<cacheField name=>`, `<sharedItems>` | **alignés** — ce sont des copies de la feuille |
+
+Le cache est, par construction, une **copie de la source** : le nom des champs
+reprend l'en-tête des colonnes, les `sharedItems` leurs valeurs distinctes. Ces
+cellules sont **déjà traduites** via `sharedStrings`. Les traduire à nouveau
+donnerait deux formulations pour la même donnée — le croisé cesserait de
+correspondre à sa source — et Excel réécrit ce cache au premier
+rafraîchissement, si bien que le travail serait perdu **en plus** d'être faux.
+
+C'est la même règle que pour les caches de graphiques et les en-têtes de
+tableaux : **on traduit la source, on aligne ses copies.**
+
+**Les `<item x="0"/>` ne bougent jamais.** Ils renvoient aux `sharedItems`
+**par index** : l'ordre est le lien. En ajouter, en retirer ou en réordonner un
+seul réattribuerait les lignes du croisé. L'alignement remplace donc les
+valeurs **sur place**, exclusivement.
+
+Une difficulté propre à cette partie : le cache porte des **valeurs**
+(`<s v="Cafe moulu"/>`), pas des index de cellules. L'aligner exige de relier
+un texte source à sa traduction — or au moment de l'alignement, le magasin
+partagé est déjà réécrit. `self._sources` capture donc le magasin **à
+l'ouverture**, seul instant où il porte encore ses sources ; rien de plus n'est
+conservé.
+
+### Les graphiques : là où la logique du PPTX ne se recopie pas
+
+Le moteur PPTX traduit les `<c:v>` d'un graphique, et il a raison : là-bas, le
+graphique porte ses **propres** données.
+
+Dans un classeur, c'est faux. Un `<c:v>` sous un `<c:strCache>` est le **cache**
+d'une cellule de la feuille — déjà traduite via `sharedStrings`. Le traduire à
+nouveau, c'est soumettre deux fois le même texte au modèle (qui peut rendre deux
+formulations : le graphique afficherait alors autre chose que sa feuille), et
+pour rien — Excel réécrit ce cache au premier rafraîchissement.
+
+Mesuré sur un graphique produit par Excel : les **7 `<c:v>` sont tous sous un
+cache**, et les **3 vrais textes sont tous des `<a:t>`**.
+
+La règle : on traduit le texte riche (`<a:t>`) et les `<c:v>` **sans** cache
+au-dessus — du texte saisi en dur, qui n'est le reflet de rien.
+
+### Les noms d'onglets : deux gestes qui n'en font qu'un
+
+Un nom d'onglet est cité à **trois** endroits — `<sheet name>`, les
+`<definedName>`, et les `<f>` de chaque feuille. Renommer sans réécrire produit
+`#REF!` partout : un classeur ouvrable, d'apparence traduite, dont tous les
+calculs sont morts.
+
+La réécriture n'est pas un `str.replace`, et quatre cas l'imposent :
+
+| Cas | Piège |
+|---|---|
+| `="Ventes du mois"` | chaîne **littérale** qui contient le nom |
+| `Ventes` / `Ventes2` | un nom en **préfixe** d'un autre |
+| `[1]Ventes!A1` | classeur **externe**, qu'on ne traduit pas |
+| `'Chiffre d''affaires'!A1` | apostrophes **doublées** |
+
+**Un nom refusé n'est pas une erreur.** Excel impose ses règles (31 caractères,
+pas de `: \ / ? * [ ]`, pas d'apostrophe, pas de doublon) : une traduction qui
+les viole n'est pas appliquée et l'onglet garde son nom. Un onglet non traduit
+se voit ; un fichier qu'Excel refuse d'ouvrir ne se rattrape pas.
+
 ## Ce qui n'est pas encore fait
 
-Recensé dans `_PARTIES` (`engine.py`), avec le motif de chacun. C'est le **plan
-de travail**, ordonné par importance et non par ordre alphabétique.
+**Plus aucune partie du format.** `_PARTIES` (`engine.py`) les déclare toutes
+traitées, et `couverture()` ne rend plus aucun manque.
 
-| Partie | Pourquoi ça compte |
+Le mécanisme d'aveu reste en place et reste utile : `couverture()` rend la
+table, le relevé transporte la liste des manques sous `workbook.non_traite`, et
+`test_xlsx_squelette` vérifie que **les deux disent la même chose** — liste
+vide comprise. Une onzième partie qui apparaîtrait serait donc annoncée sans
+qu'on ait à y penser.
+
+Ce qui reste n'est pas une lacune de couverture mais un défaut de **rendu** :
+voir « Limites au-delà du texte » plus bas — **l'expansion**.
+
+## L'aperçu progressif — feuille par feuille
+
+Le classeur suit désormais le même flux que le PDF et le PPTX :
+
+1. **socle** — le classeur d'origine, converti une fois, affichable tout de
+   suite en langue source ;
+2. **greffe** — chaque feuille traduite est convertie *seule* et sa page
+   remplace celle du socle.
+
+`build_partial_xlsx(sortie, only_sheets={…})` écrit un classeur ne contenant
+que ces feuilles ; `feuilles()` les énumère **dans l'ordre d'affichage**.
+
+### Ce qui distingue un classeur d'un diaporama
+
+Une diapositive est autonome : on l'extrait, on la traduit, on l'injecte. **Une
+feuille ne l'est pas.** Excel déduplique le texte de tout le classeur dans
+`sharedStrings.xml`, et une même chaîne peut servir dix feuilles — aucune ne
+peut la revendiquer.
+
+On ne découpe donc **pas la traduction** par feuille : le classeur part d'un
+bloc, seul découpage honnête. C'est **l'affichage** qui est progressif.
+`chaines_par_feuille()` reconstruit le rattachement dans l'autre sens, en
+lisant les index que chaque feuille cite.
+
+### Trois pièges, chacun verrouillé par un test
+
+| Piège | Conséquence si ignoré |
 |---|---|
-| `xl/workbook.xml` — noms d'onglets | Visibles, **et cités par les formules** (`=Feuil1!A1`). Les traduire impose de réécrire les formules qui les citent : à faire d'un seul geste, sinon le classeur casse. |
-| `xl/charts/chart*.xml` | Titres, légendes, étiquettes d'axes. Le moteur PPTX les traite déjà — logique à **reprendre**, pas à inventer. |
-| `xl/drawings/drawing*.xml` | Zones de texte et formes posées sur la feuille. |
-| `comments*.xml` / `threadedComments` | Deux formats coexistent, l'ancien et le moderne. |
-| `xl/tables/table*.xml` | En-têtes de tableaux structurés — visibles, et cités en références structurées. |
-| `pivotCache` / `pivotTables` | Les libellés sont **dupliqués** entre le cache et la table. N'en traduire qu'un des deux désaligne le croisé au premier rafraîchissement. |
-| `xl/styles.xml` — formats personnalisés | Un format peut contenir du texte littéral (`#\ ##0\ "F CFA"`). C'est du visible, et la syntaxe doit rester intacte autour du mot. |
-| `docProps/core.xml` | Titre et sujet. Rarement décisifs — en dernier. |
+| Le numéro du fichier ne dit rien de la position de l'onglet | Feuilles affichées dans le désordre |
+| `sharedStrings.xml` est indexé par **position** | L'élaguer décale les index : les feuilles gardées affichent le mauvais texte |
+| `ProgressivePreview` compte en pages **1-basées**, `feuilles()` en index **0-basés** | Tout l'aperçu décalé d'un cran |
 
-`XLSXTranslatorEngine.couverture()` rend cette table, et le relevé d'extraction
-transporte la liste des manques sous `workbook.non_traite`. **L'écart entre la
-promesse et le code reste ainsi mesurable**, au lieu d'être une impression.
+Le partiel est **non destructif** (fichiers de contrôle calculés en mémoire) et
+écrit **atomiquement** — le convertisseur lit pendant qu'on écrit.
 
 ## Limites au-delà du texte
 
-* pas d'aperçu progressif : le classeur est traité d'un bloc ;
+* **une feuille longue s'imprime sur plusieurs pages.** La greffe exige alors
+  un appariement certain feuille ↔ page, qu'on n'a pas : dans ce cas l'aperçu
+  progressif est **désactivé pour ce classeur** et l'utilisateur garde le socle
+  en langue source jusqu'au document final. Mieux vaut ne rien greffer que
+  poser une traduction en face de la mauvaise page ;
 * l'aperçu passe par LibreOffice, comme tout format non-PDF ;
 * **l'expansion n'est pas gérée** — une traduction plus longue que sa source
   déborde de sa colonne ou s'affiche en `#####`. Les moteurs PDF et PPTX
@@ -106,9 +297,37 @@ promesse et le code reste ainsi mesurable**, au lieu d'être une impression.
 ## Vérifier
 
 ```bash
-backend/venv/Scripts/python.exe backend/tests/test_xlsx_squelette.py
+for t in squelette branchement partiel apercu_progressif onglets \
+         graphiques annotations tableaux croises formats; do
+  backend/venv/Scripts/python.exe backend/tests/test_xlsx_$t.py
+done
 ```
 
-29 contrôles sur un classeur **synthétique** écrit par la suite elle-même.
-Prouvé par mutation : garde numérique remise par-morceau → 28/29 ; lecture des
-chaînes en ligne retirée → 27/29.
+| suite | contrôles | ce qu'elle garde |
+|---|---|---|
+| `squelette` | 28 | chemin de bout en bout, garde numérique, aveu de couverture |
+| `branchement` | 17 | le moteur est bien celui qu'appelle l'application |
+| `partiel` | 17 | classeur amputé : ordre des onglets, index du magasin |
+| `apercu_progressif` | 11 | socle + greffe feuille par feuille |
+| `onglets` | 22 | renommage **et** réécriture des références |
+| `graphiques` | 11 | texte riche traduit, caches intacts |
+| `annotations` | 13 | les deux formats de commentaires, identités intactes |
+| `tableaux` | 11 | en-têtes alignés, références structurées suivies |
+| `croises` | 15 | table traduite, cache aligné, index intacts |
+| `formats` | 23 | littéraux traduits, **syntaxe intacte**, propriétés |
+
+Tout est prouvé sur des classeurs **synthétiques** écrits par la fabrique
+(`tests/fabrique_classeurs.py`), jamais sur un fichier réel : il faut pouvoir
+poser des pièges précis, et un classeur réel ne les contient qu'au hasard.
+
+**Chaque suite est passée au test de mutation** — un test qui passe aussi sur
+du code cassé ne prouve rien. Deux failles de mesure ont d'ailleurs été
+trouvées ainsi, dans les tests eux-mêmes :
+
+* la fabrique posait le tableau structuré en `A1`, ce qui rendait **invisible**
+  toute erreur de décalage de colonne (`col_debut = 0`). Le tableau occupe
+  maintenant `B2:C3`, avec un titre en `A1` qui n'en fait pas partie ;
+* le contrôle du spécificateur `[#Totals]` passait pour une mauvaise raison —
+  ce nom n'étant dans aucun renommage, la garde était sans effet. Une
+  **colonne** s'appelle désormais `#Totals`, seul cas où la garde change
+  quelque chose.

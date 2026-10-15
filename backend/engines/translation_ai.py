@@ -394,6 +394,37 @@ class TranslatorAI:
                 if slide_blocks:
                     batches.append(slide_blocks)
 
+        elif "workbook" in data:
+            # ── Mode XLSX ────────────────────────────────────────────────────
+            # Un classeur n'a ni pages ni diapositives : son relevé est une
+            # LISTE PLATE de chaînes, chacune portant son identité (partie +
+            # index) dans `context`. On la découpe donc en lots de taille fixe.
+            #
+            # POURQUOI UNE BRANCHE À PART, ET NON UN RELEVÉ DÉGUISÉ EN `document`
+            # ------------------------------------------------------------------
+            # Sans elle, `workbook` tombait dans la branche DOCX, qui lit
+            # `data["document"]` — absent. Aucun lot n'était formé et la
+            # traduction s'arrêtait sur « Aucun texte à traduire ». Le classeur
+            # ne ressortait donc PAS silencieusement inchangé (c'est déjà ça),
+            # mais il ne se traduisait pas.
+            #
+            # Le remède inverse — renommer `workbook` en `document` dans le
+            # moteur XLSX — a été écarté : le relevé dirait alors qu'un classeur
+            # est un document, et l'injection, qui relit `workbook`, devrait
+            # mentir de la même façon. On préfère une branche qui NOMME le
+            # format à un schéma qui le travestit.
+            #
+            # Le GROUPEMENT est volontairement plat. Regrouper par feuille
+            # serait plus proche de l'esprit des autres formats, mais le magasin
+            # `sharedStrings` est partagé PAR TOUT LE CLASSEUR : une même chaîne
+            # y sert plusieurs feuilles, et aucune ne peut la revendiquer.
+            if progress_callback:
+                progress_callback("Mode XLSX : groupement des chaînes du classeur.")
+            wb_blocks = [b for b in data["workbook"].get("elements", [])
+                         if b.get("text", "").strip()]
+            for i in range(0, len(wb_blocks), self.target_batch_size):
+                batches.append(wb_blocks[i:i + self.target_batch_size])
+
         else:
             if progress_callback: progress_callback("Mode DOCX : Groupement par sections et éléments détecté.")
             doc_data = data.get("document", {})

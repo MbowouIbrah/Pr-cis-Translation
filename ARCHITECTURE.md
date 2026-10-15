@@ -71,9 +71,16 @@ directement — ils demandent « qui traite le `.xlsx` ? ».
    refusé à la porte.
 5. C'est tout. Aucune route, aucun exécuteur à modifier.
 
-**Le numéro de version dit l'état réel.** Un moteur qui ne couvre pas encore
-son format part en `0.x` : le déclarer `1.0.0` ferait croire le contrat stable
-à quiconque lit `/health`. C'est le cas du moteur XLSX, en `0.1.0`.
+**Le numéro de version dit l'état réel.** Un moteur qui ne rend pas encore un
+document fidèle part en `0.x` : le déclarer `1.0.0` ferait croire le contrat
+stable à quiconque lit `/health`.
+
+C'est le cas du moteur XLSX, en `0.2.0`. Sa couverture du **texte** est
+pourtant complète — les dix endroits où Excel range du texte sont traités — et
+c'est précisément ce que ce numéro sert à ne pas laisser croire : il reste un
+défaut de **rendu**, l'expansion (une traduction plus longue déborde de sa
+colonne ou s'affiche en `#####`). Le passage en `1.0.0` se mérite sur ce que
+l'utilisateur voit, pas sur une table de couverture remplie.
 
 Le **moteur PDF fait exception** : il ne figure pas au registre. Il n'a pas le
 contrat en deux temps — sa traduction est progressive par construction
