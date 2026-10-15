@@ -5,62 +5,46 @@ Cochez au fur et à mesure ; les détails vivent dans les `CONTEXTE.md` / mémoi
 
 ---
 
-## 1. OCR — documents scannés  ⭐ chantier en cours
-Étude d'architecture : `docs/etude-ocr.md`. Choix des outils : `docs/etude-outils-ocr.md`.
+## 1. OCR — documents scannés  (chantier suspendu)
+Étude d'architecture : `docs/etude-ocr.md`. Le travail a été remis à zéro le
+07/08 et se poursuit sur la branche `feat/ocr-moteur-propre` (anciennes
+tentatives archivées en tags) ; rien de l'OCR n'est sur cette branche.
 
 Décision d'architecture (irréversible) : **on conserve l'image d'origine et on
 ne remplace que les zones de texte traduites.** Reconstruire la page sur une
-feuille vierge — ce que fait le moteur v2 — jetterait tout ce que l'OCR n'a pas
-vu : tampons, signatures, sceaux, filets. Rédhibitoire sur un acte d'état civil.
+feuille vierge jetterait tout ce que l'OCR n'a pas vu : tampons, signatures,
+sceaux, filets. Rédhibitoire sur un acte d'état civil.
 
 - [x] **Étape 0** — détecter un scan, ne rien facturer d'illisible.
-- [x] **Fabrique de scans synthétiques** avec vérité terrain (`tests/fabrique_scans.py`).
-- [ ] **Étape 1** — mesurer : Tesseract (plancher) puis docTR (candidat de tête).
-      Trancher sur 4 chiffres : erreur, **exactitude des NOMBRES**, écart de
-      position, secondes/page.
-- [ ] **Étape 2** — redressement (prérequis : l'inclinaison casse `_group_text_lines`).
-- [ ] **Étape 3** — OCR → spans. **Point de non-retour** : si les paragraphes ne
-      coïncident pas avec ceux du PDF numérique, tout le plan est à revoir. À
-      faire TÔT.
-- [ ] **Étape 4** — repli de police vers `backend/fonts/`.
-- [ ] **Étape 5** — masquage + remplissage du fond (le vrai travail neuf).
-- [ ] **Étape 6** — seuils de confiance ; page illisible signalée, non facturée.
-- [ ] **Étape 7** — intégration : quota, aperçu.
+- [x] Scans synthétiques avec vérité terrain : `backend/tests files/scans/`
+      (`scan_*.pdf` + `scan_*_verite.json`, hors dépôt).
+- [ ] Étapes suivantes (identification, redressement, OCR → spans, masquage,
+      seuils, intégration) : voir la branche OCR.
 
-**Tarif : inchangé pour l'instant** (décision du 27/07). On mesurera la qualité
-et le coût réel avant d'envisager un tarif distinct pour les scans.
+**Tarif : inchangé pour l'instant** (décision du 27/07).
 
 ## 2. Paiement & abonnement  ⭐ bloquant avant testeurs payants
-- [ ] Clés **Campay production** + test bout-en-bout réel (webhook public, jamais le SDK).
-- [ ] **Décider** : paiement à la page seul (déjà fonctionnel, 0 travail) **ou** abonnement mensuel récurrent.
-- [ ] Si récurrent : ajouter `plan_expires_at` / `subscription_status` sur `User` + bascule Gratuit à l'échéance.
-  - Le droit de lecture est déjà au **document** (`documents.paid`), pas au plan → l'expiration ne révoque rien de payé.
+- [x] Paiement à la page : le droit est au **document** (`documents.paid`), pas au plan.
+- [x] Abonnements Starter / Pro (branche `feat/abonnements`) : droits revérifiés
+      au crédit, quota de date à date, prorata.
+- [ ] Choisir le PSP de production : **ZitoPay** recommandé, NotchPay en secours.
+- [ ] Test bout-en-bout réel avec webhook public (jamais cru sur parole).
 
-## 3. Hébergement — bloqué sur le moyen de paiement
-- [x] Recette Docker complète et vérifiée (`docker-compose.yml`, `scripts/precis.sh`).
-- [ ] **Trouver un moyen de paiement.** Oracle, Google, AWS et Azure refusent
-      TOUS les cartes prépayées (politique écrite). Orange Money et les cartes
-      rechargeables ne passeront pas.
-      - Voie A : carte bancaire réelle avec paiement international activé → Oracle
-        gratuit (12 Go de RAM, 200 Go de disque). **Le meilleur choix de loin.**
-      - Voie B : PayPal (moins strict sur le prépayé) → Contabo/Hetzner,
-        ~4 000-5 000 FCFA/mois pour une machine qui tienne docTR.
-      - Voie C : hébergeur camerounais, Mobile Money direct, mais 25 000+ FCFA/mois.
-- [ ] Nom de domaine gratuit (deSEC → `precis-translator.dedyn.io`) + HTTPS.
+## 3. Hébergement
+- [x] Recette Docker complète (`docker-compose.yml`, `scripts/precis.sh`).
+- [x] AWS retenu : EC2 + compose en IaC (`infra/aws/`, `deploy/`,
+      `.github/workflows/`). Mode d'emploi : `docs/deploiement.md`,
+      `docs/guide-premiere-mise-en-ligne.md`.
+- [ ] Nom de domaine + HTTPS.
 - [ ] Sauvegarde HORS de l'hébergeur + alerte de disque plein.
 
-## 4. Excel — finir le moteur XLSX (aujourd'hui **0.1.0 = squelette**)
-Le chemin marche (un `.xlsx` entre et ressort ouvrable), mais 2 emplacements de texte sur ~10 sont traités.
-**Alternative honnête : retirer XLSX des formats acceptés** plutôt que livrer une traduction à 20 %.
-Reste, par ordre d'importance (`_PARTIES` dans `engine.py`) :
-- [ ] **Noms d'onglets** (`workbook.xml`) — + réécrire les formules qui les citent.
-- [ ] **Graphiques** (`chart*.xml`) — reprendre la logique du moteur PPTX.
-- [ ] **Zones de texte / formes** (`drawing*.xml`).
-- [ ] **Commentaires** (`comments*.xml` + `threadedComments`, 2 formats).
-- [ ] **En-têtes de tableaux** structurés (`table*.xml`).
-- [ ] **Tableaux croisés** (`pivotCache` / `pivotTables`).
-- [ ] **Formats personnalisés** (`styles.xml`) — garder la syntaxe intacte.
-- [ ] **Propriétés** (`docProps/core.xml`). En dernier.
+## 4. Excel — finir le moteur XLSX (ici **0.1.0 = squelette**)
+La couverture complète (10/10 emplacements) existe sur la branche
+`feat/xlsx-complet`, **pas encore fusionnée**. Sur cette branche, seuls 2
+emplacements sur ~10 sont traités (`_PARTIES` dans `engine.py`) : noms
+d'onglets, graphiques, formes, commentaires, tableaux structurés, tableaux
+croisés, formats personnalisés et propriétés restent à reprendre de cette
+branche.
 
 ## 5. PDF — défauts à résoudre
 - [x] **22 polices de repli absentes de `main`** (28/07). Ajoutées par `ee1cf67`

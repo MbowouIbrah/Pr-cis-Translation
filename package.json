@@ -8,8 +8,5 @@
     "dev:frontend": "npm --prefix frontend run --silent dev",
     "stop": "scripts\\stop.cmd",
     "docs:api": "backend\\venv\\Scripts\\python scripts/docs_api.py"
-  },
-  "devDependencies": {
-    "concurrently": "^9.1.2"
   }
 }

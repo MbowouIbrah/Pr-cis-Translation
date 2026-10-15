@@ -1,9 +1,13 @@
-# Public Assets
+# Fichiers publics
 
-Please copy the following files from the root `/public` directory to this `/frontend/public` directory:
-- `CV_Mbowou_Ibrahim_Pigier.pdf`
-- `CV_Mbowou_Ibrahim_Pigier_TRADUIT.pdf`
-- `Identite Precis.png`
-- `Logo.png`
+Servis tels quels à la racine du site par Vite / nginx.
 
-These are required for the logo animation, mascot display, and the interactive PDF translator preview on the home page.
+| Fichier | Utilisé par |
+|---|---|
+| `Logo.png` | Logo de l'application |
+| `Identite Precis.png` | Écran de démarrage, pages d'authentification, section « À propos » |
+| `demo_journal_avant.pdf` / `demo_journal_apres.pdf` | Démonstration avant / après de la page d'accueil (`DocumentDemo.tsx`) |
+| `favicon.svg` | Icône d'onglet |
+
+Ne rien déposer ici qui ne doive être public : tout fichier de ce dossier est
+téléchargeable par n'importe qui.

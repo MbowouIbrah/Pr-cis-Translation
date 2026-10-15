@@ -11,7 +11,6 @@ Projet **1.1.0** · backend 1.1.0 · frontend 1.0.0 · moteurs PDF 1.0.0, PPTX
 ## Démarrer
 
 ```bash
-npm install                      # à la racine (concurrently)
 npm run dev                      # backend + interface, avec les adresses
 ```
 
@@ -36,9 +35,13 @@ aperçus non-PDF.
 | [`docs/feuille-de-route-production.md`](docs/feuille-de-route-production.md) | **Aller en production** : les 6 étapes dans l'ordre, qui fait quoi, et la preuve de chacune |
 | [`docs/deploiement.md`](docs/deploiement.md) | **Mettre en ligne** : machine AWS, configuration, HTTPS, limites connues |
 | [`docs/etude-ocr.md`](docs/etude-ocr.md) | Étude : traduire des PDF **scannés** (OCR) — feature à venir |
+| [`docs/guide-premiere-mise-en-ligne.md`](docs/guide-premiere-mise-en-ligne.md) | Pas à pas de la toute première mise en ligne |
+| [`infra/aws/README.md`](infra/aws/README.md) | L'infrastructure AWS (CloudFormation, OIDC, secrets) |
 | `docs/api/index.html` | Les 32 opérations HTTP (`npm run docs:api`) |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | **Ajouter une fonctionnalité** : cycle, checklist, versions, retour arrière |
 | [`CHANGELOG.md`](CHANGELOG.md) | L'historique des versions |
+| [`TODO.md`](TODO.md) | Ce qui reste à faire, par priorité |
+| [`PASSATION.md`](PASSATION.md) | Où en est le travail en cours (reprise de session) |
 
 > L'historique détaillé des campagnes de correction (mesures, essais, impasses)
 > n'encombre plus la racine : il reste consultable dans l'**historique git**. La
@@ -84,3 +87,19 @@ for t in tests/test_*.py; do venv/Scripts/python.exe "$t"; done
 
 Vingt et une suites, **418 contrôles**, hors ligne. Une suite doit sortir en `exit=0` :
 un score vert avec un code de retour non nul cache toujours quelque chose.
+
+Les documents réels de recette (non versionnés, trop lourds) vivent dans
+`backend/tests files/` : `Code_de_la_Route.pdf`, `The Data Science
+Handbook.pdf`, `mv21.pdf`, et `scans/` (scans synthétiques + vérité terrain).
+
+## Arborescence
+
+```
+backend/      API FastAPI (app/), moteurs (engines/), migrations, tests, polices
+frontend/     Interface React + Vite
+docs/         Déploiement, feuille de route, étude OCR, doc API générée
+infra/aws/    Infrastructure AWS (CloudFormation)
+deploy/       Compose de production et script de déploiement SSM
+scripts/      Lanceurs de développement (dev.py, stop.cmd, precis.sh, docs_api.py)
+release/      Version globale du projet
+```
