@@ -46,6 +46,20 @@ def _save_partial(out_doc, partial_path):
     os.replace(tmp, partial_path)
 
 
+def _alleger_images(pages) -> bool:
+    """Retire les octets d'image recopiés dans des pages déjà extraites ; seul
+    le `xref` reste. Vrai si quelque chose a été retiré."""
+    allege = False
+    for pg in pages:
+        for el in pg.get("elements", []):
+            if el.get("type") == "image" and el.get("xref") and (
+                    el.get("asset_b64") or "asset_file" in el):
+                for k in ("asset_b64", "asset_file", "ext"):
+                    el.pop(k, None)
+                allege = True
+    return allege
+
+
 def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
                               pages=None, partial_path=None, on_event=None,
                               debug=False, cache_path=None, engine=None):
@@ -74,6 +88,24 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
                 cached_pages[pg.get("page_num")] = pg
         except Exception:
             cached_pages = {}
+
+    def _ecrire_cache():
+        try:
+            tmp = cache_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"pages": [cached_pages[k] for k in
+                                     sorted(cached_pages)]},
+                          f, ensure_ascii=False)
+            os.replace(tmp, cache_path)
+        except Exception:
+            pass
+
+    # Images PAR RÉFÉRENCE : le rendu les relit dans l'original (`src_doc`).
+    # Un cache écrit avant ce choix embarquait leurs octets en base64 (94 %
+    # du fichier) : on les retire une fois, le rendu reste identique puisque
+    # l'original est le même (le dossier est adressé par son empreinte).
+    if _alleger_images(cached_pages.values()) and cache_path:
+        _ecrire_cache()
 
     # MÉMOIRE DE DOCUMENT (cohérence inter-pages) : un texte court déjà traduit
     # dans CE document est resservi tel quel par les pages suivantes. Semée
@@ -131,7 +163,8 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
                 _emit(on_event, {"type": "page", "page": human,
                                  "status": "extracting",
                                  "done": human - 1, "total": total})
-                page_data = eng.extract_page_data(src, page_num, src[page_num])
+                page_data = eng.extract_page_data(
+                    src, page_num, src[page_num], images_par_reference=True)
 
                 if not debug:
                     _emit(on_event, {"type": "page", "page": human,
@@ -150,21 +183,13 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
                 # Reprise : la page traduite rejoint le cache immédiatement.
                 if cache_path:
                     cached_pages[human] = page_data
-                    try:
-                        tmp = cache_path + ".tmp"
-                        with open(tmp, "w", encoding="utf-8") as f:
-                            json.dump({"pages": [cached_pages[k] for k in
-                                                 sorted(cached_pages)]},
-                                      f, ensure_ascii=False)
-                        os.replace(tmp, cache_path)
-                    except Exception:
-                        pass
+                    _ecrire_cache()
 
             _emit(on_event, {"type": "page", "page": human,
                              "status": "rendering",
                              "done": human - 1, "total": total})
             eng.render_page_into(out, page_data, draw_borders=debug,
-                                 translated=not debug)
+                                 translated=not debug, src_doc=src)
             _save_partial(out, partial_path)
             done_pages.append(human)
             _emit(on_event, {"type": "page", "page": human, "status": "done",

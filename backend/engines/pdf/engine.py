@@ -184,6 +184,48 @@ def _walk_clips(trace):
             pile = pile + [d]
 
 
+def _image_bytes(doc, xref):
+    """Octets d'une image de `doc` et leur extension — (None, "png") si illisible.
+
+    Partagé par l'extraction (copie dans le JSON) et le rendu (relecture dans
+    l'original quand le JSON ne garde que le `xref`) : les deux doivent
+    produire EXACTEMENT les mêmes octets.
+    """
+    # Octets de l'image (extraits une fois par xref). Si l'image a un
+    # masque de transparence (SMask), on la compose avec son alpha en
+    # PNG — sinon les zones transparentes deviennent noires à la
+    # réinjection (insert_image ne connaît pas le masque séparé).
+    img_bytes, ext = None, "png"
+    try:
+        extracted = doc.extract_image(xref)
+        smask_xref = extracted.get("smask", 0)
+        if smask_xref:
+            base = fitz.Pixmap(doc, xref)
+            if base.alpha:
+                base = fitz.Pixmap(base, 0)          # retire alpha existant
+            if base.colorspace and base.colorspace.n > 3:
+                base = fitz.Pixmap(fitz.csRGB, base)  # CMYK -> RGB
+            mask = fitz.Pixmap(doc, smask_xref)
+            pix = fitz.Pixmap(base, mask)             # applique l'alpha
+            img_bytes = pix.tobytes("png")
+            ext = "png"
+        else:
+            img_bytes = extracted["image"]
+            ext = extracted.get("ext", "png")
+    except Exception:
+        # Repli : pixmap composite direct.
+        try:
+            pix = fitz.Pixmap(doc, xref)
+            if pix.colorspace and pix.colorspace.n > 3:
+                pix = fitz.Pixmap(fitz.csRGB, pix)
+            img_bytes = pix.tobytes("png")
+            ext = "png"
+        except Exception:
+            img_bytes, ext = None, "png"
+
+    return img_bytes, ext
+
+
 _mu = getattr(fitz, "mupdf", None)
 
 
@@ -442,9 +484,14 @@ class PDFObjectEngine:
         return data, output_json
 
     def extract_page_data(self, doc, page_num, page, embed_images=True,
-                          assets_dir=None):
+                          assets_dir=None, images_par_reference=False):
         """Extrait UNE page (élément `pages[]` du schéma JSON) — brique de
-        l'extraction complète et du pipeline progressif page par page."""
+        l'extraction complète et du pipeline progressif page par page.
+
+        `images_par_reference` : aucun octet d'image dans le JSON, seulement
+        le `xref` ; le rendu les relit dans l'original (`src_doc`). Les images
+        faisaient 94 % d'un `pages.json`, recopiées pour chaque langue et
+        chaque plage de pages alors que l'original, conservé, les contient."""
         page_data = {
             "page_num": page_num + 1,
             "width": page.rect.width,
@@ -461,7 +508,8 @@ class PDFObjectEngine:
         trace = self._drawing_trace(page)
         draw_els = self._extract_drawings(page, trace)
         img_els = self._extract_images(
-            doc, page, page_num, embed_images, assets_dir)
+            doc, page, page_num, embed_images, assets_dir,
+            images_par_reference)
         self._attach_image_order(page, img_els)
         graphiques = draw_els + img_els
         graphiques.sort(key=lambda e: e.get("seqno")
@@ -2676,7 +2724,8 @@ class PDFObjectEngine:
         return re.sub(r"\s{2,}", " ", res)
 
     # ── Images : une occurrence = un objet ───────────────────────────────────
-    def _extract_images(self, doc, page, page_num, embed_images, assets_dir):
+    def _extract_images(self, doc, page, page_num, embed_images, assets_dir,
+                        images_par_reference=False):
         elements = []
         try:
             infos = page.get_images(full=True)
@@ -2690,37 +2739,12 @@ class PDFObjectEngine:
                 rects = []
             if not rects:
                 continue
-            # Octets de l'image (extraits une fois par xref). Si l'image a un
-            # masque de transparence (SMask), on la compose avec son alpha en
-            # PNG — sinon les zones transparentes deviennent noires à la
-            # réinjection (insert_image ne connaît pas le masque séparé).
-            img_bytes, ext = None, "png"
-            try:
-                extracted = doc.extract_image(xref)
-                smask_xref = extracted.get("smask", 0)
-                if smask_xref:
-                    base = fitz.Pixmap(doc, xref)
-                    if base.alpha:
-                        base = fitz.Pixmap(base, 0)          # retire alpha existant
-                    if base.colorspace and base.colorspace.n > 3:
-                        base = fitz.Pixmap(fitz.csRGB, base)  # CMYK -> RGB
-                    mask = fitz.Pixmap(doc, smask_xref)
-                    pix = fitz.Pixmap(base, mask)             # applique l'alpha
-                    img_bytes = pix.tobytes("png")
-                    ext = "png"
-                else:
-                    img_bytes = extracted["image"]
-                    ext = extracted.get("ext", "png")
-            except Exception:
-                # Repli : pixmap composite direct.
-                try:
-                    pix = fitz.Pixmap(doc, xref)
-                    if pix.colorspace and pix.colorspace.n > 3:
-                        pix = fitz.Pixmap(fitz.csRGB, pix)
-                    img_bytes = pix.tobytes("png")
-                    ext = "png"
-                except Exception:
-                    img_bytes, ext = None, "png"
+            if images_par_reference:
+                for rect in rects:
+                    elements.append({"type": "image", "bbox": _rect(rect),
+                                     "xref": xref})
+                continue
+            img_bytes, ext = _image_bytes(doc, xref)
 
             asset_ref = None
             asset_b64 = None
@@ -2743,6 +2767,7 @@ class PDFObjectEngine:
                     "asset_b64": asset_b64,    # si embed_images=True
                 })
         return elements
+
 
     # ── Dessins vectoriels : un tracé = un objet ─────────────────────────────
     def _drawing_trace(self, page):
@@ -2868,7 +2893,7 @@ class PDFObjectEngine:
         return output_pdf
 
     def render_page_into(self, doc, page_data, draw_borders=False,
-                         assets_dir=None, translated=False):
+                         assets_dir=None, translated=False, src_doc=None):
         """Peint UNE page (page_data) dans un document fitz existant — brique du
         rendu progressif page par page (le PDF partiel grandit au fil des pages
         traduites) et de `reinject`. Nécessite `_build_fonts(data)` au préalable."""
@@ -2894,7 +2919,7 @@ class PDFObjectEngine:
             kind = el.get("type")
             try:
                 if kind == "image":
-                    self._draw_image(page, el, assets_dir)
+                    self._draw_image(page, el, assets_dir, src_doc)
                 elif kind == "drawing":
                     # En mode traduit, un soulignement de lien consommé
                     # est redessiné SOUS le texte reflowé, pas ici (sinon
@@ -2947,7 +2972,7 @@ class PDFObjectEngine:
         return variants[0]   # meilleur effort : couverture partielle
 
     # ── Rendu image ──────────────────────────────────────────────────────────
-    def _draw_image(self, page, el, assets_dir):
+    def _draw_image(self, page, el, assets_dir, src_doc=None):
         rect = fitz.Rect(el["bbox"])
         if rect.is_empty or rect.is_infinite:
             return
@@ -2959,6 +2984,8 @@ class PDFObjectEngine:
             if os.path.exists(path):
                 with open(path, "rb") as fh:
                     stream = fh.read()
+        elif src_doc is not None and el.get("xref"):
+            stream, _ = _image_bytes(src_doc, el["xref"])
         if stream is None:
             return
         clip = _clip_ops(page, el.get("clips"))
