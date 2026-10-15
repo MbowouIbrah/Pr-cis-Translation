@@ -19,6 +19,7 @@
  * d'œil : mélanger « 10 000 mots » et « 50 pages » selon les offres, c'était
  * deux unités qu'on ne peut pas rapporter l'une à l'autre de tête.
  */
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { motion } from 'motion/react';
@@ -27,6 +28,13 @@ import { useAuth } from '../../contexts/AuthContext';
 import { usePricing, formatMoney, type PricingPlan } from '../../hooks/usePricing';
 import { formatSize } from '../../lib/format';
 import Skeleton from '../ui/Skeleton';
+import PaymentModal from '../payment/PaymentModal';
+import { openSupport } from '../support/supportBus';
+import type { PlanChoice } from '../../hooks/usePayment';
+
+// Rang des plans vendus en ligne : on n'achète pas moins que ce qu'on a (le
+// serveur refuse de même). Entreprise / admin sont hors grille d'achat.
+const RANK: Record<string, number> = { free: 0, starter: 1, pro: 2 };
 
 interface PricingCardsProps {
   isAnnual: boolean;
@@ -101,8 +109,11 @@ function features(
 
 export default function PricingCards({ isAnnual }: PricingCardsProps) {
   const { t, i18n } = useTranslation();
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   const { pricing, loading } = usePricing();
+  const [buying, setBuying] = useState<PlanChoice | null>(null);
+  // Séparé du plan : la modale garde son contenu pendant l'animation de fermeture.
+  const [payOpen, setPayOpen] = useState(false);
 
   if (loading) {
     return (
@@ -123,14 +134,33 @@ export default function PricingCards({ isAnnual }: PricingCardsProps) {
   }
 
   const locale = i18n.language || 'fr';
+  const userRank = user ? (RANK[user.plan] ?? Infinity) : -1;
+  // Abonnement acheté : il a une fin, à renouveler avant (Campay ne prélève pas).
+  const until = user?.plan_expires_at
+    ? new Date(user.plan_expires_at).toLocaleDateString(locale, { dateStyle: 'long' })
+    : null;
 
   return (
+    <>
     <div className="pricing-grid">
       {pricing.plans.map((plan, idx) => {
         const isActive = user ? user.plan === plan.key : false;
         const isPopular = plan.key === 'pro';
         const amount = isAnnual ? plan.annual : plan.monthly;
         const onQuote = amount === null;
+        const forSale = plan.key in RANK && plan.key !== 'free' && !onQuote;
+        const renew = isActive && forSale && until !== null;
+        const included = !!user && forSale && !isActive && userRank > RANK[plan.key];
+        // Visiteur : tout bouton mène à la connexion, sauf l'offre gratuite
+        // déjà active pour personne. Connecté : le bouton agit sur place.
+        const toLogin = !user && (plan.key === 'free' || forSale || onQuote);
+        const act = () => {
+          if (onQuote) openSupport({ category: 'subscription' });
+          else if (forSale && (renew || (!isActive && !included))) {
+            setBuying({ key: plan.key, label: plan.label, annual: isAnnual });
+            setPayOpen(true);
+          }
+        };
 
         return (
           <motion.div
@@ -180,18 +210,34 @@ export default function PricingCards({ isAnnual }: PricingCardsProps) {
             </ul>
 
             <a
-              href={!user && plan.key === 'free' ? '/login' : '#'}
-              className={`btn-pricing${isActive ? ' btn-pricing--actif' : ''}`}
-              onClick={(e) => { if (!(!user && plan.key === 'free')) e.preventDefault(); }}
+              href={toLogin ? '/login' : '#'}
+              className={`btn-pricing${isActive && !renew ? ' btn-pricing--actif' : ''}`}
+              aria-disabled={included || (isActive && !renew) || undefined}
+              onClick={(e) => { if (!toLogin) { e.preventDefault(); act(); } }}
             >
-              {isActive ? t('pricing.active_plan')
+              {renew ? t('pricing.renew')
+                : isActive ? t('pricing.active_plan')
+                : included ? t('pricing.included')
                 : plan.key === 'free' ? t('pricing.start_free')
                 : onQuote ? t('pricing.contact_us')
                 : t('pricing.choose', { plan: plan.label })}
             </a>
+            {isActive && until && (
+              <p className="pricing-annuel">{t('pricing.active_until', { date: until })}</p>
+            )}
           </motion.div>
         );
       })}
     </div>
+
+    <PaymentModal
+      open={payOpen && buying !== null}
+      onClose={() => setPayOpen(false)}
+      pages={0}
+      plan={buying ?? undefined}
+      label={buying ? t('payment.plan_label', { plan: buying.label }) : ''}
+      onPaid={() => { void refreshUser(); }}
+    />
+    </>
   );
 }

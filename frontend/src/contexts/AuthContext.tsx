@@ -12,6 +12,8 @@ export interface AuthUser {
   email_verified: boolean;
   avatar_url: string | null;
   plan: string;
+  /** Fin de l'abonnement acheté (ISO) ; null = sans échéance. */
+  plan_expires_at?: string | null;
   storage_used: number;
   storage_limit: number;
 }

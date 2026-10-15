@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useTranslation } from 'react-i18next';
 import { X, Smartphone, Loader2, CheckCircle2, AlertCircle, CreditCard } from 'lucide-react';
-import { usePayment, type PayMethodId } from '../../hooks/usePayment';
+import { usePayment, type PayMethodId, type PlanChoice } from '../../hooks/usePayment';
 import { usePricing, formatMoney } from '../../hooks/usePricing';
 import { detectOperator, OPERATOR_LABEL, type Operator } from '../../lib/mobileMoney';
 import { MtnLogo, OrangeLogo, VisaLogo, MastercardLogo } from './PayLogos';
@@ -16,6 +16,8 @@ interface PaymentModalProps {
   documentId?: string;
   /** Ce que l'utilisateur paie, en une ligne. */
   label: string;
+  /** Achat d'un abonnement au lieu de pages (`pages` est alors ignoré). */
+  plan?: PlanChoice;
   onPaid: () => void;
 }
 
@@ -33,12 +35,13 @@ const input: React.CSSProperties = {
 };
 
 export default function PaymentModal({
-  open, onClose, pages, documentId, label, onPaid,
+  open, onClose, pages, documentId, label, plan, onPaid,
 }: PaymentModalProps) {
   const { t } = useTranslation();
   const { pricing } = usePricing();
   const {
-    phase, quote, methods, ussdCode, operator, error, getQuote, getMethods, pay, reset,
+    phase, quote, methods, ussdCode, operator, error,
+    getQuote, getPlanQuote, getMethods, pay, payPlan, reset,
   } = usePayment();
   const [phone, setPhone] = useState('');
   const [kind, setKind] = useState<Kind | null>(null);
@@ -64,8 +67,12 @@ export default function PaymentModal({
       : null;
 
   useEffect(() => {
-    if (open) { reset(); getQuote(pages, documentId); getMethods(); }
-  }, [open, pages, documentId, reset, getQuote, getMethods]);
+    if (!open) return;
+    reset();
+    if (plan) getPlanQuote(plan); else getQuote(pages, documentId);
+    getMethods();
+    // `plan` est un objet recréé à chaque rendu du parent : on suit ses champs.
+  }, [open, pages, documentId, plan?.key, plan?.annual, reset, getQuote, getPlanQuote, getMethods]);
 
   // Premier choix ouvert présélectionné : un clic de moins dans le cas
   // courant, et jamais un choix grisé.
@@ -86,7 +93,9 @@ export default function PaymentModal({
     // n'est pas un chiffre : personne ne tape son numéro de la même façon.
     if (!chosen) return;
     const digits = kind === 'mobile' ? phone.replace(/\D/g, '') : null;
-    const ok = await pay(pages, chosen, digits, documentId);
+    const ok = plan
+      ? await payPlan(plan, chosen, digits)
+      : await pay(pages, chosen, digits, documentId);
     if (ok) {
       onPaid();
       // On laisse la confirmation à l'écran une seconde : une fenêtre qui
@@ -136,7 +145,8 @@ export default function PaymentModal({
                   Paiement confirmé
                 </h2>
                 <p style={{ fontSize: '13.5px', color: 'var(--gray-500)', margin: 0 }}>
-                  Votre document est débloqué.
+                  {plan ? t('payment.plan_done', { plan: plan.label })
+                    : 'Votre document est débloqué.'}
                 </p>
               </div>
             ) : phase === 'waiting' ? (
@@ -187,9 +197,15 @@ export default function PaymentModal({
                               background: 'var(--gray-50)', marginBottom: 18 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13.5px',
                                 color: 'var(--gray-600)', marginBottom: 6 }}>
-                    <span>{billed} page{billed > 1 ? 's' : ''}</span>
+                    <span>
+                      {plan ? t('payment.plan_months', { count: quote?.months ?? (plan.annual ? 12 : 1) })
+                        : `${billed} page${billed > 1 ? 's' : ''}`}
+                    </span>
                     {quote && pricing && (
-                      <span>{formatMoney(quote.unit_price, quote.currency, pricing.decimals, 'fr')} / page</span>
+                      <span>
+                        {formatMoney(quote.unit_price, quote.currency, pricing.decimals, 'fr')}
+                        {plan ? t('pricing.per_month') : ' / page'}
+                      </span>
                     )}
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between',
@@ -203,7 +219,7 @@ export default function PaymentModal({
                   </div>
                   {/* Montant minimum de l'opérateur : on le dit avant l'invite,
                       et on dit où vont les pages payées en plus. */}
-                  {quote && pricing && billed > dues && (
+                  {!plan && quote && pricing && billed > dues && (
                     <p style={{ fontSize: '12px', color: 'var(--gray-500)', margin: '10px 0 0', lineHeight: 1.45 }}>
                       Montant minimum de {formatMoney(quote.min_amount, quote.currency, pricing.decimals, 'fr')} :{' '}
                       {billed - dues} page{billed - dues > 1 ? 's' : ''} en plus, créditée{billed - dues > 1 ? 's' : ''}{' '}
