@@ -6,7 +6,7 @@ Le texte est relevé avec sa géométrie et ses styles, traduit, puis réinject�
 dans le document d'origine — jamais reconstruit. PDF, PPTX, DOCX, XLSX.
 
 Projet **1.1.0** · backend 1.1.0 · frontend 1.0.0 · moteurs PDF 1.0.0, PPTX
-1.0.0, DOCX 1.0.0, XLSX **0.1.0** (squelette)
+1.0.0, DOCX 1.0.0, XLSX 0.2.0
 
 ## Démarrer
 
@@ -31,7 +31,7 @@ aperçus non-PDF.
 | [`backend/engines/pdf/CONTEXTE.md`](backend/engines/pdf/CONTEXTE.md) | Le moteur PDF — et sa clé de cache |
 | [`backend/engines/pptx/CONTEXTE.md`](backend/engines/pptx/CONTEXTE.md) | Le moteur PPTX — parties partagées, objets OLE |
 | [`backend/engines/docx/CONTEXTE.md`](backend/engines/docx/CONTEXTE.md) | Le moteur DOCX |
-| [`backend/engines/xlsx/CONTEXTE.md`](backend/engines/xlsx/CONTEXTE.md) | Le moteur XLSX — **squelette**, couverture partielle |
+| [`backend/engines/xlsx/CONTEXTE.md`](backend/engines/xlsx/CONTEXTE.md) | Le moteur XLSX — texte couvert (cellules, onglets, graphiques, commentaires, tableaux, croisés, formats) |
 | [`docs/feuille-de-route-production.md`](docs/feuille-de-route-production.md) | **Aller en production** : les 6 étapes dans l'ordre, qui fait quoi, et la preuve de chacune |
 | [`docs/deploiement.md`](docs/deploiement.md) | **Mettre en ligne** : machine AWS, configuration, HTTPS, limites connues |
 | [`docs/etude-ocr.md`](docs/etude-ocr.md) | Étude : traduire des PDF **scannés** (OCR) — feature à venir |
@@ -85,7 +85,7 @@ cd backend
 for t in tests/test_*.py; do venv/Scripts/python.exe "$t"; done
 ```
 
-Vingt et une suites, **418 contrôles**, hors ligne. Une suite doit sortir en `exit=0` :
+Trente-neuf suites, hors ligne. Une suite doit sortir en `exit=0` :
 un score vert avec un code de retour non nul cache toujours quelque chose.
 
 Les documents réels de recette (non versionnés, trop lourds) vivent dans
