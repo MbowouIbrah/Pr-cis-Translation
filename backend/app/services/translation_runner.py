@@ -700,14 +700,23 @@ def render_translation_bytes(original_path: str, translation_path: str,
     if not os.path.isfile(original_path) or not os.path.isfile(translation_path):
         raise FileNotFoundError("Original ou traduction manquant pour le rendu.")
 
+    # Mode STRUCTURE : sa traduction est l'identité, ses contours SONT le
+    # rendu. Rendu ici sans `debug`, il redevenait l'original : rouvert depuis
+    # la bibliothèque, l'aperçu montrait original/original. Le suffixe de cache
+    # (`_debug`, posé par /translate) est la seule trace du mode qui survive.
+    debug = os.path.basename(translation_path).split(".")[0].split("_")[1:2] == ["debug"]
+
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, f"render.{ext}")
         if ext == "pdf":
             with open(translation_path, encoding="utf-8") as f:
                 prev = json.load(f)
+            # Une page en mode structure n'a aucun paragraphe traduit
+            # (`tr_tagged`) : c'est son EXTRACTION qui compte, pas sa traduction.
             pages_traduites = {
                 pg.get("page_num") for pg in prev.get("pages", [])
-                if any(e.get("tr_tagged") for e in pg.get("elements", [])
+                if any((debug or e.get("tr_tagged"))
+                       for e in pg.get("elements", [])
                        if e.get("type") == "paragraph")
             }
             pages_traduites.discard(None)
@@ -723,7 +732,7 @@ def render_translation_bytes(original_path: str, translation_path: str,
             pdf_v2_stream.translate_pdf_progressive(
                 original_path, out, target_lang=target_lang,
                 pages=pages_traduites, partial_path=None, on_event=None,
-                debug=False, cache_path=translation_path,
+                debug=debug, cache_path=translation_path,
             )
         elif ext == "docx":
             ok, msg = engines.new_engine("docx").inject_translation(original_path,
