@@ -724,6 +724,173 @@ def _p27_clips_et_ordre(eng):
     return res
 
 
+def _p28_texte_masque(eng):
+    """PDF retouché : l'ancien texte reste dans le fichier, caché sous un aplat
+    opaque peint APRÈS lui. Il ne doit ni être extrait ni ressortir au rendu ;
+    tout ce qui peut se voir (fond peint avant, voile translucide, recouvrement
+    partiel) reste."""
+    doc = fitz.open()
+    pg = doc.new_page(width=300, height=240)
+    pg.insert_text((20, 40), "ANCIENNE VERSION", fontname=FONT, fontsize=11)
+    pg.draw_rect(fitz.Rect(10, 25, 220, 50), color=None, fill=(1, 1, 1))
+    pg.insert_text((20, 70), "NOUVELLE VERSION", fontname=FONT, fontsize=11)
+    pg.draw_rect(fitz.Rect(10, 85, 220, 110), color=None, fill=(0.9, 0.9, 0.9))
+    pg.insert_text((20, 100), "SUR FOND", fontname=FONT, fontsize=11)
+    pg.insert_text((20, 140), "SOUS VOILE", fontname=FONT, fontsize=11)
+    pg.draw_rect(fitz.Rect(10, 125, 220, 150), color=None, fill=(1, 1, 1),
+                 fill_opacity=0.5)
+    pg.insert_text((20, 180), "GAUCHE DROITE", fontname=FONT, fontsize=11)
+    pg.draw_rect(fitz.Rect(70, 165, 220, 190), color=None, fill=(1, 1, 1))
+    # Nouvelle version posée AU MÊME ENDROIT que l'ancienne.
+    pg.insert_text((20, 220), "ANNEE 2024", fontname=FONT, fontsize=11)
+    pg.draw_rect(fitz.Rect(10, 205, 220, 230), color=None, fill=(1, 1, 1))
+    pg.insert_text((20, 220), "ANNEE 2026", fontname=FONT, fontsize=11)
+    pd = eng.extract_page_data(doc, 0, pg, embed_images=False)
+    txt = " ".join(e.get("text", "") for e in pd["elements"]
+                   if e.get("type") == "paragraph")
+    out = fitz.open()
+    eng.render_page_into(out, pd, draw_borders=False)
+    rendu = out[0].get_text()
+    res = []
+    res.append(("P28  piège armé (le texte masqué est lisible par fitz)",
+                "ANCIENNE" in pg.get_text(), ""))
+    res.append(("P28  texte sous aplat opaque postérieur : ni extrait ni rendu",
+                "ANCIENNE" not in txt and "ANCIENNE" not in rendu,
+                f"extrait={txt[:60]!r}"))
+    res.append(("P28  le visible reste (dessus, fond antérieur, voile translucide)",
+                all(m in txt for m in ("NOUVELLE", "SUR FOND", "SOUS VOILE")),
+                f"extrait={txt[:80]!r}"))
+    res.append(("P28  recouvrement partiel : la partie visible reste, l'autre part",
+                "GAUCHE" in txt and "DROITE" not in txt, f"extrait={txt[:80]!r}"))
+    res.append(("P28  nouvelle version posée sur l'ancienne : entière, une seule fois",
+                txt.count("ANNEE 2026") == 1 and "2024" not in txt,
+                f"extrait={txt[-40:]!r}"))
+    return res
+
+
+def _p29_sous_ensembles_homonymes(eng):
+    """Deux sous-ensembles d'une MÊME police (même nom de base), glyph-id
+    différents, l'un SANS cmap Unicode (cas d'un éditeur de PDF). La cmap
+    reconstruite du second ne doit pointer que vers SES glyphes : mélangée à
+    ceux du premier, « PROFIL » se rendait « P+OFI' »."""
+    import io
+    from fontTools import subset
+    from fontTools.ttLib import TTFont, newTable
+    from fontTools.ttLib.tables._c_m_a_p import cmap_format_6
+    src_ttf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                           "fonts", "opensans-Regular.ttf")
+
+    def _sous_ensemble(texte):
+        ft = TTFont(src_ttf)
+        s = subset.Subsetter(subset.Options())
+        s.populate(text=texte)
+        s.subset(ft)
+        for rec in ft["name"].names:
+            if rec.nameID in (1, 4, 6):
+                rec.string = "P29Sans"
+        b = io.BytesIO()
+        ft.save(b)
+        return b.getvalue()
+
+    def _sans_cmap_unicode(buf):
+        ft = TTFont(io.BytesIO(buf))
+        sub = cmap_format_6(6)
+        sub.platformID, sub.platEncID, sub.language = 1, 0, 0
+        sub.cmap = {i: n for i, n in enumerate(ft.getGlyphOrder()[:256])}
+        ft["cmap"] = newTable("cmap")
+        ft["cmap"].tableVersion = 0
+        ft["cmap"].tables = [sub]
+        b = io.BytesIO()
+        ft.save(b)
+        return b.getvalue()
+
+    A, B = "PROFIL", "PRABCDEGHJK"      # glyph-id de P et R différents
+    fa, fb = _sous_ensemble(A), _sous_ensemble(B)
+    doc = fitz.open()
+    pg = doc.new_page(width=300, height=120)
+    pg.insert_font(fontname="FA", fontbuffer=fa)
+    pg.insert_font(fontname="FB", fontbuffer=fb)
+    pg.insert_text((20, 40), A, fontname="FA", fontsize=14)
+    pg.insert_text((20, 80), B, fontname="FB", fontsize=14)
+    # Le sous-ensemble de A perd sa cmap Unicode dans le PDF.
+    for x in range(1, doc.xref_length()):
+        # BaseFont = nom PostScript, comme dans un vrai PDF (fitz écrit
+        # « P29Sans Regular », que la trace ne connaît pas).
+        if doc.xref_get_key(x, "BaseFont")[0] == "name":
+            doc.xref_set_key(x, "BaseFont", "/P29Sans")
+        k = doc.xref_get_key(x, "FontFile2")
+        if k[0] == "xref":
+            ff = int(k[1].split()[0])
+            if len(TTFont(io.BytesIO(doc.xref_stream(ff))).getGlyphOrder()) \
+                    == len(TTFont(io.BytesIO(fa)).getGlyphOrder()):
+                doc.update_stream(ff, _sans_cmap_unicode(doc.xref_stream(ff)))
+    doc = fitz.open("pdf", doc.tobytes())
+
+    def _contour(ft, nom):
+        g = ft["glyf"][nom]
+        return tuple(g.getCoordinates(ft["glyf"])[0]) if g.numberOfContours \
+            else ()
+
+    ref = TTFont(io.BytesIO(fa))
+    ref_cmap = ref.getBestCmap()
+    fonts = eng._extract_fonts(doc)
+    noms = [n for n in fonts if "P29Sans" in n]
+    bons, detail = False, f"polices={list(fonts)}"
+    homonymes = len(noms) == 1 and len(fonts[noms[0]]) == 2
+    for f in fonts.get(noms[0], []) if noms else []:
+        ft = TTFont(io.BytesIO(__import__("base64").b64decode(f["b64"])))
+        if len(ft.getGlyphOrder()) != len(ref.getGlyphOrder()):
+            continue
+        cm = ft.getBestCmap() or {}
+        faux = [c for c in A if ord(c) not in cm
+                or _contour(ft, cm[ord(c)]) != _contour(ref, ref_cmap[ord(c)])]
+        bons, detail = not faux, f"glyphes faux : {faux}"
+    return [("P29  piège armé (deux sous-ensembles homonymes)", homonymes,
+             f"polices={list(fonts)}"),
+            ("P29  cmap reconstruite : chaque lettre pointe vers SON glyphe",
+             bons, detail)]
+
+
+def _p30_rectangles_troues(eng):
+    """Icônes en remplissage NON-ZÉRO : un cadre et un intérieur tracés à
+    contresens (trou). MuPDF ramène chaque « m l l l h » à un `re` dont le
+    drapeau d'orientation ne dit pas le sens : le cadre de l'enveloppe et les
+    barres du calendrier ressortaient pleins. Les deux sens sont testés."""
+    H = 100
+
+    def _rect(x0, y0, x1, y1, horaire):
+        # Coordonnées PDF (y vers le haut) ; « horaire » vu à l'écran.
+        a, b = H - y0, H - y1
+        pts = ([(x0, a), (x1, a), (x1, b), (x0, b)] if horaire
+               else [(x0, a), (x0, b), (x1, b), (x1, a)])
+        return (f"{pts[0][0]} {pts[0][1]} m "
+                + " ".join(f"{x} {y} l" for x, y in pts[1:]) + " h ")
+    ops = ("0 0 0 rg "
+           + _rect(10, 10, 60, 60, True) + _rect(20, 20, 50, 50, False) + "f "
+           + _rect(110, 10, 160, 60, False) + _rect(120, 20, 150, 50, True)
+           + "f\n")
+    doc = fitz.open()
+    pg = doc.new_page(width=200, height=H)
+    xref = doc.get_new_xref()
+    doc.update_object(xref, "<<>>")
+    doc.update_stream(xref, ops.encode("latin-1"))
+    doc.xref_set_key(pg.xref, "Contents", f"{xref} 0 R")
+    pd = eng.extract_page_data(doc, 0, doc[0], embed_images=False)
+    out = fitz.open()
+    eng.render_page_into(out, pd, draw_borders=False)
+
+    def _gris(d, x, y):
+        pix = d[0].get_pixmap(dpi=72, clip=fitz.Rect(x, y, x + 1, y + 1))
+        return pix.pixel(0, 0)[0]
+    arme = all(_gris(doc, x, 35) > 200 and _gris(doc, x - 20, 35) < 60
+               for x in (35, 135))
+    rendu = {x: (_gris(out, x, 35), _gris(out, x - 20, 35)) for x in (35, 135)}
+    return [("P30  piège armé (deux icônes trouées, sens opposés)", arme, ""),
+            ("P30  rectangles en non-zéro : le trou reste, le cadre reste plein",
+             all(t > 200 and c < 60 for t, c in rendu.values()),
+             f"(trou, cadre) = {rendu}")]
+
+
 def run():
     scratch = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "_generic_tmp")
@@ -1305,6 +1472,10 @@ def run():
     # repeint le carré, le rectangle entier. Et une image peinte AVANT un fond
     # qui la recouvre doit rester dessous.
     for nom, bon, detail in _p27_clips_et_ordre(eng):
+        ok(nom, bon, detail)
+    for nom, bon, detail in (_p28_texte_masque(eng)
+                             + _p29_sous_ensembles_homonymes(eng)
+                             + _p30_rectangles_troues(eng)):
         ok(nom, bon, detail)
 
     # ── Rapport ─────────────────────────────────────────────────────────────

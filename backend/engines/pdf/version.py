@@ -42,7 +42,7 @@ précèdent appartiennent à la phase de mise au point ; leurs caches ont été
 purgés, aucune collision n'est possible.
 """
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 #: Jeton porté par le NOM des rendus en cache (`…render.v1.0.0.pdf`).
 #: DÉRIVÉ de la version : les deux ne peuvent plus diverger.

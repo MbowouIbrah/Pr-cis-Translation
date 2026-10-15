@@ -136,7 +136,7 @@ qui télécharge pendant l'écriture ne voit jamais un fichier tronqué.
 backend/venv/Scripts/python.exe backend/tests/test_engine_v2_generic.py
 ```
 
-59 contrôles sur un PDF **synthétique**, généré par la suite elle-même. C'est
+77 contrôles sur un PDF **synthétique**, généré par la suite elle-même. C'est
 délibéré : un correctif prouvé sur le document qui l'a révélé est une
 heuristique déguisée. Tout défaut trouvé sur un vrai document doit être
 reproduit sur le synthétique avant d'être corrigé.

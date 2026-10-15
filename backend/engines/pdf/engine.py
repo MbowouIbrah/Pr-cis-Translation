@@ -365,6 +365,143 @@ def _effective_clips(pile, rect):
     return out
 
 
+def _sens_des_rectangles(page, el, max_rect=4):
+    """Fixe le SENS de tracé des rectangles d'un remplissage non-zéro composé.
+
+    En non-zéro, un sous-chemin tracé à contresens d'un autre y perce un trou
+    (icônes : enveloppe, calendrier). MuPDF ramène un « m l l l h »
+    rectangulaire à un item `re` dont le drapeau `orientation` ne dit pas le
+    vrai sens : mesuré, deux rectangles tracés en sens OPPOSÉS y valent tous
+    deux -1. Le seul témoin fiable est l'original : on essaie chaque
+    combinaison de sens et on garde celle dont l'encre coïncide le mieux avec
+    la page. Sans effet si le sens ne peut rien changer (un seul sous-chemin,
+    pair-impair, pas de remplissage) ; à égalité, le tracé par défaut reste."""
+    items = el.get("items") or []
+    rects = [i for i, it in enumerate(items) if it.get("op") == "re"]
+    if (not rects or len(rects) > max_rect or len(items) < 2
+            or el.get("even_odd") or el.get("fill_color") is None
+            or "f" not in (el.get("draw_type") or "") or page.rotation):
+        return
+    try:
+        bb = fitz.Rect(el["bbox"])
+        if bb.is_empty:
+            return
+        zoom = fitz.Matrix(4, 4)
+        ref = page.get_pixmap(matrix=zoom, clip=bb, colorspace=fitz.csGRAY)
+        encre = sum(el["fill_color"]) / 3 * 255
+        def masque(pix):
+            s = pix.samples
+            return [abs(v - encre) < 60 for v in s]
+        cible = masque(ref)
+        meilleur, score_max = None, -1
+        for combo in range(1 << len(rects)):
+            for k, i in enumerate(rects):
+                if combo >> k & 1:
+                    items[i]["sens"] = "horaire"
+                else:
+                    items[i].pop("sens", None)
+            doc = fitz.open()
+            pg = doc.new_page(width=page.rect.width, height=page.rect.height)
+            sh = pg.new_shape()
+            if _trace_items(sh, items):
+                sh.finish(fill=el["fill_color"], color=None, even_odd=False,
+                          closePath=False)
+                sh.commit()
+            pix = pg.get_pixmap(matrix=zoom, clip=bb, colorspace=fitz.csGRAY)
+            score = sum(a == b for a, b in zip(masque(pix), cible))
+            if score > score_max:
+                meilleur, score_max = combo, score
+        for k, i in enumerate(rects):
+            if meilleur >> k & 1:
+                items[i]["sens"] = "horaire"
+            else:
+                items[i].pop("sens", None)
+    except Exception:
+        for i in rects:
+            items[i].pop("sens", None)
+
+
+def _opaque_covers(draw_els):
+    """(seqno, rect) des aplats qui cachent À COUP SÛR ce qu'ils recouvrent :
+    rectangle plein, opaque, découpé (s'il l'est) par des rectangles seulement.
+    Tout le reste (chemin quelconque, transparence, découpe courbe) est écarté :
+    on ne déclare jamais caché un texte qui pourrait se voir."""
+    out = []
+    for el in draw_els:
+        seq = el.get("seqno")
+        items = el.get("items") or []
+        if (seq is None or el.get("fill_color") is None
+                or "f" not in (el.get("draw_type") or "")
+                or (el.get("fill_opacity") if el.get("fill_opacity")
+                    is not None else 1) < 1
+                or len(items) != 1 or items[0].get("op") != "re"):
+            continue
+        r = fitz.Rect(items[0]["rect"])
+        for c in el.get("clips") or ():
+            ci = c.get("items") or []
+            if len(ci) != 1 or ci[0].get("op") != "re":
+                r = None
+                break
+            r &= fitz.Rect(ci[0]["rect"])
+        if r is not None and not r.is_empty:
+            out.append((seq, r))
+    return out
+
+
+def _hidden_chars(page, draw_els):
+    """Caractères ENTIÈREMENT recouverts par un aplat opaque peint APRÈS eux.
+
+    Un PDF retouché dans un éditeur garde souvent son ancien texte sous un
+    rectangle blanc ou de la couleur du fond, la nouvelle version posée
+    par-dessus. Invisible dans l'original, ce texte ressortait au rendu : les
+    sections en double, décalées, chevauchant la version visible.
+    La nouvelle version est souvent posée AU MÊME ENDROIT que l'ancienne
+    (« 2026 » sur « 2024 ») : un même caractère, à la même origine, peut être
+    à la fois caché et visible. On compte donc, par (unicode, origine), les
+    occurrences cachées et visibles : `_is_hidden` retire les premières et
+    garde autant d'exemplaires que la page en montre.
+    Renvoie {unicode: [[origine, cachés, visibles], ...]}."""
+    covers = _opaque_covers(draw_els)
+    if not covers:
+        return {}
+    try:
+        trace = page.get_texttrace()
+    except Exception:
+        return {}
+    hidden = defaultdict(list)
+    for span in trace:
+        seq = span.get("seqno")
+        after = [r for s, r in covers if seq is not None and s > seq]
+        for ch in span.get("chars", ()):
+            u, origin, bb = ch[0], ch[2], fitz.Rect(ch[3])
+            if bb.is_empty:
+                bb = fitz.Rect(origin, origin)
+            cache = any((r + (-0.5, -0.5, 0.5, 0.5)).contains(bb) for r in after)
+            for e in hidden[u]:
+                if abs(e[0][0] - origin[0]) < 0.5 and abs(e[0][1] - origin[1]) < 0.5:
+                    e[1 if cache else 2] += 1
+                    break
+            else:
+                hidden[u].append([origin, int(cache), int(not cache)])
+    return {u: es for u, es in hidden.items() if any(e[1] for e in es)}
+
+
+def _is_hidden(hidden, c):
+    """Le caractère `rawdict` `c` est-il l'un des caractères cachés ? Chaque
+    réponse « oui » consomme une occurrence cachée à cette position."""
+    es = hidden.get(ord(c["c"])) if len(c["c"]) == 1 else None
+    if not es:
+        return False
+    ox, oy = c["origin"]
+    for e in es:
+        if abs(ox - e[0][0]) < 0.5 and abs(oy - e[0][1]) < 0.5:
+            if e[1] > 0:
+                e[1] -= 1
+                return True
+            return False
+    return False
+
+
 def _trace_items(shape, items):
     """Construit dans `shape` le chemin des items sérialisés. Vrai si au moins
     un segment a été tracé."""
@@ -380,7 +517,15 @@ def _trace_items(shape, items):
                                   fitz.Point(it["p3"]), fitz.Point(it["p4"]))
                 drew = True
             elif op == "re":
-                shape.draw_rect(fitz.Rect(it["rect"]))
+                r = fitz.Rect(it["rect"])
+                if it.get("sens") == "horaire":
+                    # SENS du tracé : en remplissage non-zéro, c'est lui qui
+                    # perce un trou (icône enveloppe = cadre plein + intérieur
+                    # tracé à contresens). `draw_rect` trace en sens
+                    # antihoraire (à l'écran) ; cf. `_sens_des_rectangles`.
+                    shape.draw_polyline([r.tl, r.tr, r.br, r.bl, r.tl])
+                else:
+                    shape.draw_rect(r)
                 drew = True
             elif op == "qu":
                 pts = it["quad"]
@@ -549,7 +694,8 @@ class PDFObjectEngine:
         #    CID/Type0 (Identity-H) sont embarquées sans cmap Unicode : on la
         #    reconstruit à partir de get_texttrace() qui expose, pour chaque
         #    caractère, son code Unicode ET son glyph-id dans le sous-ensemble.
-        u2g_by_xref = defaultdict(dict)     # xref -> {unicode: gid}
+        u2g_by_xref = defaultdict(dict)     # xref -> {unicode: {gid, ...}}
+        glyph_info = {}                     # xref -> (nb glyphes, cmap Unicode)
         name_xrefs = defaultdict(set)       # nom propre -> {xref, ...}
         name_ext = {}                       # xref -> ext
         for pno in range(len(doc)):
@@ -576,10 +722,16 @@ class PDFObjectEngine:
                 xrefs = page_name2xref.get(nm)
                 if not xrefs:
                     continue
-                for ch in span.get("chars", []):
-                    u, g = ch[0], ch[1]
-                    for xr in xrefs:     # ambiguïté (rare) : on renseigne tous
-                        u2g_by_xref[xr][u] = g
+                chars = [(ch[0], ch[1]) for ch in span.get("chars", [])]
+                for xr in self._span_owners(doc, xrefs, chars, glyph_info):
+                    for u, g in chars:
+                        u2g_by_xref[xr].setdefault(u, set()).add(g)
+        # Un unicode vu sous DEUX glyph-id différents pour un même xref : la
+        # trace n'a pas su dire à quel sous-ensemble il appartenait. Mieux vaut
+        # pas de glyphe (repli de police) qu'un glyphe FAUX.
+        u2g_by_xref = {xr: {u: next(iter(gs)) for u, gs in m.items()
+                            if len(gs) == 1}
+                       for xr, m in u2g_by_xref.items()}
 
         # 2) Extraction des octets de chaque sous-ensemble + patch de cmap si
         #    nécessaire. On garde TOUS les sous-ensembles d'un même nom : à la
@@ -599,6 +751,43 @@ class PDFObjectEngine:
                     "b64": base64.b64encode(buf).decode("ascii"),
                 })
         return fonts
+
+    @staticmethod
+    def _span_owners(doc, xrefs, chars, glyph_info):
+        """Sous-ensemble(s) auxquels attribuer les (unicode, gid) d'un span.
+
+        La trace ne donne que le nom SANS préfixe : deux sous-ensembles
+        homonymes (« AAAAAA+LiberationSerif » d'un éditeur, « JTNSRL+… » du
+        générateur d'origine) y sont indiscernables. Renseigner les deux
+        mélangeait leurs glyph-id : la cmap reconstruite de l'un pointait vers
+        les glyphes de l'autre, et « PROFIL » se rendait « P+OFI' ».
+        On départage par COHÉRENCE : un sous-ensemble à cmap Unicode revendique
+        le span si sa cmap donne exactement ces gid ; sinon le span revient aux
+        candidats sans cmap Unicode qui ont assez de glyphes pour l'afficher."""
+        if len(xrefs) == 1:
+            return xrefs
+        for xr in xrefs:
+            if xr not in glyph_info:
+                n, cmap = 0, {}
+                try:
+                    from fontTools.ttLib import TTFont
+                    ft = TTFont(io.BytesIO(doc.extract_font(xr)[3]))
+                    n = len(ft.getGlyphOrder())
+                    cmap = {u: ft.getGlyphID(name)
+                            for u, name in (ft.getBestCmap() or {}).items()}
+                except Exception:
+                    pass
+                glyph_info[xr] = (n, cmap)
+        def plausible(xr):
+            n = glyph_info[xr][0]
+            return n == 0 or all(g < n for _, g in chars)
+        avec = [xr for xr in xrefs if glyph_info[xr][1]]
+        for xr in avec:
+            cmap = glyph_info[xr][1]
+            if plausible(xr) and all(cmap.get(u) == g for u, g in chars):
+                return [xr]
+        sans = [xr for xr in xrefs if not glyph_info[xr][1] and plausible(xr)]
+        return sans
 
     @staticmethod
     def _maybe_patch_cmap(buf, u2g):
@@ -848,6 +1037,7 @@ class PDFObjectEngine:
         # Le texte, lui, reste INTACT (les espaces de tête sont un signal pour
         # les titres à lettres espacées), et `origin` aussi (peinture source).
         raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+        hidden = _hidden_chars(page, draw_els)
         spans = []
         for block in raw.get("blocks", []):
             if block.get("type") != 0:      # 0 = texte
@@ -860,8 +1050,10 @@ class PDFObjectEngine:
                     # « Note: »), ils créent des spans/lignes parasites qui
                     # cassent le regroupement en lignes et paragraphes. Filtrés
                     # AU CARACTÈRE pour rester alignés avec leurs positions.
+                    # Idem pour les caractères CACHÉS sous un aplat opaque.
                     chars = [c for c in span.get("chars", ())
-                             if _CTRL_RE.sub("", c["c"])]
+                             if _CTRL_RE.sub("", c["c"])
+                             and not (hidden and _is_hidden(hidden, c))]
                     text = "".join(c["c"] for c in chars)
                     if not text.strip():
                         continue
@@ -2800,6 +2992,7 @@ class PDFObjectEngine:
             if d.get("type") in ("clip", "group"):
                 continue
             el = _serialize_drawing(d)
+            _sens_des_rectangles(page, el)
             clips = _effective_clips(pile, d.get("rect"))
             if clips:
                 el["clips"] = clips
