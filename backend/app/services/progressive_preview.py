@@ -175,6 +175,14 @@ def ecrire_atomiquement(chemin: str, donnees: bytes) -> None:
     corrompu.
     """
     tmp = chemin + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(donnees)
-    os.replace(tmp, chemin)
+    try:
+        with open(tmp, "wb") as f:
+            f.write(donnees)
+        os.replace(tmp, chemin)
+    except BaseException:
+        # Disque plein : le temporaire à moitié écrit ne doit pas rester.
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise

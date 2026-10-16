@@ -21,6 +21,7 @@ appelables depuis un script ou un test sans monter de serveur.
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -78,9 +79,7 @@ def run_translation_job(
         jobs.emit(job_id, "progress", {"step": "start", "message": "Démarrage du job...", "page": 0, "total": None})
 
         # 2. Sauvegarde de l'original
-        if not os.path.exists(original_path):
-            with open(original_path, "wb") as f:
-                f.write(file_bytes)
+        _sauver_original(original_path, file_bytes)
 
         # 3. Extraction
         if not os.path.exists(extraction_path):
@@ -215,9 +214,7 @@ def run_xlsx_progressive_job(
     """
     eng = engines.new_engine("xlsx")
     try:
-        if not os.path.exists(original_path):
-            with open(original_path, "wb") as f:
-                f.write(file_bytes)
+        _sauver_original(original_path, file_bytes)
 
         jobs.emit(job_id, "progress", {"step": "start",
                                        "message": "Démarrage du job...",
@@ -374,6 +371,104 @@ def _elements_de(slide_data: dict):
     yield from slide_data.get("excel_elements", [])
 
 
+def _sauver_original(original_path: str, file_bytes: bytes) -> None:
+    """Pose l'original du job, sans jamais en laisser un incomplet.
+
+    Il n'était écrit que s'il n'existait pas : écrit disque plein, il restait à
+    0 octet, et chaque relance retombait sur ce fichier vide au lieu de le
+    réécrire — le document devenait irrécupérable. Le dossier du job est nommé
+    par l'empreinte des octets : à taille égale, le contenu est le même.
+    """
+    try:
+        taille = os.path.getsize(original_path)
+    except OSError:
+        taille = 0
+    if taille and (not file_bytes or taille == len(file_bytes)):
+        return                  # déjà complet (ou rien de neuf pour le remplacer)
+    if not file_bytes:
+        raise ValueError("Fichier source vide : il doit être renvoyé.")
+    ecrire_atomiquement(original_path, file_bytes)
+
+
+# ── Reprise PPTX : chaque diapositive traduite est gardée dès qu'elle est finie ─
+#
+# Les traductions ne vivaient qu'en mémoire jusqu'à la fin du job : un échec à
+# la 25e diapositive sur 26 (disque plein, fournisseur coupé) jetait les 24
+# déjà payées, et la relance repartait de zéro. Le fichier de reprise vit à
+# côté de la traduction finale, sous un autre nom pour ne jamais passer pour
+# elle, et disparaît quand celle-ci est écrite.
+
+def _chemin_reprise(translation_path: str) -> str:
+    dossier, nom = os.path.split(translation_path)
+    return os.path.join(dossier, "reprise_" + nom)
+
+
+def _lire_reprise(chemin: str) -> dict[int, dict]:
+    """Diapositives déjà traduites par un essai précédent ({} si rien d'utilisable)."""
+    try:
+        with open(chemin, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {int(k): v for k, v in data["slides"].items() if isinstance(v, dict)}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def _ecrire_reprise(chemin: str, slides: dict[int, dict]) -> None:
+    """Best-effort : ne pas pouvoir garder la reprise n'arrête pas la traduction."""
+    try:
+        donnees = json.dumps({"slides": {str(k): v for k, v in slides.items()}},
+                             ensure_ascii=False).encode("utf-8")
+        ecrire_atomiquement(chemin, donnees)
+    except OSError as e:
+        logger.warning("Reprise PPTX non enregistrée : %s", e)
+
+
+def _fragments_repris(slides: dict[int, dict]) -> dict[str, dict]:
+    """Fragments d'un essai précédent, par id, TOUTES diapositives confondues.
+
+    Pas diapositive par diapositive : un gabarit (slideLayout) est extrait une
+    seule fois par document, par la première diapositive qui y arrive — et les
+    diapositives se traitent en parallèle. D'un essai à l'autre, ce n'est donc
+    pas forcément la même qui le porte ; ses id, eux, sont stables.
+    """
+    return {el.get("id"): el for sd in slides.values() for el in _elements_de(sd)}
+
+
+def _reprendre_slide(slide_data: dict, connus: dict[str, dict]) -> dict | None:
+    """Reporte sur `slide_data` les traductions d'un essai précédent.
+
+    Un fragment n'est repris que si son id ET son texte source sont les mêmes.
+    Renvoie ce qu'il reste à traduire : `slide_data` lui-même si rien n'est
+    repris, une copie réduite aux seuls fragments inconnus sinon, et None si
+    tout est repris. PAR FRAGMENT et non par diapositive : le gabarit qu'une
+    diapositive en échec avait pris n'est pas dans la reprise, et exiger une
+    diapositive complète faisait retraduire celle qui le prend à la relance.
+    """
+    reste = set()
+    for el in _elements_de(slide_data):
+        old = connus.get(el.get("id"))
+        if old is not None and old.get("text") == el.get("text"):
+            el["translated_text"] = old.get("translated_text")
+        else:
+            reste.add(el.get("id"))
+    if not reste:
+        return None
+    if len(reste) == sum(1 for _ in _elements_de(slide_data)):
+        return slide_data
+    copie = copy.deepcopy(slide_data)
+    for cle in ("text_elements", "excel_elements"):
+        copie[cle] = [el for el in copie.get(cle, []) if el.get("id") in reste]
+    for groupe in ("diagram_elements", "chart_elements", "layout_elements"):
+        blocs = []
+        for bloc in copie.get(groupe, []):
+            bloc["text_elements"] = [el for el in bloc.get("text_elements", [])
+                                     if el.get("id") in reste]
+            if bloc["text_elements"]:
+                blocs.append(bloc)
+        copie[groupe] = blocs
+    return copie
+
+
 # ── Cohérence terminologique du DOCUMENT ─────────────────────────────────────
 #
 # Un même mot source doit recevoir la même traduction d'un bout à l'autre d'un
@@ -475,9 +570,7 @@ def run_pptx_progressive_job(
             raise ValueError("Moteur PPTX indisponible.")
 
         # ── Sauvegarde de l'original ──────────────────────────────────────
-        if not os.path.exists(original_path):
-            with open(original_path, "wb") as f:
-                f.write(file_bytes)
+        _sauver_original(original_path, file_bytes)
 
         # ── Décompression ─────────────────────────────────────────────────
         jobs.emit(job_id, "progress", {"step": "extract", "message": "Décompression du PPTX...", "page": 0, "total": None})
@@ -526,6 +619,14 @@ def run_pptx_progressive_job(
         # Slide -> son extraction AVEC sa traduction, retenue avant injection.
         # C'est ce qui devient `translated.json` (cf. plus bas).
         slides_traduites: dict[int, dict] = {}
+        # Traductions d'un essai précédent du MÊME document (même empreinte,
+        # même langue, mêmes pages). Jamais en debug : rien à y économiser.
+        reprise_path = _chemin_reprise(translation_path)
+        deja_traduites = {} if debug else _lire_reprise(reprise_path)
+        fragments_repris = _fragments_repris(deja_traduites)
+        if deja_traduites:
+            logger.info("Job %s : reprise de %d diapositive(s) déjà traduite(s)",
+                        job_id, len(deja_traduites))
 
         # ── Aperçu PROGRESSIF : le PDF se remplit page par page ───────────
         # Le flux est celui du moteur PDF, et il tient en deux temps :
@@ -655,7 +756,11 @@ def run_pptx_progressive_job(
                          "done": done, "total": total})
             jobs.sync_progress(job_id, done, total)
 
-            if debug:
+            a_traduire = (slide_data if debug
+                          else _reprendre_slide(slide_data, fragments_repris))
+            if a_traduire is None:
+                pass                     # déjà traduite : aucun appel au modèle
+            elif debug:
                 for el in slide_data.get("text_elements", []):
                     el["translated_text"] = el["text"]
                 for diag in slide_data.get("diagram_elements", []):
@@ -675,7 +780,7 @@ def run_pptx_progressive_job(
                 mini_json = os.path.join(
                     pptx_eng._get_temp_dir(), f"_slide{slide_num}.json")
                 with open(mini_json, "w", encoding="utf-8") as f:
-                    json.dump({"slides": [slide_data]}, f, ensure_ascii=False)
+                    json.dump({"slides": [a_traduire]}, f, ensure_ascii=False)
 
                 success, result = ai_translator.translate_json(
                     mini_json, target_lang=target_lang,
@@ -687,7 +792,14 @@ def run_pptx_progressive_job(
                 with open(result, "r", encoding="utf-8") as f:
                     translated = json.load(f)
                 if translated.get("slides"):
-                    slide_data = translated["slides"][0]
+                    if a_traduire is slide_data:
+                        slide_data = translated["slides"][0]
+                    else:        # reprise partielle : on reporte par id
+                        cibles = {el.get("id"): el.get("translated_text")
+                                  for el in _elements_de(translated["slides"][0])}
+                        for el in _elements_de(slide_data):
+                            if el.get("id") in cibles:
+                                el["translated_text"] = cibles[el.get("id")]
                 for p in (mini_json, result):
                     try:
                         os.remove(p)
@@ -716,6 +828,8 @@ def run_pptx_progressive_job(
             # exclusive. Chaque thread la traverse à son tour pour SA page.
             with _display_lock:
                 slides_traduites[slide_num] = slide_data
+                if not debug:
+                    _ecrire_reprise(reprise_path, slides_traduites)
                 pptx_eng.inject_slide(slide_num, tmap)
                 apercu_ok = _afficher_slide(slide_num)   # OLE + greffe + emit
 
@@ -798,6 +912,10 @@ def run_pptx_progressive_job(
                                 if sn in slides_traduites]}
         with open(translation_path, "w", encoding="utf-8") as f:
             json.dump(full_json, f, ensure_ascii=False)
+        try:
+            os.remove(reprise_path)
+        except OSError:
+            pass
 
         pptx_eng._cleanup_temp()
         jobs.done(job_id, output_path, output_filename,
@@ -829,9 +947,7 @@ def run_pdf_v2_job(
     try:
         jobs.emit(job_id, "progress", {"step": "start", "message": "Démarrage du job...", "page": 0, "total": None})
 
-        if not os.path.exists(original_path):
-            with open(original_path, "wb") as f:
-                f.write(file_bytes)
+        _sauver_original(original_path, file_bytes)
 
         jobs.set(job_id, partial_path=partial_path)
 
