@@ -472,7 +472,23 @@ def _fragments_repris(slides: dict[int, dict]) -> dict[str, dict]:
     return {el.get("id"): el for sd in slides.values() for el in _elements_de(sd)}
 
 
-def _reprendre_slide(slide_data: dict, connus: dict[str, dict]) -> dict | None:
+def _memoriser(memo: dict[str, str], slide_data: dict) -> None:
+    """Retient, par TEXTE SOURCE balisé, la traduction de chaque fragment.
+
+    Le premier rendu gagne : un pied de page, un titre de section ou une
+    étiquette répétés d'une diapositive à l'autre reçoivent alors la MÊME
+    traduction au lieu d'une variante par diapositive, et ne coûtent qu'un
+    appel. Le balisage fait partie de la clé : deux fragments au même texte
+    mais aux runs découpés autrement ne sont pas interchangeables.
+    """
+    for el in _elements_de(slide_data):
+        src, out = el.get("text"), el.get("translated_text")
+        if src and out and any(c.isalpha() for c in src):
+            memo.setdefault(src, out)
+
+
+def _reprendre_slide(slide_data: dict, connus: dict[str, dict],
+                     par_texte: dict[str, str] | None = None) -> dict | None:
     """Reporte sur `slide_data` les traductions d'un essai précédent.
 
     Un fragment n'est repris que si son id ET son texte source sont les mêmes.
@@ -481,12 +497,18 @@ def _reprendre_slide(slide_data: dict, connus: dict[str, dict]) -> dict | None:
     tout est repris. PAR FRAGMENT et non par diapositive : le gabarit qu'une
     diapositive en échec avait pris n'est pas dans la reprise, et exiger une
     diapositive complète faisait retraduire celle qui le prend à la relance.
+
+    `par_texte` : traductions déjà obtenues DANS CE DOCUMENT, par texte source
+    (cf. `_memoriser`). Un fragment identique à un autre déjà traduit en
+    reprend la traduction.
     """
     reste = set()
     for el in _elements_de(slide_data):
         old = connus.get(el.get("id"))
         if old is not None and old.get("text") == el.get("text"):
             el["translated_text"] = old.get("translated_text")
+        elif par_texte and el.get("text") in par_texte:
+            el["translated_text"] = par_texte[el.get("text")]
         else:
             reste.add(el.get("id"))
     if not reste:
@@ -667,6 +689,9 @@ def run_pptx_progressive_job(
         reprise_path = _chemin_reprise(translation_path)
         deja_traduites = {} if debug else _lire_reprise(reprise_path)
         fragments_repris = _fragments_repris(deja_traduites)
+        deja_vus: dict[str, str] = {}
+        for _sd in deja_traduites.values():
+            _memoriser(deja_vus, _sd)
         if deja_traduites:
             logger.info("Job %s : reprise de %d diapositive(s) déjà traduite(s)",
                         job_id, len(deja_traduites))
@@ -800,7 +825,8 @@ def run_pptx_progressive_job(
             jobs.sync_progress(job_id, done, total)
 
             a_traduire = (slide_data if debug
-                          else _reprendre_slide(slide_data, fragments_repris))
+                          else _reprendre_slide(slide_data, fragments_repris,
+                                                deja_vus))
             if a_traduire is None:
                 pass                     # déjà traduite : aucun appel au modèle
             elif debug:
@@ -854,6 +880,8 @@ def run_pptx_progressive_job(
                          "done": done, "total": total})
             jobs.sync_progress(job_id, done, total)
 
+            if not debug:
+                _memoriser(deja_vus, slide_data)
             tmap = {el["id"]: (el.get("translated_text") or el["text"])
                     for el in _elements_de(slide_data)}
 

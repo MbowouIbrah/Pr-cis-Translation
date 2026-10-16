@@ -37,6 +37,7 @@ import sys
 import tempfile
 import threading
 import uuid
+import re
 import zipfile
 
 import racine  # noqa: F401  -- met backend/ sur le chemin
@@ -143,6 +144,122 @@ def test_selection(ok) -> None:
                f"présentes={_slides_du_zip(out)}")
         finally:
             eng._cleanup_temp()
+
+
+# ── 1b. Numéros de diapositive figés dans un partiel ─────────────────────────
+
+def _deck_numerote(path: str, n: int = NB_SLIDES) -> None:
+    """Deck dont chaque slide porte un champ slidenum, et dont la DERNIÈRE
+    slide (slide{n}.xml) est déplacée en tête de sldIdLst : le numéro affiché
+    ne se déduit donc ni du nom de fichier ni de la place dans le partiel."""
+    _deck_synthetique(path, n)
+    a = NAMESPACES["a"]
+    tmp = path + ".x"
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(tmp, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if re.fullmatch(r"ppt/slides/slide\d+\.xml", item.filename):
+                root = etree.fromstring(data)
+                para = root.xpath(".//a:p", namespaces=NAMESPACES)[0]
+                fld = etree.SubElement(para, f"{{{a}}}fld",
+                                       id="{B6F15528-21DE-4FAA-801E-634DDDAF4B2B}",
+                                       type="slidenum")
+                etree.SubElement(fld, f"{{{a}}}rPr", lang="fr-FR", sz="1200")
+                etree.SubElement(fld, f"{{{a}}}t").text = "99"
+                data = etree.tostring(root, xml_declaration=True,
+                                      encoding="UTF-8", standalone=True)
+            elif item.filename == "ppt/presentation.xml":
+                root = etree.fromstring(data)
+                lst = root.xpath("//p:sldIdLst", namespaces=NAMESPACES)[0]
+                lst.insert(0, lst[-1])
+                data = etree.tostring(root, xml_declaration=True,
+                                      encoding="UTF-8", standalone=True)
+            zout.writestr(item, data)
+    os.replace(tmp, path)
+
+
+def _numeros(path: str, num: int) -> tuple[list[str], int]:
+    """(textes des runs du paragraphe numéroté, nb de champs slidenum)."""
+    with zipfile.ZipFile(path) as zf:
+        root = etree.fromstring(zf.read(f"ppt/slides/slide{num}.xml"))
+    para = root.xpath(".//a:p", namespaces=NAMESPACES)[0]
+    textes = [t.text for t in para.xpath("./a:r/a:t", namespaces=NAMESPACES)]
+    champs = len(root.xpath('//a:fld[@type="slidenum"]', namespaces=NAMESPACES))
+    return textes, champs
+
+
+def test_numeros_figes(ok) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "deck.pptx")
+        _deck_numerote(src)
+        eng = PPTXTranslatorEngine()
+        eng._extract_zip(src)
+        try:
+            # slide12.xml est 1re dans l'ordre d'affichage, slide3.xml 4e.
+            for fichier, attendu in ((12, "1"), (3, "4")):
+                out = os.path.join(td, f"seule{fichier}.pptx")
+                eng.build_partial_pptx(out, NB_SLIDES, only_slides={fichier})
+                textes, champs = _numeros(out, fichier)
+                ok(f"NUMERO  slide{fichier}.xml isolée affiche {attendu}",
+                   champs == 0 and textes[-1:] == [attendu],
+                   f"runs={textes} champs={champs}")
+            # Le fichier LIVRÉ garde ses champs vivants.
+            out = os.path.join(td, "tout.pptx")
+            eng.build_partial_pptx(out, NB_SLIDES)
+            _, champs = _numeros(out, 3)
+            ok("NUMERO  deck complet : champ slidenum intact", champs == 1,
+               f"champs={champs}")
+            # Le dossier temporaire n'est jamais modifié.
+            with open(eng._get_temp_dir() / "ppt" / "slides" / "slide3.xml",
+                      encoding="utf-8") as f:
+                ok("NUMERO  dossier temporaire intact",
+                   'type="slidenum"' in f.read())
+        finally:
+            eng._cleanup_temp()
+
+
+# ── 1c. Fragments identiques traduits une seule fois ─────────────────────────
+
+def test_doublons(ok) -> None:
+    from app.services.translation_runner import _memoriser, _reprendre_slide
+
+    def el(i, texte, cible=None):
+        d = {"id": i, "text": texte}
+        if cible is not None:
+            d["translated_text"] = cible
+        return d
+
+    pied = "[[1]]Masque[[/1]] [[2]]2025[[/2]]"
+    memo: dict[str, str] = {}
+    _memoriser(memo, {"text_elements": [
+        el("s1p1", pied, "[[1]]Template[[/1]] [[2]]2025[[/2]]"),
+        el("s1p2", "[[1]]12[[/1]]", "[[1]]12[[/1]]")]})
+    # Une autre traduction du MÊME texte ne remplace pas la première.
+    _memoriser(memo, {"text_elements": [el("sXp1", pied, "[[1]]Mask[[/1]] [[2]]2025[[/2]]")]})
+    ok("DOUBLON  le premier rendu gagne",
+       memo.get(pied) == "[[1]]Template[[/1]] [[2]]2025[[/2]]", str(memo))
+    ok("DOUBLON  un fragment sans lettre n'est pas mémorisé",
+       "[[1]]12[[/1]]" not in memo)
+
+    # Slide suivante : le pied de page répété est repris, le reste traduit.
+    s2 = {"text_elements": [el("s2p1", pied), el("s2p2", "[[1]]Bonjour[[/1]]"),
+                            el("s2p3", "[[1]]Masque[[/1]][[2]] 2025[[/2]]")]}
+    reste = _reprendre_slide(s2, {}, memo)
+    ids = [e["id"] for e in (reste or {}).get("text_elements", [])]
+    ok("DOUBLON  le fragment répété reprend la traduction",
+       s2["text_elements"][0].get("translated_text")
+       == "[[1]]Template[[/1]] [[2]]2025[[/2]]")
+    ok("DOUBLON  seuls les fragments nouveaux partent au modèle",
+       ids == ["s2p2", "s2p3"], f"ids={ids}")
+
+    # Slide entièrement composée de doublons : aucun appel au modèle.
+    s3 = {"text_elements": [el("s3p1", pied)]}
+    ok("DOUBLON  slide de doublons : rien à traduire",
+       _reprendre_slide(s3, {}, memo) is None)
+    # Sans mémoire, comportement d'avant.
+    s4 = {"text_elements": [el("s4p1", pied)]}
+    ok("DOUBLON  sans mémoire : tout part au modèle",
+       _reprendre_slide(s4, {}) is s4)
 
 
 # ── 2. Isolation des moteurs ─────────────────────────────────────────────────
@@ -593,6 +710,8 @@ def main() -> int:
         checks.append((nom, bool(cond), detail))
 
     test_selection(ok)
+    test_numeros_figes(ok)
+    test_doublons(ok)
     test_layouts_partages(ok)
     test_isolation(ok)
     test_coherence(ok)

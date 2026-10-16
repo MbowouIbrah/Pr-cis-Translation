@@ -994,6 +994,16 @@ class PPTXTranslatorEngine:
             control_bytes[ct_rel] = etree.tostring(
                 ct_tree, encoding="utf-8", xml_declaration=True)
 
+        # 4. Numéros de diapositive FIGÉS. Le champ `<a:fld type="slidenum">`
+        # est recalculé au rendu d'après la position dans le deck PARTIEL : une
+        # slide isolée (aperçu progressif) s'affichait « 1 » quelle que soit sa
+        # place. On le remplace par un run portant son numéro dans le deck
+        # COMPLET (ordre de sldIdLst + firstSlideNum), seulement quand des
+        # slides sont exclues : le fichier final garde ses champs vivants.
+        if exclus and rels_path.exists() and pres_path.exists():
+            control_bytes.update(
+                self._figer_numeros(temp_path, rels_path, pres_path, garder))
+
         # ── Reconstruire le ZIP (atomique) : contrôle depuis la mémoire, le reste du disque ──
         tmp_out = output_path + ".tmp"
         with zipfile.ZipFile(tmp_out, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1005,6 +1015,56 @@ class PPTXTranslatorEngine:
                 if part_path.exists():
                     zf.write(part_path, rel)
         os.replace(tmp_out, output_path)
+
+    @staticmethod
+    def _figer_numeros(temp_path, rels_path, pres_path,
+                       garder: set[int]) -> dict[str, bytes]:
+        """XML des slides gardées dont les champs slidenum portent leur numéro
+        dans le deck complet. Lit les fichiers d'ORIGINE (non trimmés)."""
+        slide_rel_type = ("http://schemas.openxmlformats.org/officeDocument/"
+                          "2006/relationships/slide")
+        rid_to_num: dict[str, int] = {}
+        for rel in etree.parse(str(rels_path)).getroot():
+            if rel.get("Type") == slide_rel_type:
+                m = re.search(r"slide(\d+)\.xml", rel.get("Target", ""))
+                if m:
+                    rid_to_num[rel.get("Id")] = int(m.group(1))
+        pres_root = etree.parse(str(pres_path)).getroot()
+        try:
+            premier = int(pres_root.get("firstSlideNum", "1"))
+        except ValueError:
+            premier = 1
+        affiche: dict[int, int] = {}
+        for pos, el in enumerate(pres_root.xpath(
+                "//p:sldIdLst/p:sldId", namespaces=NAMESPACES)):
+            num = rid_to_num.get(el.get(f"{{{NAMESPACES['r']}}}id"))
+            if num is not None:
+                affiche[num] = premier + pos
+
+        a = NAMESPACES["a"]
+        out: dict[str, bytes] = {}
+        for num in garder:
+            if num not in affiche:
+                continue
+            path = temp_path / "ppt" / "slides" / f"slide{num}.xml"
+            if not path.exists():
+                continue
+            tree = etree.parse(str(path))
+            champs = tree.xpath('//a:fld[@type="slidenum"]',
+                                namespaces=NAMESPACES)
+            if not champs:
+                continue
+            for fld in champs:
+                run = etree.Element(f"{{{a}}}r")
+                rpr = fld.find(f"{{{a}}}rPr")
+                if rpr is not None:
+                    run.append(rpr)
+                t = etree.SubElement(run, f"{{{a}}}t")
+                t.text = str(affiche[num])
+                fld.getparent().replace(fld, run)
+            out[f"ppt/slides/slide{num}.xml"] = etree.tostring(
+                tree, encoding="utf-8", xml_declaration=True, standalone=True)
+        return out
 
     # ── Aperçus des objets OLE Excel ─────────────────────────────────────────
     #
