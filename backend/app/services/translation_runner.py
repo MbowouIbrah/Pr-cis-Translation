@@ -371,6 +371,20 @@ def _elements_de(slide_data: dict):
     yield from slide_data.get("excel_elements", [])
 
 
+def _textes_diapositives(pptx_eng) -> list[str]:
+    """Texte brut de chaque diapositive, dans l'ordre, lu dans le XML déjà
+    décompressé : de quoi écrire la fiche du document sans extraire chaque
+    diapositive à l'avance."""
+    import html
+    import re
+    dossier = pptx_eng._get_temp_dir() / "ppt" / "slides"
+    fichiers = sorted(dossier.glob("slide*.xml"),
+                      key=lambda f: int(re.sub(r"\D", "", f.stem) or 0))
+    return [html.unescape(" ".join(re.findall(r"<a:t>([^<]*)</a:t>",
+                                              f.read_text(encoding="utf-8"))))
+            for f in fichiers]
+
+
 def _sauver_original(original_path: str, file_bytes: bytes) -> None:
     """Pose l'original du job, sans jamais en laisser un incomplet.
 
@@ -600,6 +614,7 @@ def run_pptx_progressive_job(
         # ── Traduction PROGRESSIVE slide par slide ─────────────────────────
         done = 0
         done_lock = threading.Lock()
+        fiche_doc = ""                    # écrite avant la 1re diapositive
 
         # PARALLÉLISME PAR CYCLE COMPLET (et non plus par étape).
         # Chaque worker mène UNE diapositive de bout en bout — extraction →
@@ -785,6 +800,7 @@ def run_pptx_progressive_job(
                 success, result = ai_translator.translate_json(
                     mini_json, target_lang=target_lang,
                     progress_callback=jobs.progress_callback(job_id, "translate"),
+                    fiche=fiche_doc,
                 )
                 if not success:
                     raise ValueError(f"Traduction slide {slide_num} échouée : {result}")
@@ -856,6 +872,25 @@ def run_pptx_progressive_job(
         # sont sérialisés par `_display_lock` (cf. `_process_one_slide`). Le
         # socle est déjà prêt, donc chaque greffe a sa base.
         from concurrent.futures import ThreadPoolExecutor
+        # FICHE DE DOCUMENT avant la première diapositive : traduites une à
+        # une, elles ne verraient sinon jamais le fichier entier.
+        # Gardée avec la reprise : une relance ne la paie pas deux fois et
+        # garde le vocabulaire des diapositives déjà traduites.
+        chemin_fiche = reprise_path + ".fiche"
+        if not debug and ai_active:
+            try:
+                with open(chemin_fiche, encoding="utf-8") as f:
+                    fiche_doc = f.read()
+            except OSError:
+                fiche_doc = ai_translator.fiche_document(
+                    [], _textes_diapositives(pptx_eng), target_lang,
+                    progress_callback=jobs.progress_callback(job_id, "translate"))
+                if fiche_doc:
+                    try:
+                        with open(chemin_fiche, "w", encoding="utf-8") as f:
+                            f.write(fiche_doc)
+                    except OSError:
+                        pass
         with ThreadPoolExecutor(max_workers=_WORKERS) as executor:
             futures = [executor.submit(_process_one_slide, sn)
                        for sn in slides_to_process]
@@ -912,10 +947,11 @@ def run_pptx_progressive_job(
                                 if sn in slides_traduites]}
         with open(translation_path, "w", encoding="utf-8") as f:
             json.dump(full_json, f, ensure_ascii=False)
-        try:
-            os.remove(reprise_path)
-        except OSError:
-            pass
+        for fini in (reprise_path, reprise_path + ".fiche"):
+            try:
+                os.remove(fini)
+            except OSError:
+                pass
 
         pptx_eng._cleanup_temp()
         jobs.done(job_id, output_path, output_filename,

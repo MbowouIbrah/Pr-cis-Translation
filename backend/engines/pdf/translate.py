@@ -71,20 +71,98 @@ def _page_support(page):
     return out
 
 
-def _page_context(page, el, limit=240):
-    """Voisinage textuel du paragraphe sur SA page (lecture seule) — de quoi
-    lever une ambiguïté d'usage (« live », domaine de presse, etc.). Joint
-    seulement aux fragments qui contiennent un piège, donc à coût négligeable."""
-    bits = []
-    for e in page.get("elements", []):
-        if e.get("type") != "paragraph" or e is el:
-            continue
-        t = (e.get("text") or "").strip()
-        if t:
-            bits.append(t)
-        if sum(len(b) for b in bits) > limit:
-            break
-    return " ".join(bits)[:limit]
+def _paragraphes_lus(page):
+    """Paragraphes non vides de la page dans l'ordre de LECTURE, reconstruit
+    par leur position : l'ordre d'extraction peut être faux (titre relevé en
+    dernier, colonnes mêlées) et ne doit rien décider."""
+    from engines.translation_ai import ordre_lecture
+    paras = [e for e in page.get("elements", [])
+             if e.get("type") == "paragraph" and (e.get("text") or "").strip()]
+    boites = [tuple(e.get("bbox") or (0, 0, 0, 0))[:4] for e in paras]
+    return [paras[i] for i in ordre_lecture(boites)]
+
+
+def _cadre_page(page, support, fiche):
+    """Ce que chaque lot de la page doit savoir et que ses fragments ne disent
+    pas : la fiche du document et le texte de la page, ordonné."""
+    lus = _paragraphes_lus(page)
+    return {"fiche": fiche, "n_page": len(lus),
+            "textes": [e.get("text") for e in lus],
+            "titres": {i for i, e in enumerate(lus)
+                       if support.get(id(e)) == "titre"},
+            "rang": {id(e): k for k, e in enumerate(lus)}}
+
+
+def _cadre_lot(cadre, rangs, n_page):
+    """Cadre d'UN lot : la fiche, et la page AUTOUR de ses fragments.
+    `n_page` : fragments de la page envoyés au modèle ; un lot qui les porte
+    tous n'a que faire du texte de sa page (cf. _translate_batch)."""
+    from engines.translation_ai import contexte_page
+    autour = (min(rangs), max(rangs) + 1) if rangs else None
+    return {"fiche": cadre["fiche"], "n_page": n_page,
+            "page": contexte_page(cadre["textes"], cadre["titres"], autour)}
+
+
+def matiere_fiche(pages):
+    """(titres, textes) d'une extraction, de quoi écrire la fiche du
+    document : titres repérés par la mise en page, texte en ordre de lecture."""
+    titres, textes = [], []
+    for page in pages:
+        support = _page_support(page)
+        for e in _paragraphes_lus(page):
+            t = e.get("text") or ""
+            textes.append(t)
+            if support.get(id(e)) == "titre":
+                titres.append(t)
+    return titres, textes
+
+
+def matiere_fiche_pdf(doc, n_pages=15):
+    """Comme `matiere_fiche`, mais lue directement dans le PDF ouvert (fitz)
+    sur `n_pages` pages RÉPARTIES : la traduction progressive n'a pas encore
+    extrait les pages suivantes quand elle écrit la fiche. Même règle de titre
+    que `_page_support` (nettement plus gros que le corps, et court)."""
+    total = len(doc)
+    pas = max(1, total / n_pages)
+    titres, textes = [], []
+    for k in sorted({int(i * pas) for i in range(min(total, n_pages))}):
+        lignes = []
+        for bloc in doc[k].get_text("dict").get("blocks", []):
+            for ln in bloc.get("lines", []):
+                spans = ln.get("spans", [])
+                t = "".join(sp.get("text", "") for sp in spans).strip()
+                if t:
+                    lignes.append((t, max(sp.get("size", 0) for sp in spans)))
+        poids = {}
+        for t, taille in lignes:
+            poids[round(taille, 1)] = poids.get(round(taille, 1), 0) + len(t)
+        corps = max(poids, key=poids.get) if poids else 0
+        textes.append(" ".join(t for t, _ in lignes))
+        titres += [t for t, taille in lignes
+                   if corps and taille >= 1.5 * corps and len(t) <= 80]
+    return titres, textes
+
+
+def _hors_service():
+    from engines.translation_ai import hors_service
+    return hors_service()
+
+
+def _lots_de_page(items, taille):
+    """Découpe les items d'UNE page (déjà en ordre de lecture) en lots d'au
+    plus `taille`, sans jamais séparer un titre du texte qui le suit."""
+    lots, cur = [], []
+    for it in items:
+        if len(cur) >= taille:
+            reste = []
+            while len(cur) > 1 and cur[-1].get("support") == "titre":
+                reste.insert(0, cur.pop())
+            lots.append(cur)
+            cur = reste
+        cur.append(it)
+    if cur:
+        lots.append(cur)
+    return lots
 
 
 # Taille maximale (en caractères, hors balises) d'un texte mémorisable dans la
@@ -132,7 +210,8 @@ def reattacher_traductions(nouvelle, ancienne):
 
 
 def translate_extraction(data, target_lang="fr", max_pages=None,
-                         batch_size=40, progress=None, doc_memory=None):
+                         batch_size=40, progress=None, doc_memory=None,
+                         fiche=None):
     """Traduit les paragraphes des `max_pages` premières pages de `data` (dict
     d'extraction v2). Modifie `data` en place et le retourne.
 
@@ -145,6 +224,9 @@ def translate_extraction(data, target_lang="fr", max_pages=None,
         « DEUXIÈME PARTIE » plus bas ; sommaire vs tête de chapitre). Un texte
         court DÉJÀ traduit dans ce document est resservi tel quel — garantie
         déterministe, zéro jeton — et n'est plus envoyé au modèle.
+    fiche       : FICHE DE DOCUMENT (cf. TranslatorAI.fiche_document). None =
+        l'écrire d'après les pages reçues ; "" = s'en passer. Une traduction
+        page par page la reçoit, écrite une fois pour tout le document.
     """
     from engines.translation_ai import TranslatorAI
     tr = TranslatorAI()
@@ -153,12 +235,20 @@ def translate_extraction(data, target_lang="fr", max_pages=None,
     pages = data.get("pages", [])
     if max_pages is not None:
         pages = pages[:max_pages]
+    if fiche is None:
+        fiche = tr.fiche_document(*matiere_fiche(pages), lang_name,
+                                  progress_callback=progress)
 
     # 1) Balisage + collecte des items à traduire (id unique -> paragraphe).
     items, refs = [], {}
     resservis = 0
+    par_page = []                               # [(cadre, [items])]
+    rang_de = {}                                # id d'item -> rang de lecture
     for page in pages:
         support = _page_support(page)
+        cadre = _cadre_page(page, support, fiche)
+        rang = cadre["rang"]
+        a_traduire = []
         for el in page.get("elements", []):
             if el.get("type") != "paragraph":
                 continue
@@ -180,31 +270,44 @@ def translate_extraction(data, target_lang="fr", max_pages=None,
             _id = f"p{page['page_num']}_e{len(refs)}"
             # `support` / `contexte` : ce que le traducteur ignorait (un bandeau
             # ne se traduit pas comme une phrase) — cf. backend/glossary.py.
-            items.append({"id": _id, "text": tagged,
-                          "support": support.get(id(el), "corps"),
-                          "contexte": _page_context(page, el)})
+            it = {"id": _id, "text": tagged,
+                  "support": support.get(id(el), "corps")}
+            items.append(it)
+            rang_de[_id] = rang.get(id(el), len(rang))
+            a_traduire.append((rang_de[_id], it))
             refs[_id] = el
             el["tr_tagged"] = tagged                # repli si la trad échoue
+        if a_traduire:
+            a_traduire.sort(key=lambda r: r[0])
+            par_page.append((cadre, [it for _r, it in a_traduire]))
     if resservis and progress:
         progress(f"{resservis} texte(s) resservi(s) depuis la mémoire du document.")
 
     if progress:
         progress(f"{len(items)} paragraphe(s) à traduire vers {lang_name}.")
 
-    # 2) Traduction par lots (le traducteur préserve les balises [[n]]).
-    for i in range(0, len(items), batch_size):
-        batch = items[i:i + batch_size]
+    # 2) Traduction PAR PAGE (le traducteur préserve les balises [[n]]) : un
+    #    lot ne mêle jamais deux pages, et chaque lot reçoit le cadre de la
+    #    sienne. Une tranche fixe de 40 fragments coupait une page en deux et
+    #    privait la seconde moitié de ses titres.
+    lots = [(_cadre_lot(cadre, [rang_de[b["id"]] for b in lot], len(its)),
+             lot)
+            for cadre, its in par_page
+            for lot in _lots_de_page(its, batch_size)]
+    cadre_de = {}
+    for n, (cadre, batch) in enumerate(lots):
+        for b in batch:
+            cadre_de[b["id"]] = cadre
         try:
-            tr._translate_batch(batch, lang_name, progress)
+            tr._translate_batch(batch, lang_name, progress, cadre=cadre)
         except Exception as e:
             if progress:
-                progress(f"[!] lot {i // batch_size} échoué : {e}")
+                progress(f"[!] lot {n} échoué : {e}")
         for b in batch:
             el = refs[b["id"]]
             el["tr_tagged"] = b.get("translated_text") or b["text"]
         if progress:
-            progress(f"  lot {i // batch_size + 1}/"
-                     f"{(len(items) + batch_size - 1) // batch_size} traduit.")
+            progress(f"  lot {n + 1}/{len(lots)} traduit.")
 
     # 3) VÉRIFICATION PAR ITEM + relance individuelle : un id absent de la
     #    réponse ou des balises mutilées restaient silencieux (texte source
@@ -214,16 +317,18 @@ def translate_extraction(data, target_lang="fr", max_pages=None,
               if not it.get("translated_text")
               or not _tags_ok(it["text"], it["translated_text"])]
     for attempt in range(2):
-        if not failed:
+        if not failed or _hors_service():
             break
         if progress:
             progress(f"{len(failed)} item(s) à re-traduire individuellement "
                      f"(id manquant ou balises mutilées), essai {attempt + 1}.")
         still = []
         for it in failed:
-            one = {"id": it["id"], "text": it["text"]}
+            one = {"id": it["id"], "text": it["text"],
+                   "support": it.get("support")}
             try:
-                tr._translate_batch([one], lang_name, None)
+                tr._translate_batch([one], lang_name, None,
+                                    cadre=cadre_de.get(it["id"]))
             except Exception:
                 pass
             out = one.get("translated_text")
@@ -233,6 +338,13 @@ def translate_extraction(data, target_lang="fr", max_pages=None,
             else:
                 still.append(it)
         failed = still
+    if failed and _hors_service():
+        # Solde ou clé refusés : le texte source n'est pas une traduction, la
+        # page ne doit pas entrer au cache comme traduite. L'échec du job la
+        # laisse à reprendre une fois le compte rechargé.
+        from engines.translation_ai import FournisseursIndisponibles
+        raise FournisseursIndisponibles(
+            f"{len(failed)} paragraphe(s) non traduits : DeepSeek indisponible.")
     if failed and progress:
         for it in failed:
             progress(f"[!] non traduit (repli source) : {it['text'][:60]!r}")
@@ -254,7 +366,7 @@ def translate_extraction(data, target_lang="fr", max_pages=None,
 
 
 def retranslate_overflows(data, engine, target_lang="fr", max_pages=None,
-                          progress=None, max_rounds=2):
+                          progress=None, max_rounds=2, fiche=""):
     """RETRADUCTION COMPACTE (décision produit : compression par REFORMULATION,
     jamais une mise en forme dégradée). Pour chaque paragraphe dont la
     traduction ne tient pas dans son conteneur sans compression visible
@@ -279,23 +391,25 @@ def retranslate_overflows(data, engine, target_lang="fr", max_pages=None,
             except Exception:
                 pass
             support = _page_support(page)
+            cadre = None
             for el in page.get("elements", []):
                 if el.get("type") != "paragraph" or not el.get("_needs_shorter"):
                     continue
                 fit = engine.translated_fit(el)
                 if fit is None:
                     continue
+                cadre = cadre or _cadre_page(page, support, fiche)
                 offenders.append((el, fit, support.get(id(el), "corps"),
-                                  _page_context(page, el)))
+                                  cadre))
         if not offenders:
             break
         if progress:
             progress(f"{len(offenders)} paragraphe(s) trop longs -> "
                      f"retraduction compacte (tour {rnd + 1}).")
         shrink = 1.0 - 0.08 * rnd               # budgets resserrés au 2e tour
-        batch = []
-        refs = {}
-        for k, (el, fit, support, contexte) in enumerate(offenders):
+        par_cadre = {}                          # id(cadre) -> (cadre, items)
+        refs, rang_de = {}, {}
+        for k, (el, fit, support, cadre) in enumerate(offenders):
             src_tagged, _meta = tagging.tag_paragraph(el)
             if not src_tagged.strip():
                 continue
@@ -310,18 +424,25 @@ def retranslate_overflows(data, engine, target_lang="fr", max_pages=None,
             if cur_len <= budget:
                 continue                        # rien à gagner : garder tel quel
             _id = f"c{rnd}_{k}"
-            batch.append({"id": _id, "text": src_tagged,
-                          "support": support, "contexte": contexte,
+            par_cadre.setdefault(id(cadre), (cadre, []))[1].append(
+                         {"id": _id, "text": src_tagged,
+                          "support": support,
                           "consigne": (f"MAXIMUM {budget} caractères (hors "
                                        "balises), par REFORMULATION uniquement :"
                                        " AUCUNE abréviation, AUCUN sigle absent"
                                        " du texte source, ne rien omettre "
                                        "d'essentiel.")})
             refs[_id] = el
-        for i in range(0, len(batch), 20):
-            sub = batch[i:i + 20]
+            rang_de[_id] = cadre["rang"].get(id(el), 0)
+        # Une page entière n'est pas renvoyée : n_page = ses paragraphes, le
+        # lot n'en porte que les fautifs et reçoit la page autour d'eux.
+        lots = [(_cadre_lot(cadre, [rang_de[b["id"]] for b in sub],
+                            cadre["n_page"]), sub)
+                for cadre, its in par_cadre.values()
+                for sub in (its[i:i + 20] for i in range(0, len(its), 20))]
+        for cadre, sub in lots:
             try:
-                tr._translate_batch(sub, lang_name, progress)
+                tr._translate_batch(sub, lang_name, progress, cadre=cadre)
             except Exception as e:
                 if progress:
                     progress(f"[!] retraduction : lot échoué : {e}")

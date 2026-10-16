@@ -81,12 +81,16 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
 
     # Cache de reprise : pages déjà traduites lors d'un job précédent.
     cached_pages = {}
+    # FICHE DE DOCUMENT par langue cible : écrite une fois, gardée avec la
+    # reprise pour qu'un job repris garde le même vocabulaire.
+    fiches = {}
     if cache_path and os.path.exists(cache_path):
         try:
             with open(cache_path, encoding="utf-8") as f:
                 prev = json.load(f)
             for pg in prev.get("pages", []):
                 cached_pages[pg.get("page_num")] = pg
+            fiches = dict(prev.get("fiches") or {})
         except Exception:
             cached_pages = {}
 
@@ -95,7 +99,8 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
             tmp = cache_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"pages": [cached_pages[k] for k in
-                                     sorted(cached_pages)]},
+                                     sorted(cached_pages)],
+                           "fiches": {k: v for k, v in fiches.items() if v}},
                           f, ensure_ascii=False)
             os.replace(tmp, cache_path)
         except Exception:
@@ -192,13 +197,24 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
                                      "status": "translating",
                                      "done": human - 1, "total": total})
                     one = {"pages": [page_data], "fonts": {}}
+                    cle_fiche = str(target_lang).lower()
+                    if cle_fiche not in fiches:
+                        from engines.translation_ai import TranslatorAI
+                        try:
+                            matiere = translate.matiere_fiche_pdf(src)
+                        except Exception:       # page illisible : sans fiche
+                            matiere = ([], [])
+                        fiches[cle_fiche] = TranslatorAI().fiche_document(
+                            *matiere, target_lang)
                     translate.translate_extraction(one, target_lang=target_lang,
-                                                   doc_memory=doc_memory)
+                                                   doc_memory=doc_memory,
+                                                   fiche=fiches[cle_fiche])
                     # Recalcule l'expansion puis retraduction compacte de la page
                     # (paragraphes qui ne tiendraient pas sans compression visible).
                     try:
-                        translate.retranslate_overflows(one, eng,
-                                                        target_lang=target_lang)
+                        translate.retranslate_overflows(
+                            one, eng, target_lang=target_lang,
+                            fiche=fiches[cle_fiche])
                     except Exception:
                         pass
                 # Reprise : la page traduite rejoint le cache immédiatement.

@@ -58,6 +58,9 @@ class Traducteur:
         self.appels: list[str] = []
         self.echoue_sur: str | None = None
 
+    def fiche_document(self, *_a, **_k):
+        return ""
+
     def translate_json(self, chemin, target_lang, progress_callback=None, **_):
         with open(chemin, encoding="utf-8") as f:
             data = json.load(f)
