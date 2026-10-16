@@ -104,8 +104,13 @@ for (const f of fichiersSource(SRC)) {
   for (const m of code.matchAll(DYNAMIQUE)) dynamiques.push(`${court} : t(\`${m[1]}\`)`);
 }
 
+// Pluriel i18next : `t('a.b', { count })` lit `a.b_one` / `a.b_other`, sans
+// clé `a.b` nue. `_other` est la forme de repli de toute langue : elle suffit.
+const PLURIEL = /_(zero|one|two|few|many|other)$/;
+const existe = (cle) => dicos.get(reference).has(cle) || dicos.get(reference).has(`${cle}_other`);
+
 for (const [cle, fichiers] of employees) {
-  if (!dicos.get(reference).has(cle)) {
+  if (!existe(cle)) {
     erreurs.push(`clé absente du dictionnaire : ${cle}   [${fichiers.join(', ')}]`);
   }
 }
@@ -114,7 +119,8 @@ for (const [cle, fichiers] of employees) {
 // Une clé peut être atteinte dynamiquement ; on ne supprime rien sur ce seul
 // indice. Mais une section entière inutilisée mérite un coup d'œil.
 for (const cle of dicos.get(reference).keys()) {
-  if (!employees.has(cle) && !dynamiques.length) avertissements.push(`jamais employée : ${cle}`);
+  const employee = employees.has(cle) || employees.has(cle.replace(PLURIEL, ''));
+  if (!employee && !dynamiques.length) avertissements.push(`jamais employée : ${cle}`);
 }
 
 // ── Rapport ────────────────────────────────────────────────────────────────
