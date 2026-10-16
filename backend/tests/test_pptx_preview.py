@@ -350,11 +350,12 @@ def test_coherence(ok) -> None:
     """
     from app.services import translation_runner as appmod
 
-    appels = []
+    appels, cadres = [], []
 
     class _FauxTraducteur:
         def _translate_batch(self, batch, target_lang, cb=None, **kw):
             appels.append([b["id"] for b in batch])
+            cadres.append(kw.get("cadre"))
             for b in batch:
                 if "consigne" not in b:
                     raise AssertionError("consigne de cohérence absente")
@@ -381,7 +382,8 @@ def test_coherence(ok) -> None:
     appmod.ai_translator = _FauxTraducteur()
     moteur = _FauxMoteur()
     try:
-        n = appmod._coherence_document(slides, moteur, "en", None)
+        n = appmod._coherence_document(slides, moteur, "en", None,
+                                       fiche="FICHE-GERBEUR")
     finally:
         appmod.ai_translator = vrai
 
@@ -399,6 +401,9 @@ def test_coherence(ok) -> None:
        == "[[0]]Discovering the Stacker[[/0]]")
     ok("COHERENCE  la consigne de reprise ne reste pas dans le JSON",
        "consigne" not in slides[3]["text_elements"][0])
+    ok("COHERENCE  la reprise reçoit la fiche du document",
+       cadres and (cadres[0] or {}).get("fiche") == "FICHE-GERBEUR",
+       str(cadres))
 
     # Un document COHÉRENT ne doit coûter aucun appel.
     appels.clear()
@@ -410,6 +415,51 @@ def test_coherence(ok) -> None:
         appmod.ai_translator = vrai
     ok("COHERENCE  un document cohérent ne coûte aucun appel",
        n == 0 and appels == [], f"n={n} appels={appels}")
+
+
+def test_ordre_fiche(ok) -> None:
+    """La fiche lit les diapositives dans l'ordre de `sldIdLst`.
+
+    Une diapositive déplacée dans PowerPoint garde son nom `slideN.xml` : trier
+    par nom ferait lire le document dans le désordre. On déplace la 3e en
+    tête et on vérifie qu'elle est lue la première.
+    """
+    from app.services import translation_runner as appmod
+
+    tmp = tempfile.mkdtemp()
+    try:
+        src = os.path.join(tmp, "deck.pptx")
+        prs = Presentation()  # pyrefly: ignore[not-callable]
+        vide = prs.slide_layouts[6]
+        for i in range(1, 4):
+            zone = prs.slides.add_slide(vide).shapes.add_textbox(
+                Inches(1), Inches(1), Inches(6), Inches(1))
+            zone.text_frame.text = f"CONTENU {i}"
+        lst = prs.slides._sldIdLst
+        ids = list(lst)
+        lst.remove(ids[2])
+        lst.insert(0, ids[2])
+        prs.save(src)
+        dossier = os.path.join(tmp, "x")
+        with zipfile.ZipFile(src) as z:
+            z.extractall(dossier)
+
+        class _Moteur:
+            def _get_temp_dir(self):
+                from pathlib import Path
+                return Path(dossier)
+
+        textes = appmod._textes_diapositives(_Moteur())
+        ok("ORDRE  la fiche suit sldIdLst et non le nom des fichiers",
+           textes == ["CONTENU 3", "CONTENU 1", "CONTENU 2"], str(textes))
+
+        # presentation.xml illisible : repli sur le nom, rien ne casse.
+        os.remove(os.path.join(dossier, "ppt", "presentation.xml"))
+        textes = appmod._textes_diapositives(_Moteur())
+        ok("ORDRE  repli sur le nom sans presentation.xml",
+           textes == ["CONTENU 1", "CONTENU 2", "CONTENU 3"], str(textes))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ── 3. Cache de l'aperçu non-PDF ─────────────────────────────────────────────
@@ -546,6 +596,7 @@ def main() -> int:
     test_layouts_partages(ok)
     test_isolation(ok)
     test_coherence(ok)
+    test_ordre_fiche(ok)
 
     if "--sans-db" not in sys.argv:
         try:

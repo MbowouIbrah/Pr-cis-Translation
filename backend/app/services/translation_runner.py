@@ -374,12 +374,36 @@ def _elements_de(slide_data: dict):
 def _textes_diapositives(pptx_eng) -> list[str]:
     """Texte brut de chaque diapositive, dans l'ordre, lu dans le XML déjà
     décompressé : de quoi écrire la fiche du document sans extraire chaque
-    diapositive à l'avance."""
+    diapositive à l'avance.
+
+    L'ordre est celui de `presentation.xml` (`sldIdLst`), pas celui des noms
+    `slideN.xml` : une diapositive déplacée garde son nom, et la fiche lirait
+    le document dans le désordre. Le nom ne sert que de repli."""
     import html
     import re
-    dossier = pptx_eng._get_temp_dir() / "ppt" / "slides"
-    fichiers = sorted(dossier.glob("slide*.xml"),
-                      key=lambda f: int(re.sub(r"\D", "", f.stem) or 0))
+    ppt = pptx_eng._get_temp_dir() / "ppt"
+    dossier = ppt / "slides"
+    fichiers = []
+    try:
+        rels = (ppt / "_rels" / "presentation.xml.rels").read_text(encoding="utf-8")
+        cibles = {}
+        for rel in re.findall(r"<Relationship\b[^>]*>", rels):
+            rid = re.search(r'\bId="([^"]+)"', rel)
+            cible = re.search(r'\bTarget="([^"]+)"', rel)
+            if rid and cible:
+                cibles[rid.group(1)] = cible.group(1)
+        pres = (ppt / "presentation.xml").read_text(encoding="utf-8")
+        liste = re.search(r"<p:sldIdLst\b.*?</p:sldIdLst>", pres, re.S)
+        for rid in re.findall(r'<p:sldId\b[^>]*\br:id="([^"]+)"',
+                              liste.group(0) if liste else ""):
+            f = dossier / cibles.get(rid, "").rsplit("/", 1)[-1]
+            if f.suffix == ".xml" and f.is_file():
+                fichiers.append(f)
+    except OSError:
+        fichiers = []
+    if not fichiers:
+        fichiers = sorted(dossier.glob("slide*.xml"),
+                          key=lambda f: int(re.sub(r"\D", "", f.stem) or 0))
     return [html.unescape(" ".join(re.findall(r"<a:t>([^<]*)</a:t>",
                                               f.read_text(encoding="utf-8"))))
             for f in fichiers]
@@ -510,9 +534,12 @@ _CONSIGNE_COHERENCE = (
 
 
 def _coherence_document(slides_traduites: dict, pptx_eng, target_lang: str,
-                        progress_cb=None) -> int:
+                        progress_cb=None, fiche: str = "") -> int:
     """Reprend les fragments qui laissent en langue source un terme que le
     document traduit ailleurs. Renvoie le nombre de fragments repris.
+
+    `fiche` : celle qui a servi aux diapositives. Sans elle, les fragments
+    repris, isolés de leur page, perdraient le vocabulaire du document.
 
     Best-effort : toute erreur laisse la traduction en l'état. Une passe de
     confort ne doit jamais faire échouer un travail déjà abouti.
@@ -547,7 +574,8 @@ def _coherence_document(slides_traduites: dict, pptx_eng, target_lang: str,
     # sont ceux de `slides_traduites` : la correction se propage donc au JSON
     # persistant sans qu'on ait à le reconstruire.
     ai_translator._translate_batch(a_reprendre, target_lang, progress_cb,
-                                   passes=0)
+                                   passes=0,
+                                   cadre={"fiche": fiche} if fiche else None)
     for el in a_reprendre:
         el.pop("consigne", None)
 
@@ -908,7 +936,8 @@ def run_pptx_progressive_job(
                 jobs.emit(job_id, "progress", {"step": "coherence", "message": "Contrôle de cohérence des termes...", "page": 0, "total": None})
                 n_coh = _coherence_document(
                     slides_traduites, pptx_eng, target_lang,
-                    jobs.progress_callback(job_id, "coherence"))
+                    jobs.progress_callback(job_id, "coherence"),
+                    fiche=fiche_doc)
                 if n_coh:
                     logger.info(f"Job {job_id}: {n_coh} fragment(s) repris "
                                 f"pour cohérence terminologique")
