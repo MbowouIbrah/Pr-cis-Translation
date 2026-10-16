@@ -31,6 +31,17 @@ class FournisseursIndisponibles(Exception):
 # (401/402/403) demande une action humaine, inutile de réessayer avant.
 _HORS_SERVICE_S = {401: 600, 402: 600, 403: 600, 429: 60}
 
+
+class _ErreurDansLeCorps(Exception):
+    """OpenRouter répond parfois 200 avec un corps `{"error": {...}}` et
+    aucun `choices` (erreur de l'hébergeur relayée telle quelle)."""
+    def __init__(self, erreur):
+        erreur = erreur if isinstance(erreur, dict) else {}
+        code = erreur.get("code")
+        self.status_code = code if isinstance(code, int) else None
+        super().__init__(f"réponse sans traduction ({code}) : "
+                         f"{str(erreur.get('message', ''))[:200]}")
+
 # Échéances PARTAGÉES par nom de fournisseur : le moteur PDF crée un
 # TranslatorAI par page ; un état porté par l'instance oublierait le 402 à la
 # page suivante et redépenserait une requête (et du quota) pour le réapprendre.
@@ -220,7 +231,10 @@ class TranslatorAI:
             if extra:
                 kw["extra_body"] = extra
             try:
-                return f.client.chat.completions.create(**kw)
+                reponse = f.client.chat.completions.create(**kw)
+                if not getattr(reponse, "choices", None):
+                    raise _ErreurDansLeCorps(getattr(reponse, "error", None))
+                return reponse
             except Exception as e:
                 statut = getattr(e, "status_code", None)
                 if statut not in _HORS_SERVICE_S:

@@ -174,6 +174,28 @@ def main() -> int:
     finally:
         translation_ai.time.sleep = vrai_sleep
 
+    # ── 4b. 200 OK dont le corps porte une erreur (OpenRouter) ────────────
+    vide429 = types.SimpleNamespace(choices=None, error={
+        "code": 429, "message": "rate-limited upstream"})
+    vide500 = types.SimpleNamespace(choices=None, error={"code": 502})
+    for nom, corps, attendu in (("429", vide429, "secours"),
+                                ("502", vide500, "relance")):
+        orr = _Fournisseur("openrouter", _Client(_traduction("a")),
+                           modele="m1:free")
+        orr.client._create = (lambda c=orr.client, x=corps:
+                              (lambda **kw: (c.appels.append(kw), x)[1]))()
+        orr.client.chat.completions.create = orr.client._create
+        tr = _traducteur(orr)
+        try:
+            tr._appel([], None, 100, None)
+            leve = "aucune"
+        except translation_ai.FournisseursIndisponibles:
+            leve = "secours"
+        except Exception as e:
+            leve = "relance" if "réponse sans traduction" in str(e) else repr(e)
+        ok(f"CORPS {nom}  erreur lisible au lieu de « NoneType » ({attendu})",
+           leve == attendu, leve)
+
     # ── 5. Construction depuis l'environnement ───────────────────────────
     gardes = {k: os.environ.get(k) for k in
               ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODELS",
@@ -212,7 +234,8 @@ def main() -> int:
         envoyes = []
         g.client = types.SimpleNamespace(chat=types.SimpleNamespace(
             completions=types.SimpleNamespace(
-                create=lambda **k: envoyes.append(k) or _traduction("x"))))
+                create=lambda **k: envoyes.append(k) or _Client(
+                    _traduction("x"))._create())))
         f.client = g.client
         tr = TranslatorAI.__new__(TranslatorAI)
         tr.fournisseurs = [f]
