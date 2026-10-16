@@ -74,6 +74,20 @@ def main() -> int:
        runtags.runs_recopies(parts, list(parts)) == [],
        str(runtags.runs_recopies(parts, list(parts))))
 
+    # Un run SANS LETTRE recopié est la seule réponse juste : une puce, une
+    # date suivie d'un séparateur ne se traduisent pas.
+    for src, rendu in (("[[0]]• [[/0]][[1]]Lecture[[/1]]",
+                        "[[0]]• [[/0]][[1]]Reading[[/1]]"),
+                       ("[[0]]2021 – 2023 | [[/0]][[1]]Commerciale[[/1]]",
+                        "[[0]]2021 – 2023 | [[/0]][[1]]Sales representative[[/1]]")):
+        ok(f"SANS LETTRE  {src[5:12]!r} recopié n'est pas un défaut",
+           runtags.defauts(src, rendu) == [], str(runtags.defauts(src, rendu)))
+    # …mais un run AVEC lettres recopié à côté reste signalé.
+    ok("SANS LETTRE  le mot recopié voisin reste signalé",
+       runtags.runs_recopies(["• ", "Lecture", " et danse"],
+                             ["• ", "lecture", " and dance"]) == [1],
+       "")
+
     # LE NOM DE PERSONNE — une version antérieure, calée sur un document, l'a
     # EFFACÉ. Il est désormais SIGNALÉ (donc redemandé), jamais supprimé.
     parts = ["RÉSULTAT INDIVIDUEL DE FORMATION: ", "Inoc Rodrigues Franca e Almeida"]

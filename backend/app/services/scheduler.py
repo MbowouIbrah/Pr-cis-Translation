@@ -98,6 +98,9 @@ class TranslationScheduler:
                 with self._lock:
                     self._running -= 1
                 self._pq.task_done()
+                # Une traduction vient de dépenser : relire le solde DeepSeek.
+                from app.services.solde_ia import verifier_depuis_un_thread
+                verifier_depuis_un_thread()
 
 
 # Point d'accès unique du processus.

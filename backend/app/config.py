@@ -168,14 +168,19 @@ TRANSLATION_WORKERS = max(1, int(os.getenv("TRANSLATION_WORKERS", "2")))
 # Deux modes, choisis par requête via le paramètre `quality` :
 #  • "fast"    → modèle non-raisonnant, ~secondes/page, version stable (défaut) ;
 #  • "precise" → modèle à raisonnement, alignement id↔texte fiable sur les pages
-#                complexes (numéros + formules), mais ~1-2 min/page.
-# Noms surchargeables via .env si DeepSeek renomme ses modèles.
-# `deepseek-chat` était un ALIAS de compatibilité vers `deepseek-v4-flash` en
-# mode non-raisonnant, supprimé par DeepSeek le 24/07/2026 à 15:59 UTC. On vise
-# donc le modèle réel : à cette date, le comportement est identique — c'est le
-# même modèle — mais le nom, lui, survivra.
-FAST_MODEL = os.getenv("DEEPSEEK_MODEL_FAST", "deepseek-v4-flash")
-PRECISE_MODEL = os.getenv("DEEPSEEK_MODEL_PRECISE", "deepseek-v4-flash")
+#                complexes (numéros + formules), ~2,5× plus lent que fast.
+# Banc du 16/10/2026 (scripts/banc_deepseek.py, 7 pages CV / essai / brochure) :
+#   flash 0,0015 $/p · flash:high 0,0032 $/p · v4-pro 0,0065 $/p ·
+#   v4-pro:high 0,026 $/p et ~95 s/p. flash:high corrige les contresens de
+#   flash (« Probatoire » → « Probationary ») ; v4-pro sans réflexion traduit
+#   les noms d'établissements ; v4-pro:high, meilleur, coûte 8× flash:high.
+# Noms surchargeables via .env ; le suffixe « :low|high|max » active la
+# réflexion (cf. engines.translation_ai.decouper_modele), sans suffixe elle est
+# COUPÉE. DeepSeek l'active par défaut : depuis la suppression de l'alias
+# non-raisonnant `deepseek-chat` (24/07/2026), le mode « rapide » payait donc
+# un raisonnement que personne n'avait demandé.
+FAST_MODEL = os.getenv("DEEPSEEK_MODEL_FAST", "deepseek-flash")
+PRECISE_MODEL = os.getenv("DEEPSEEK_MODEL_PRECISE", "deepseek-flash:high")
 
 
 # ── Marque publique ──────────────────────────────────────────────────────────

@@ -130,10 +130,13 @@ def runs_recopies(parts: list[str], rendus: list[str]) -> list[int]:
     """
     if len(parts) != len(rendus) or len(parts) < 2:
         return []
-    recopies = [i for i in range(len(parts)) if _nu(parts[i]) == _nu(rendus[i])]
-    if len(recopies) == len(parts):
+    identiques = [i for i in range(len(parts)) if _nu(parts[i]) == _nu(rendus[i])]
+    if len(identiques) == len(parts):
         return []                      # rien n'a changé : pas de mélange
-    return recopies
+    # Un run SANS LETTRE (« • », « 2026 | », « – ») n'a rien à traduire : sa
+    # recopie est la seule réponse juste, pas un mélange de langues. Le signaler
+    # renvoyait au modèle chaque ligne à puce d'un CV, pour rien.
+    return [i for i in identiques if any(c.isalpha() for c in parts[i])]
 
 
 def nombres(texte: str) -> list[str]:
@@ -141,10 +144,17 @@ def nombres(texte: str) -> list[str]:
     return _CHIFFRES.findall(texte or "")
 
 
+def _ouvertures(texte):
+    """Parenthèses OUVRANTES (« ( », « （ »), hors marque d'écriture
+    inclusive collée au mot (« étudiant(e)s ») qui n'ajoute aucun sens."""
+    t = sans_balises(texte).replace("（", "(")
+    return t.count("(") - len(re.findall(r"[a-zà-ÿ]\([a-zà-ÿ]{1,3}\)", t))
+
+
 def defauts(source: str, traduit: str) -> list[str]:
     """Ce qui cloche dans une traduction, sans jamais regarder QUEL document.
 
-    Trois invariants, aucun réglage :
+    Quatre invariants, aucun réglage :
 
       • `balises`  — autant de morceaux rendus que reçus. Un morceau sans
         réponse est un morceau non traduit ; il ne se devine pas.
@@ -155,6 +165,9 @@ def defauts(source: str, traduit: str) -> list[str]:
         document : c'est une faute d'une autre nature qu'une maladresse de
         style, et elle est invisible à la relecture d'un lecteur qui ne lit que
         la langue cible.
+      • `ajout`   — plus de parenthèses dans la traduction que dans la
+        source : une glose (« Probatoire (équivalent des AS-levels) ») que
+        personne n'a écrite. Compte brut, aucun seuil.
 
     Renvoie la liste des défauts constatés — à charge de l'appelant de
     REDEMANDER. Rien ici ne corrige, rien ici ne supprime.
@@ -174,6 +187,9 @@ def defauts(source: str, traduit: str) -> list[str]:
     if sorted(nombres(sans_balises(source))) != \
             sorted(nombres(sans_balises(traduit))):
         maux.append("nombres")
+
+    if _ouvertures(traduit) > _ouvertures(source):
+        maux.append("ajout")
 
     return maux
 

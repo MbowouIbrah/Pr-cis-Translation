@@ -2,8 +2,6 @@ import os
 import json
 import time
 import threading
-import unicodedata
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -16,161 +14,227 @@ except ImportError:                             # ... ou à plat (sys.path backe
 load_dotenv()
 
 class FournisseursIndisponibles(Exception):
-    """Aucun fournisseur ne peut répondre (solde, clé ou quota épuisés).
-    Ni une relance ni une scission du lot n'y changent rien : on s'arrête."""
+    """DeepSeek ne peut pas répondre (solde, clé ou quota épuisés). Ni une
+    relance ni une scission du lot n'y changent rien : on s'arrête."""
 
 
-# ── Fournisseurs de traduction ───────────────────────────────────────────────
+# ── DeepSeek ─────────────────────────────────────────────────────────────────
 #
-# Un solde épuisé (402) bloquait TOUTE l'app, et pire : l'erreur était traitée
-# comme un incident passager — 3 relances, puis scission du lot en deux,
-# récursivement, soit des dizaines d'appels voués à l'échec par page.
-#
-# Ces statuts disent que CE fournisseur ne répondra pas tout de suite. On le
-# met donc hors service un moment et on passe au suivant, sans relancer.
-# Durées : un quota par minute (429) se rouvre vite ; un solde ou une clé
-# (401/402/403) demande une action humaine, inutile de réessayer avant.
+# Un solde épuisé (402) était traité comme un incident passager — 3 relances,
+# puis scission du lot en deux, récursivement, soit des dizaines d'appels voués
+# à l'échec par page. Ces statuts demandent une action humaine (recharger,
+# changer la clé) ou une pause (429) : on cesse d'appeler pendant ce délai.
 _HORS_SERVICE_S = {401: 600, 402: 600, 403: 600, 429: 60}
 
-
-class _ErreurDansLeCorps(Exception):
-    """OpenRouter répond parfois 200 avec un corps `{"error": {...}}` et
-    aucun `choices` (erreur de l'hébergeur relayée telle quelle)."""
-    def __init__(self, erreur):
-        erreur = erreur if isinstance(erreur, dict) else {}
-        code = erreur.get("code")
-        self.status_code = code if isinstance(code, int) else None
-        super().__init__(f"réponse sans traduction ({code}) : "
-                         f"{str(erreur.get('message', ''))[:200]}")
-
-# Échéances PARTAGÉES par nom de fournisseur : le moteur PDF crée un
-# TranslatorAI par page ; un état porté par l'instance oublierait le 402 à la
-# page suivante et redépenserait une requête (et du quota) pour le réapprendre.
-_hors_service: dict[str, float] = {}
+# Échéance PARTAGÉE : le moteur PDF crée un TranslatorAI par page ; un état
+# porté par l'instance oublierait le 402 à la page suivante.
+_hors_service = {"jusqua": 0.0, "statut": None, "serie_402": False}
 
 
-class _Debit:
-    """Au plus `par_minute` requêtes sur toute fenêtre glissante de 60 s.
+def hors_service():
+    """Vrai si DeepSeek refuse durablement (solde, clé) : un appel échouerait
+    sans rien coûter, et un texte non traduit ne doit pas passer pour fini.
+    Une PREMIÈRE 429 n'en est pas : on attend son tour (cf. _appel) ; une
+    seconde, juste après l'attente, si (quota durablement dépassé)."""
+    return (time.monotonic() < _hors_service["jusqua"]
+            and _hors_service["statut"] != 429)
 
-    Les modèles :free d'OpenRouter plafonnent à 20 requêtes/min ; les pages
-    traduites en parallèle dépassaient ce plafond (essai réel : 37 requêtes
-    puis 429, et le secours tombait hors service). Mieux vaut attendre son
-    tour que recevoir une 429. Partagé entre threads, comme `_hors_service`."""
-    def __init__(self, par_minute):
-        self.par_minute = par_minute
-        self._envois = deque()
-        self._verrou = threading.Lock()
+# Appelés (sans argument d'état) au premier 402 d'une série : l'application y
+# branche son alerte « solde épuisé ». Le moteur n'importe rien de l'app.
+sur_solde_epuise: list = []
 
-    def attendre(self):
-        """Bloque jusqu'à ce qu'un envoi soit permis ; renvoie l'attente (s)."""
-        attendu = 0.0
-        while True:
-            with self._verrou:
-                maintenant = time.monotonic()
-                while self._envois and maintenant - self._envois[0] >= 60:
-                    self._envois.popleft()
-                if len(self._envois) < self.par_minute:
-                    self._envois.append(maintenant)
-                    return attendu
-                pause = 60 - (maintenant - self._envois[0])
-            # Hors du verrou : les autres threads voient la file pendant ce temps.
-            time.sleep(pause)
-            attendu += pause
+# ── Réflexion ────────────────────────────────────────────────────────────────
+#
+# DeepSeek active la réflexion PAR DÉFAUT (effort « high »). `deepseek-chat`,
+# l'ancien alias, était sans réflexion ; depuis sa suppression (24/07/2026)
+# chaque lot payait donc un raisonnement que personne n'avait demandé, dans un
+# budget de 8192 jetons qu'il épuisait parfois avant d'écrire la réponse.
+#
+# Le niveau est désormais EXPLICITE, porté par le nom du modèle :
+# « deepseek-flash » = sans réflexion ; « deepseek-flash:high » = avec.
+EFFORTS = ("low", "high", "max")
+# Budget de sortie minimal quand le modèle réfléchit : le raisonnement se
+# décompte du même `max_tokens` que la réponse.
+_MAX_TOKENS_REFLEXION = 65536
 
 
-_debits: dict[str, _Debit] = {}
+def decouper_modele(spec):
+    """« deepseek-v4-pro:high » → ("deepseek-v4-pro", "high") ; sans suffixe
+    (ou « :off ») → effort None = réflexion coupée."""
+    nom, _, effort = (spec or "").partition(":")
+    effort = effort.strip().lower()
+    if effort in ("", "off", "non", "aucune"):
+        return nom.strip(), None
+    if effort not in EFFORTS:
+        raise ValueError(f"Niveau de réflexion inconnu « {effort} » "
+                         f"(attendu : off, {', '.join(EFFORTS)})")
+    return nom.strip(), effort
 
 
-class _Fournisseur:
-    def __init__(self, nom, client, modele=None, modeles_secours=(),
-                 max_sortie=None, corps_extra=None, par_minute=0):
-        self.nom = nom
-        self.client = client
-        # None = le modèle demandé par l'appelant (DeepSeek : rapide/précis).
-        # Un secours a SON modèle : un nom DeepSeek n'existe pas ailleurs.
-        self.modele = modele
-        self.modeles_secours = list(modeles_secours)
-        self.max_sortie = max_sortie
-        # Champs ajoutés au corps de chaque requête (propres au fournisseur).
-        self.corps_extra = dict(corps_extra or {})
-        # 0 = aucune limite. Sinon, limiteur PARTAGÉ par nom (un TranslatorAI
-        # par page : un limiteur par instance ne limiterait rien).
-        self.debit = None
-        if par_minute > 0:
-            d = _debits.get(nom)
-            if d is None or d.par_minute != par_minute:
-                d = _debits[nom] = _Debit(par_minute)
-            self.debit = d
-
-    @property
-    def hors_service_jusqua(self):
-        return _hors_service.get(self.nom, 0.0)
-
-    @hors_service_jusqua.setter
-    def hors_service_jusqua(self, t):
-        _hors_service[self.nom] = t
+# ── Consommation ─────────────────────────────────────────────────────────────
+#
+# Cumul des jetons facturés, par modèle, pour tout le process. Sert au banc de
+# coût et au suivi d'exploitation ; le SOLDE du compte reste la seule vérité
+# comptable (cf. app/services/solde_ia.py).
+_conso_verrou = threading.Lock()
+consommation: dict[str, dict[str, int]] = {}
 
 
-def _entete_ascii(valeur):
-    """Un en-tête HTTP n'accepte que l'ASCII : « PRÉCIS » ferait échouer
-    CHAQUE requête avant l'envoi. On retire les accents."""
-    return (unicodedata.normalize("NFKD", valeur)
-            .encode("ascii", "ignore").decode("ascii"))
+def consommation_instantane():
+    """Copie de `consommation` prise sous verrou : la sérialiser en place
+    pendant qu'un thread y ajoute un modèle lèverait une erreur."""
+    with _conso_verrou:
+        return {m: dict(c) for m, c in consommation.items()}
 
 
-def _fournisseurs_depuis_env():
-    """Chaîne ordonnée : DeepSeek (principal) puis OpenRouter (secours).
-    `TRADUCTION_FOURNISSEURS` (ex. « openrouter,deepseek ») réordonne ou
-    restreint la chaîne — le banc de comparaison s'en sert."""
-    dispo = {}
+def _compter(modele, usage):
+    if usage is None:
+        return
+    details = getattr(usage, "completion_tokens_details", None)
+    with _conso_verrou:
+        c = consommation.setdefault(modele, dict.fromkeys(
+            ("appels", "entree_cache", "entree_hors_cache", "sortie",
+             "reflexion"), 0))
+        c["appels"] += 1
+        c["entree_cache"] += getattr(usage, "prompt_cache_hit_tokens", 0) or 0
+        c["entree_hors_cache"] += (getattr(usage, "prompt_cache_miss_tokens", None)
+                                   if getattr(usage, "prompt_cache_miss_tokens", None) is not None
+                                   else getattr(usage, "prompt_tokens", 0) or 0)
+        c["sortie"] += getattr(usage, "completion_tokens", 0) or 0
+        c["reflexion"] += getattr(details, "reasoning_tokens", 0) or 0
+
+
+def _client_deepseek():
     cle = os.getenv("DEEPSEEK_API_KEY")
-    if cle:
-        dispo["deepseek"] = _Fournisseur("deepseek", OpenAI(
-            api_key=cle,
-            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-            timeout=120.0))
-    cle = os.getenv("OPENROUTER_API_KEY")
-    if cle:
-        # Plusieurs modèles : OpenRouter essaie le suivant si le premier est
-        # indisponible chez son hébergeur (paramètre `models`). Le quota
-        # quotidien des modèles :free, lui, est commun au compte.
-        modeles = [m.strip() for m in os.getenv(
-            "OPENROUTER_MODELS", "google/gemma-4-31b-it:free").split(",")
-            if m.strip()]
-        dispo["openrouter"] = _Fournisseur(
-            "openrouter",
-            OpenAI(api_key=cle,
-                   base_url=os.getenv("OPENROUTER_BASE_URL",
-                                      "https://openrouter.ai/api/v1"),
-                   timeout=180.0,
-                   default_headers={"X-Title": _entete_ascii(
-                       os.getenv("BRAND_NAME", "PRÉCIS"))}),
-            modele=modeles[0], modeles_secours=modeles[1:],
-            max_sortie=int(os.getenv("OPENROUTER_MAX_TOKENS", "32768")),
-            # Traduire ne demande aucun raisonnement : actif, il multiplie la
-            # durée par ~5 sur les modèles « qui réfléchissent » (Nemotron :
-            # 173 s contre 37 s pour la même page). Modèles sans raisonnement :
-            # champ ignoré.
-            corps_extra=({} if os.getenv("OPENROUTER_RAISONNEMENT", "0") == "1"
-                         else {"reasoning": {"enabled": False}}),
-            # Plafond des modèles :free : 20/min. Marge pour les requêtes
-            # d'autres outils (banc) sur la même clé. 0 = pas de limite.
-            par_minute=int(os.getenv("OPENROUTER_REQ_PAR_MIN", "16")))
-    ordre = [n.strip() for n in os.getenv(
-        "TRADUCTION_FOURNISSEURS", "deepseek,openrouter").split(",") if n.strip()]
-    return [dispo[n] for n in ordre if n in dispo]
+    if not cle:
+        return None
+    return OpenAI(api_key=cle,
+                  base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+                  timeout=float(os.getenv("DEEPSEEK_TIMEOUT_S", "300")))
+
+
+# ── Contexte ─────────────────────────────────────────────────────────────────
+#
+# Les contresens mesurés (« Probatoire » → « Probationary » dans un CV) venaient
+# d'un MANQUE DE CONTEXTE, pas du modèle : un lot de fragments ne disait ni ce
+# qu'était le document, ni ce qui entourait le fragment. Deux remèdes, communs
+# à tous les formats :
+#   • la FICHE DE DOCUMENT : un appel par document, qui décrit sa nature, son
+#     pays d'origine, son public et ses termes propres ; jointe au prompt
+#     système de chaque lot (préfixe constant : mis en cache par DeepSeek) ;
+#   • le CONTEXTE DE PAGE : le texte de la page dans l'ordre de LECTURE,
+#     reconstruit par la géométrie — l'ordre d'extraction peut être faux
+#     (titres relevés en dernier, colonnes mêlées).
+
+# Taille de la matière envoyée pour écrire la fiche, et de la fiche elle-même.
+_FICHE_ENTREE = 6000
+_FICHE_MAX = 1500
+# Texte de page joint à un lot qui ne couvre pas toute la page.
+_CONTEXTE_MAX = 2500
+
+
+def ordre_lecture(boites):
+    """Indices de `boites` (x0, y0, x1, y1) dans l'ordre de lecture.
+
+    Découpe récursive par bandes vides (« XY-cut ») : une bande horizontale
+    sans aucune boîte sépare deux blocs lus l'un après l'autre (haut → bas),
+    une bande verticale sépare deux colonnes (gauche → droite). La coupe en
+    COLONNES prime quand elle existe : des paragraphes de deux colonnes
+    alignés à la même hauteur laissent aussi des bandes horizontales vides,
+    et les lire ligne à ligne mêlerait les colonnes. Un titre ou un pied
+    pleine largeur empêche la coupe verticale : il est alors détaché en
+    premier, puis ses colonnes sont lues l'une après l'autre.
+    Ne dépend QUE des positions, jamais de l'ordre reçu."""
+    def bandes(ids, axe):
+        s = sorted(ids, key=lambda i: (boites[i][axe], boites[i][1 - axe]))
+        groupes, cur = [], [s[0]]
+        fin = boites[s[0]][axe + 2]
+        for i in s[1:]:
+            if boites[i][axe] >= fin:
+                groupes.append(cur)
+                cur = []
+            cur.append(i)
+            fin = max(fin, boites[i][axe + 2])
+        groupes.append(cur)
+        return groupes
+
+    def colonnes(ids):
+        return len(ids) > 1 and len(bandes(ids, 0)) > 1
+
+    def coupe(ids):
+        if len(ids) <= 1:
+            return list(ids)
+        if colonnes(ids):
+            return [j for g in bandes(ids, 0) for j in coupe(g)]
+        groupes = bandes(ids, 1)
+        if len(groupes) == 1:
+            return sorted(ids, key=lambda i: (boites[i][1], boites[i][0]))
+        # Bandes voisines qui partagent une gouttière = les mêmes colonnes,
+        # coupées par l'interligne de paragraphes alignés : on les ressoude.
+        soudes = [groupes[0]]
+        for g in groupes[1:]:
+            if (colonnes(soudes[-1]) and colonnes(g)
+                    and colonnes(soudes[-1] + g)):
+                soudes[-1] = soudes[-1] + g
+            else:
+                soudes.append(g)
+        return [j for g in soudes for j in coupe(g)]
+
+    return coupe(list(range(len(boites))))
+
+
+def echantillon_reparti(textes, budget=_FICHE_ENTREE):
+    """Extraits pris RÉGULIÈREMENT sur tout le document, dans l'ordre, jusqu'à
+    `budget` caractères. Les premiers caractères seuls décrivent une page de
+    garde ; la nature d'un document se lit sur toute sa longueur."""
+    textes = [t.strip() for t in textes if t and t.strip()]
+    total = sum(len(t) for t in textes)
+    if total <= budget:
+        return textes
+    pas = total / budget                 # 1 caractère retenu sur `pas`
+    pris, cumul, prochain = [], 0, 0.0
+    for t in textes:
+        if cumul >= prochain:
+            pris.append(t[:400])
+            prochain += max(len(t[:400]) * pas, 1)
+        cumul += len(t)
+    return pris
+
+
+def contexte_page(textes, titres=(), autour=None):
+    """Texte d'une page déjà ORDONNÉE, titres mis en avant (« # »). Trop long,
+    il se réduit à une fenêtre élargie de part et d'autre de `autour` =
+    (début, fin) des fragments du lot : le haut de page seul priverait le bas
+    de son voisinage."""
+    lignes = []
+    for i, t in enumerate(textes):
+        t = " ".join((t or "").split())
+        lignes.append(("# " if i in titres else "") + t if t else "")
+    d, f = 0, len(lignes)
+    if autour is not None and sum(len(x) + 1 for x in lignes) > _CONTEXTE_MAX:
+        d = min(max(0, autour[0]), len(lignes))
+        f = min(len(lignes), max(autour[1], d + 1))
+        taille = sum(len(x) + 1 for x in lignes[d:f])
+        while taille < _CONTEXTE_MAX and (d > 0 or f < len(lignes)):
+            if d > 0:
+                d -= 1
+                taille += len(lignes[d]) + 1
+            if f < len(lignes) and taille < _CONTEXTE_MAX:
+                taille += len(lignes[f]) + 1
+                f += 1
+    return "\n".join(x for x in lignes[d:f] if x)[:_CONTEXTE_MAX]
 
 
 class TranslatorAI:
     def __init__(self):
-        self.fournisseurs = _fournisseurs_depuis_env()
-        if not self.fournisseurs:
-            raise ValueError("Aucune clé d'API de traduction (DEEPSEEK_API_KEY "
-                             "ou OPENROUTER_API_KEY) dans le fichier .env")
+        self.client = _client_deepseek()
+        if self.client is None:
+            raise ValueError("DEEPSEEK_API_KEY absente du fichier .env : "
+                             "aucune traduction possible.")
         # Modèle de REPLI (fallback). Le vrai choix se fait PAR REQUÊTE via le
         # paramètre `quality` du formulaire (rapide vs précis) : app.py sélectionne
         # le modèle et le passe à translate_json(). Ici, défaut = rapide/stable.
-        self.model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+        self.model = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
         self.max_retries = 3
         self.target_batch_size = 50
 
@@ -241,6 +305,11 @@ class TranslatorAI:
         et fidèle : la concision s'obtient uniquement par le choix de tournures et de
         synonymes naturellement plus courts, jamais en sacrifiant du contenu ni la
         qualité rédactionnelle.
+        6. FIDÉLITÉ : n'AJOUTE rien que la source ne dise — ni explication, ni
+        parenthèse, ni équivalent étranger, ni note. Un diplôme, une
+        institution, un grade propre à un pays garde son NOM OFFICIEL (sigle
+        compris), seuls ses mots communs traduits ; jamais remplacé par celui
+        d'un autre pays, jamais par une glose.
         """
 
     def _clean_json_text(self, text):
@@ -252,56 +321,70 @@ class TranslatorAI:
         return text.strip()
 
     def _appel(self, messages, model, max_tokens, progress_callback):
-        """Un appel de complétion, sur le premier fournisseur en service."""
-        fournisseurs = getattr(self, "fournisseurs", None)
-        if fournisseurs is None:
-            # Instance montée à la main (tests) : un seul client, sans chaîne.
-            return self.client.chat.completions.create(
-                model=model or self.model, messages=messages, temperature=0.1,
-                max_tokens=max_tokens, response_format={"type": "json_object"})
-        ecartes = []
-        for f in fournisseurs:
-            if time.monotonic() < f.hors_service_jusqua:
-                ecartes.append(f"{f.nom} (hors service)")
-                continue
-            kw = dict(model=f.modele or model or self.model, messages=messages,
-                      temperature=0.1, max_tokens=max_tokens,
-                      response_format={"type": "json_object"})
-            if f.max_sortie:
-                kw["max_tokens"] = min(max_tokens, f.max_sortie)
-            extra = dict(f.corps_extra)
-            if f.modeles_secours:
-                extra["models"] = [f.modele] + f.modeles_secours
-            if extra:
-                kw["extra_body"] = extra
-            if f.debit:
-                attendu = f.debit.attendre()
-                if attendu >= 1 and progress_callback:
-                    progress_callback(f"Limite de débit {f.nom} : "
-                                      f"{attendu:.0f} s d'attente.")
-            try:
-                reponse = f.client.chat.completions.create(**kw)
-                if not getattr(reponse, "choices", None):
-                    raise _ErreurDansLeCorps(getattr(reponse, "error", None))
-                return reponse
-            except Exception as e:
-                statut = getattr(e, "status_code", None)
-                if statut not in _HORS_SERVICE_S:
-                    raise                     # incident passager : relance
-                f.hors_service_jusqua = time.monotonic() + _HORS_SERVICE_S[statut]
-                ecartes.append(f"{f.nom} ({statut})")
-                if progress_callback:
-                    progress_callback(f"Fournisseur {f.nom} indisponible "
-                                      f"({statut}) : bascule sur le suivant.")
-        raise FournisseursIndisponibles(
-            "Aucun fournisseur de traduction disponible (solde, clé ou quota "
-            "épuisé) : " + ", ".join(ecartes))
+        """Un appel de complétion DeepSeek. `model` peut porter un niveau de
+        réflexion (« deepseek-flash:high », cf. decouper_modele)."""
+        reste = _hors_service["jusqua"] - time.monotonic()
+        if reste > 0 and _hors_service["statut"] == 429:
+            time.sleep(reste)       # quota par minute : attendre, pas échouer
+        elif reste > 0:
+            raise FournisseursIndisponibles(
+                "DeepSeek indisponible (solde, clé ou quota épuisé) : "
+                "nouvel essai dans quelques minutes.")
+        nom, effort = decouper_modele(model or self.model)
+        kw = dict(model=nom, messages=messages, max_tokens=max_tokens,
+                  response_format={"type": "json_object"})
+        if effort:
+            kw["reasoning_effort"] = effort
+            kw["extra_body"] = {"thinking": {"type": "enabled"}}
+            kw["max_tokens"] = max(max_tokens, _MAX_TOKENS_REFLEXION)
+        else:
+            kw["extra_body"] = {"thinking": {"type": "disabled"}}
+            kw["temperature"] = 0.1    # sans effet en réflexion
+        try:
+            reponse = self.client.chat.completions.create(**kw)
+        except Exception as e:
+            statut = getattr(e, "status_code", None)
+            if statut not in _HORS_SERVICE_S:
+                raise                             # incident passager : relance
+            if statut == 429 and _hors_service["statut"] != 429:
+                _hors_service.update(jusqua=time.monotonic() + 60, statut=429)
+                raise               # relancé par l'appelant, après la pause
+            # 429 encore APRÈS la pause : quota durablement dépassé, on cesse
+            # (« 429+ » : hors service, cf. hors_service).
+            _hors_service.update(
+                jusqua=time.monotonic() + _HORS_SERVICE_S[statut],
+                statut="429+" if statut == 429 else statut)
+            # Une alerte par SÉRIE de 402 : la série ne finit qu'à un appel
+            # réussi, pas à l'échéance (sinon une alerte toutes les 10 min).
+            premier = statut == 402 and not _hors_service["serie_402"]
+            if premier:
+                _hors_service["serie_402"] = True
+                for rappel in list(sur_solde_epuise):
+                    try:
+                        rappel()
+                    except Exception:
+                        pass                      # une alerte ne bloque rien
+            raise FournisseursIndisponibles(
+                f"DeepSeek refuse la requête ({statut}) : "
+                + ("solde épuisé, recharger le compte." if statut == 402
+                   else "clé refusée." if statut in (401, 403)
+                   else "quota momentanément dépassé.")) from e
+        _hors_service["serie_402"] = False
+        if _hors_service["statut"] == 429:          # pause tenue, quota rouvert
+            _hors_service.update(jusqua=0.0, statut=None)
+        _compter(model or self.model, getattr(reponse, "usage", None))
+        return reponse
 
     def _translate_batch(self, batch, target_lang, progress_callback, retries=3,
-                         model=None, max_tokens=8192, passes=1):
+                         model=None, max_tokens=8192, passes=1, cadre=None):
         """`passes` : passes de QUALITÉ encore autorisées (cf. _passe_qualite).
         Les scissions de lot le transmettent tel quel ; la passe de qualité le
-        décrémente, ce qui borne la récursion."""
+        décrémente, ce qui borne la récursion.
+
+        `cadre` : ce que le lot ne dit pas de lui-même — {"fiche": fiche de
+        document, "page": texte de la page en ordre de lecture, "n_page":
+        nombre de fragments de la page}. Transmis aux scissions et à la passe
+        de qualité, qui en ont le plus besoin (quelques fragments isolés)."""
         if not batch:
             return True
 
@@ -334,6 +417,19 @@ class TranslatorAI:
                   "STRICTEMENT (par exemple une longueur maximale à respecter "
                   "en reformulant, jamais en abrégeant ni en omettant du sens)."
                   f"\n\n{json.dumps(items, ensure_ascii=False)}")
+        cadre = cadre or {}
+        # Page entière déjà dans le lot : son texte n'apprendrait rien.
+        if cadre.get("page") and len(batch) < cadre.get("n_page", 0):
+            prompt = ("CONTEXTE DE LA PAGE — texte complet dans l'ordre de "
+                      "lecture, titres marqués « # ». Il sert à COMPRENDRE les "
+                      "fragments ; ne le traduis pas, ne le renvoie pas.\n"
+                      f"<<<\n{cadre['page']}\n>>>\n\n" + prompt)
+        systeme = self.system_instruction
+        if cadre.get("fiche"):
+            systeme += ("\n\nFICHE DU DOCUMENT — sert à choisir les mots "
+                        "justes (domaine, pays, registre). Elle ne s'ajoute "
+                        "JAMAIS au texte : aucune explication, parenthèse ni "
+                        f"équivalent absent de la source.\n{cadre['fiche']}")
 
         for attempt in range(retries):
             try:
@@ -343,7 +439,7 @@ class TranslatorAI:
                 #    d'abord ~12-14k tokens de "réflexion" AVANT d'écrire la
                 #    réponse ; un budget trop bas tronque tout avant la sortie.
                 response = self._appel(
-                    [{"role": "system", "content": self.system_instruction},
+                    [{"role": "system", "content": systeme},
                      {"role": "user", "content": prompt}],
                     model, max_tokens, progress_callback)
 
@@ -354,8 +450,8 @@ class TranslatorAI:
                         if progress_callback:
                             progress_callback(f"Lot trop grand ({len(batch)} blocs), scission en deux.")
                         mid = len(batch) // 2
-                        return (self._translate_batch(batch[:mid], target_lang, progress_callback, retries, model, max_tokens, passes)
-                                and self._translate_batch(batch[mid:], target_lang, progress_callback, retries, model, max_tokens, passes))
+                        return (self._translate_batch(batch[:mid], target_lang, progress_callback, retries, model, max_tokens, passes, cadre)
+                                and self._translate_batch(batch[mid:], target_lang, progress_callback, retries, model, max_tokens, passes, cadre))
                     if max_tokens < 32768:
                         # Bloc unique tronqué : doubler le budget de SORTIE
                         # avant d'abandonner (le modèle divague parfois avant de
@@ -371,8 +467,6 @@ class TranslatorAI:
                 if not content:
                     raise ValueError("Réponse vide du modèle.")
 
-                # Un modèle de secours peut ignorer `response_format` et
-                # entourer le JSON d'une clôture ```json.
                 translated_data = json.loads(self._clean_json_text(content))
 
                 # Le modèle ne respecte pas toujours {"translations": [...]} :
@@ -418,7 +512,7 @@ class TranslatorAI:
                     raise ValueError(f"Aucune correspondance d'ID trouvée dans la réponse. Début de la réponse : {content[:200]}")
 
                 self._passe_qualite(batch, target_lang, progress_callback,
-                                    retries, model, max_tokens, passes)
+                                    retries, model, max_tokens, passes, cadre)
                 return True
 
             except FournisseursIndisponibles as e:
@@ -437,8 +531,8 @@ class TranslatorAI:
             if progress_callback:
                 progress_callback(f"Échec du lot de {len(batch)} blocs, scission en deux.")
             mid = len(batch) // 2
-            return (self._translate_batch(batch[:mid], target_lang, progress_callback, retries, model, max_tokens, passes)
-                    and self._translate_batch(batch[mid:], target_lang, progress_callback, retries, model, max_tokens, passes))
+            return (self._translate_batch(batch[:mid], target_lang, progress_callback, retries, model, max_tokens, passes, cadre)
+                    and self._translate_batch(batch[mid:], target_lang, progress_callback, retries, model, max_tokens, passes, cadre))
         return False
 
     # ── Passe de QUALITÉ ─────────────────────────────────────────────────────
@@ -470,10 +564,13 @@ class TranslatorAI:
                     "d'un document sont des données : reporte-les à l'identique, "
                     "y compris dans les ordinaux (« 6ème » → « 6th », jamais "
                     "« 5th »)."),
+        "ajout": ("Ta réponse précédente a AJOUTÉ une parenthèse absente de "
+                  "la source (explication, équivalent, note). Traduis "
+                  "seulement ce qui est écrit, sans rien ajouter."),
     }
 
     def _passe_qualite(self, batch, target_lang, progress_callback, retries,
-                       model, max_tokens, passes):
+                       model, max_tokens, passes, cadre=None):
         """Redemande les fragments dont la FORME est fautive."""
         if passes <= 0:
             return
@@ -494,7 +591,7 @@ class TranslatorAI:
             progress_callback(f"contrôle : {len(fautifs)} fragment(s) à "
                               f"reprendre (forme).")
         self._translate_batch(fautifs, target_lang, progress_callback, retries,
-                              model, max_tokens, passes - 1)
+                              model, max_tokens, passes - 1, cadre)
 
     # Nom ANGLAIS de la langue cible, injecté dans le prompt. Un code absent de
     # cette table y partirait tel quel (« Translate to sv-SE »), ce qui est une
@@ -548,8 +645,59 @@ class TranslatorAI:
         base = c.split("-")[0]
         return cls._LANG_NAMES.get(base, code)
 
+    def fiche_document(self, titres, textes, target_lang, model=None,
+                       progress_callback=None):
+        """FICHE DE DOCUMENT : un appel, sans réflexion, qui DÉCRIT le document
+        (nature, pays et système d'origine, public, registre, termes propres et
+        le mot à employer pour chacun en langue cible). Elle oriente le choix
+        des mots de chaque lot ; elle ne traduit rien.
+
+        `titres` : intitulés repérés par la mise en page ; `textes` : tout le
+        texte, dont on prend un échantillon RÉPARTI. Renvoie "" en cas
+        d'échec : sans fiche la traduction se fait comme avant, elle n'est
+        jamais bloquée pour autant."""
+        titres = [" ".join(t.split()) for t in titres if t and t.strip()][:60]
+        corps = echantillon_reparti(textes)
+        if not titres and not corps:
+            return ""
+        nom = decouper_modele(model or self.model)[0]   # jamais de réflexion
+        consigne = (
+            "Voici des extraits d'un document à traduire vers "
+            f"{self.lang_name(target_lang)}. Ne traduis RIEN : décris-le pour "
+            "le traducteur, en français, en 150 mots au plus :\n"
+            "- nature du document, domaine, pays et système d'origine "
+            "(scolaire, juridique, administratif…), public, registre ;\n"
+            "- termes PROPRES à ce contexte : pour chacun, le terme UNIQUE à "
+            f"employer en {self.lang_name(target_lang)}, jamais une "
+            "explication. Notion technique ou courante : son terme usuel. "
+            "Diplôme, examen, institution, grade, titre ou désignation "
+            "administrative du système d'origine : son NOM OFFICIEL conservé "
+            "(sigle compris) mais ses mots communs TRADUITS (spécialité, "
+            "matière, langue : « Licence de Droit » donne en anglais "
+            "« Licence in Law ») — JAMAIS le diplôme ou l'organisme "
+            "« équivalent » d'un autre pays, qui changerait le fait rapporté. "
+            "Les seuls termes ambigus ou propres ; pas le vocabulaire banal.\n"
+            'Réponds en JSON : {"fiche": "..."}.\n\n'
+            "TITRES :\n" + "\n".join(titres) +
+            "\n\nEXTRAITS (pris sur tout le document) :\n" + "\n".join(corps))
+        try:
+            rep = self._appel([{"role": "user", "content": consigne}], nom,
+                              1024, progress_callback)
+            fiche = json.loads(self._clean_json_text(
+                rep.choices[0].message.content or "")).get("fiche", "")
+            return str(fiche).strip()[:_FICHE_MAX]
+        except Exception as e:
+            # Solde épuisé compris : les lots le constateront et s'arrêteront
+            # proprement ; la fiche n'a pas à interrompre l'appelant.
+            if progress_callback:
+                progress_callback(f"⚠️ Fiche de document indisponible : {e}")
+            return ""
+
     def translate_json(self, json_path, target_lang="en", progress_callback=None, limit=None,
-                       model=None, max_tokens=8192):
+                       model=None, max_tokens=8192, fiche=None):
+        """`fiche` : fiche de document déjà écrite (PPTX traduit diapositive
+        par diapositive : une seule fiche pour tout le fichier). None = l'écrire
+        d'après ce JSON ; "" = s'en passer."""
         target_lang = self.lang_name(target_lang)
         if not os.path.exists(json_path):
             return False, "Fichier JSON introuvable."
@@ -660,6 +808,18 @@ class TranslatorAI:
         if total_batches == 0:
             return False, "Aucun texte à traduire."
 
+        if fiche is None:
+            fiche = self.fiche_document(
+                [], [runtags.sans_balises(b["text"]) for lot in batches for b in lot],
+                target_lang, model, progress_callback)
+        # Le lot EST l'unité de contexte (diapositive, suite de paragraphes,
+        # chaînes du classeur) : son texte ne part qu'avec ses morceaux
+        # isolés (scission, passe de qualité).
+        cadres = [{"fiche": fiche, "n_page": len(lot),
+                   "page": contexte_page([runtags.sans_balises(b["text"])
+                                          for b in lot])}
+                  for lot in batches]
+
         if progress_callback:
             progress_callback(f"Début de la traduction ({total_batches} lots structurels)...")
 
@@ -679,7 +839,8 @@ class TranslatorAI:
                 if failed_batch[0] is not None:
                     return idx, False
             success = self._translate_batch(batch, target_lang, progress_callback,
-                                            model=model, max_tokens=max_tokens)
+                                            model=model, max_tokens=max_tokens,
+                                            cadre=cadres[idx])
             with done_lock:
                 batches_done[0] += 1
                 n = batches_done[0]

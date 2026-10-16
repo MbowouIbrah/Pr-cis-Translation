@@ -68,8 +68,13 @@ async def _lifespan(_app: FastAPI):
     # de fond plutôt que par le premier visiteur gratuit après un déploiement.
     from app.services import trial_preview
     threading.Thread(target=trial_preview.prechauffer, daemon=True).start()
+    # Alertes de coût DeepSeek : solde bas, dépense du jour, solde épuisé.
+    import asyncio
+    from app.services import solde_ia
+    surveillance_solde = asyncio.create_task(solde_ia.surveiller())
     _afficher_banniere()
     yield
+    surveillance_solde.cancel()
 
 
 def _afficher_banniere() -> None:
