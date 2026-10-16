@@ -543,16 +543,7 @@ def _reprendre_slide(slide_data: dict, connus: dict[str, dict],
 # qu'un cognat reste INCHANGÉ sans dommage, et pour que la reprise ne touche
 # QUE le terme — pas le reste d'une phrase déjà correcte.
 
-_CONSIGNE_COHERENCE = (
-    "COHÉRENCE DU DOCUMENT. Dans ta traduction ci-dessous, ces termes sont "
-    "restés identiques à la source : {termes}. Ailleurs dans le MÊME document, "
-    "tu les as traduits. Reprends ta traduction en ne changeant QUE ce qui "
-    "concerne ces termes — garde le reste MOT POUR MOT.\n"
-    "Si l'un d'eux s'écrit de la même façon dans la langue cible, ou s'il "
-    "s'agit d'un nom propre, d'une marque ou d'un sigle, LAISSE-LE TEL QUEL : "
-    "c'est légitime, et le changer serait une faute.\n"
-    "Ta traduction précédente : {precedente}"
-)
+_CONSIGNE_COHERENCE = runtags.CONSIGNE_COHERENCE
 
 
 def _coherence_document(slides_traduites: dict, pptx_eng, target_lang: str,

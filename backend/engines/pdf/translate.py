@@ -365,6 +365,78 @@ def translate_extraction(data, target_lang="fr", max_pages=None,
     return data
 
 
+def coherence_document(pages, target_lang="fr", fiche="", progress=None):
+    """COHÉRENCE DE DOCUMENT, en fin de traduction : reprend les paragraphes
+    qui laissent en langue source un terme que le document traduit ailleurs
+    (« Ambassade » gardé une fois, « Embassy » partout ailleurs). La preuve
+    vient du document lui-même (runtags.termes_incoherents), jamais d'une
+    liste de termes ; même consigne que la passe PPTX.
+
+    Modifie `tr_tagged` en place et renvoie les numéros des pages touchées.
+    Une reprise aux balises mutilées est écartée : la traduction d'avant
+    reste. Best-effort : une erreur laisse tout en l'état.
+    """
+    from engines import runtags
+    paires = []                                 # (page, el, source balisée)
+    for page in pages:
+        for el in page.get("elements", []):
+            if el.get("type") != "paragraph" or not el.get("tr_tagged"):
+                continue
+            try:
+                tagged, _m = tagging.tag_paragraph(el)
+            except Exception:
+                continue
+            if tagged.strip():
+                paires.append((page, el, tagged))
+    incoherents = runtags.termes_incoherents(
+        (src, el["tr_tagged"]) for _p, el, src in paires)
+    if not incoherents:
+        return set()
+
+    par_page = {}                               # id(page) -> (page, [(el, it)])
+    for k, (page, el, src) in enumerate(paires):
+        termes = runtags.termes_a_reprendre(src, el["tr_tagged"], incoherents)
+        if not termes:
+            continue
+        it = {"id": f"c{page['page_num']}_{k}",
+              "text": src,
+              "consigne": runtags.CONSIGNE_COHERENCE.format(
+                  termes=", ".join(termes), precedente=el["tr_tagged"])}
+        par_page.setdefault(id(page), (page, []))[1].append((el, it))
+    if not par_page:
+        return set()
+
+    from engines.translation_ai import TranslatorAI
+    tr = TranslatorAI()
+    lang_name = tr.lang_name(target_lang)
+    if progress:
+        progress(f"cohérence : {sum(len(v[1]) for v in par_page.values())} "
+                 f"paragraphe(s) repris ({len(incoherents)} terme(s)).")
+    touchees = set()
+    for page, couples in par_page.values():
+        support = _page_support(page)
+        for el, it in couples:
+            it["support"] = support.get(id(el), "corps")
+        cadre = _cadre_page(page, support, fiche)
+        batch = [it for _el, it in couples]
+        try:
+            tr._translate_batch(batch, lang_name, progress, passes=0,
+                                cadre=_cadre_lot(
+                                    cadre, [cadre["rang"].get(id(el), 0)
+                                            for el, _it in couples],
+                                    cadre["n_page"]))
+        except Exception as e:
+            if progress:
+                progress(f"[!] cohérence page {page.get('page_num')} : {e}")
+            continue
+        for el, it in couples:
+            out = it.get("translated_text")
+            if out and out != el["tr_tagged"] and _tags_ok(it["text"], out):
+                el["tr_tagged"] = out
+                touchees.add(page["page_num"])
+    return touchees
+
+
 def retranslate_overflows(data, engine, target_lang="fr", max_pages=None,
                           progress=None, max_rounds=2, fiche=""):
     """RETRADUCTION COMPACTE (décision produit : compression par REFORMULATION,
