@@ -481,7 +481,7 @@ export default function Home() {
           isTranslating={stream.isTranslating}
           pageStatuses={stream.pageStatuses}
           queuePosition={stream.queuePosition}
-          renderedUpTo={stream.renderedUpTo}
+          readyPages={stream.readyPages}
           previewRendering={previewLoading}
           translationError={stream.error}
           limitReached={stream.limitReached}

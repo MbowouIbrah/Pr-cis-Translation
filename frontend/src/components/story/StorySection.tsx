@@ -27,7 +27,7 @@ interface StorySectionProps {
   targetLang?: string;
   isTranslating: boolean;
   pageStatuses: Record<number, PageStatus>;
-  renderedUpTo: number;
+  readyPages: Record<number, true>;
   /** En file d'attente (aucun worker libre) : nombre de demandes devant, ou
    *  `null` si le job a démarré / n'attend pas. */
   queuePosition?: number | null;
@@ -71,7 +71,7 @@ export default function StorySection({
   isTranslating,
   pageStatuses,
   queuePosition = null,
-  renderedUpTo,
+  readyPages,
   previewRendering = false,
   translationError = null,
   limitReached = false,
@@ -341,7 +341,7 @@ export default function StorySection({
                   {Array.from({ length: numPages }).map((_, i) => {
                     const pageNo = i + 1;
                     const status = pageStatuses[pageNo];
-                    const isReady = status === 'done' || status === 'copied' || (!isTranslating && pageNo <= renderedUpTo) || (!isTranslating && Object.keys(pageStatuses).length === 0);
+                    const isReady = status === 'done' || status === 'copied' || (!isTranslating && !!readyPages[pageNo]) || (!isTranslating && Object.keys(pageStatuses).length === 0);
                     const inProgress = status === 'extracting' || status === 'translating' || status === 'rendering';
                     // Pastille d'état : vert = prête, bleu animé = en cours, gris = en attente.
                     const dotColor = isReady ? '#16a34a' : inProgress ? '#2563eb' : 'var(--gray-300)';
@@ -462,9 +462,11 @@ export default function StorySection({
                         // vaut mieux qu'une page fausse.
                         !previewRendering && (
                           (!isTranslating && Object.keys(pageStatuses).length === 0)
-                          || pageStatuses[currentPage] === 'done'
-                          || pageStatuses[currentPage] === 'copied'
-                          || currentPage <= renderedUpTo
+                          // Le STATUT ne suffit pas : `done` arrive avant que le
+                          // nouveau partiel soit téléchargé, et le partiel PPTX
+                          // montre l'original à la place des pages non greffées.
+                          // Seul `readyPages` dit ce que le fichier affiché contient.
+                          || !!readyPages[currentPage]
                         )
                       }
                       translatedPageStatus={previewRendering ? 'rendering' : pageStatuses[currentPage]}

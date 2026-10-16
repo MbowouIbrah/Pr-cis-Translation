@@ -22,10 +22,14 @@ export interface StreamingState {
   totalPages: number | null;
   /** Statut par numéro de page (1-basé). */
   pageStatuses: Record<number, PageStatus>;
-  /** PDF partiel : pages 1..renderedUpTo déjà prêtes (mis à jour au fil de l'eau). */
+  /** PDF partiel, mis à jour au fil de l'eau. */
   partialBlob: Blob | null;
-  /** Plus grand numéro de page présent dans partialBlob. */
-  renderedUpTo: number;
+  /** Pages dont `partialBlob` montre VRAIMENT la traduction. Un ensemble, pas
+   *  un « jusqu'à N » : les diapositives PPTX se traduisent en parallèle et
+   *  dans le désordre, et le partiel PPTX contient TOUTES les pages (celles
+   *  pas encore traduites y sont l'original). « Pages 1..N prêtes » y faisait
+   *  passer des pages en langue source pour traduites. */
+  readyPages: Record<number, true>;
   /** Résultat final complet (quand terminé). */
   result: { blob: Blob; filename: string } | null;
   error: string | null;
@@ -44,7 +48,7 @@ const EMPTY: StreamingState = {
   totalPages: null,
   pageStatuses: {},
   partialBlob: null,
-  renderedUpTo: 0,
+  readyPages: {},
   result: null,
   error: null,
   limitReached: false,
@@ -65,6 +69,11 @@ export function useStreamingTranslation() {
   // fait office de résultat. Un ref, pas un state : on le lit dans le
   // gestionnaire SSE, hors du cycle de rendu.
   const lastPartialRef = useRef<Blob | null>(null);
+  // Statuts vus par le gestionnaire SSE, lus hors du cycle de rendu.
+  const statusesRef = useRef<Record<number, PageStatus>>({});
+  // Pages terminées dont l'aperçu progressif a échoué (`apercu: false`) : le
+  // partiel les montre encore en langue source, jusqu'au résultat final.
+  const noPreviewRef = useRef<Set<number>>(new Set());
 
   const cancel = useCallback(() => {
     esRef.current?.close();
@@ -72,7 +81,7 @@ export function useStreamingTranslation() {
     setState((s) => ({ ...s, isTranslating: false }));
   }, []);
 
-  const fetchPartial = useCallback(async (upTo: number) => {
+  const fetchPartial = useCallback(async () => {
     const jobId = jobIdRef.current;
     if (!jobId) return;
     if (fetchingRef.current) {
@@ -80,6 +89,15 @@ export function useStreamingTranslation() {
       return;
     }
     fetchingRef.current = true;
+    // Relevé AVANT la requête : le serveur écrit le partiel puis émet `done`,
+    // donc toute page déjà terminée à cet instant est dans ce qu'on va lire.
+    // Relevée après, une page finie pendant le transfert serait déclarée
+    // prête sur un fichier qui la montre encore en langue source.
+    const ready: Record<number, true> = {};
+    for (const [p, st] of Object.entries(statusesRef.current)) {
+      const n = Number(p);
+      if ((st === 'done' || st === 'copied') && !noPreviewRef.current.has(n)) ready[n] = true;
+    }
     try {
       const res = await fetch(`${API_BASE}/api/translate/partial/${jobId}`, {
         headers: { 'X-API-Key': API_KEY, ...authHeader() },
@@ -90,7 +108,7 @@ export function useStreamingTranslation() {
         setState((s) => ({
           ...s,
           partialBlob: blob,
-          renderedUpTo: Math.max(s.renderedUpTo, upTo),
+          readyPages: { ...s.readyPages, ...ready },
         }));
       }
     } catch {
@@ -99,7 +117,7 @@ export function useStreamingTranslation() {
       fetchingRef.current = false;
       if (pendingFetchRef.current) {
         pendingFetchRef.current = false;
-        fetchPartial(upTo);
+        fetchPartial();
       }
     }
   }, []);
@@ -130,6 +148,8 @@ export function useStreamingTranslation() {
         jobIdRef.current = null;
         fetchingRef.current = false;
         pendingFetchRef.current = false;
+        statusesRef.current = {};
+        noPreviewRef.current = new Set();
 
         try {
           // `quality` et `format_options` ne sont plus envoyés : le moteur PDF v2
@@ -204,13 +224,15 @@ export function useStreamingTranslation() {
             } else if (type === 'page') {
               const page = msg.page as number;
               const status = msg.status as PageStatus;
+              statusesRef.current[page] = status;
+              if (status === 'done' && msg.apercu === false) noPreviewRef.current.add(page);
               setState((s) => ({
                 ...s,
                 pageStatuses: { ...s.pageStatuses, [page]: status },
                 totalPages: (msg.total as number) ?? s.totalPages,
               }));
               if (status === 'done' || status === 'copied') {
-                fetchPartial(page);
+                fetchPartial();
               }
             } else if (type === 'partial') {
               // PPTX PROGRESSIF : le backend signale qu'un nouveau PDF partiel
@@ -229,7 +251,7 @@ export function useStreamingTranslation() {
               // RIEN jusqu'à la fin. En écoutant `partial`, l'original apparaît
               // dès que le socle est prêt, puis l'aperçu se remplit au rythme
               // réel des conversions — quelle que soit la vitesse de traduction.
-              fetchPartial((msg.pages as number) ?? 0);
+              fetchPartial();
             } else if (type === 'done') {
               es.close();
               esRef.current = null;
@@ -263,7 +285,13 @@ export function useStreamingTranslation() {
                     // réseau : on se rabat sur le dernier partiel connu
                   }
                   if (blob) {
-                    setState((s) => ({ ...s, isTranslating: false, partialBlob: blob, result: { blob, filename } }));
+                    // Partiel complet côté serveur : toutes les pages terminées
+                    // y sont, sauf celles dont la greffe a échoué.
+                    const ready: Record<number, true> = {};
+                    for (const p of Object.keys(statusesRef.current).map(Number)) {
+                      if (!noPreviewRef.current.has(p)) ready[p] = true;
+                    }
+                    setState((s) => ({ ...s, isTranslating: false, partialBlob: blob, readyPages: ready, result: { blob, filename } }));
                     resolve({ blob, filename });
                     return;
                   }
@@ -273,12 +301,12 @@ export function useStreamingTranslation() {
                   throw new Error(err.detail || i18n.t('common.download_failed'));
                 }
                 const blob = await dlRes.blob();
-                setState((s) => ({
-                  ...s,
-                  isTranslating: false,
-                  partialBlob: blob,
-                  result: { blob, filename },
-                }));
+                setState((s) => {
+                  // Résultat final : toutes les pages sont traduites.
+                  const ready: Record<number, true> = {};
+                  for (let p = 1; p <= (s.totalPages ?? 0); p++) ready[p] = true;
+                  return { ...s, isTranslating: false, partialBlob: blob, readyPages: ready, result: { blob, filename } };
+                });
                 resolve({ blob, filename });
               } catch (dlErr) {
                 const m = dlErr instanceof Error ? dlErr.message : t('story.error_translation_failed');

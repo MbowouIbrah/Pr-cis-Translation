@@ -603,6 +603,9 @@ def run_pptx_progressive_job(
             Best-effort : un échec de rendu n'interrompt JAMAIS la traduction. La
             diapositive reste correcte dans le document final ; seul son aperçu
             progressif est manqué, et le socle continue de la montrer.
+
+            Renvoie False dans ce cas : le client ne doit PAS présenter la page
+            du socle (en langue source) comme traduite.
             """
             try:
                 # Le socle a pu manquer au premier essai (LibreOffice occupé,
@@ -625,9 +628,11 @@ def run_pptx_progressive_job(
                 ecrire_atomiquement(partial_path, _apercu.greffer([slide_num]))
                 jobs.emit(job_id, "partial",
                           {"ready": True, "pages": _apercu.pages_traduites})
+                return True
             except Exception as e:
                 logger.warning("Aperçu progressif diapo %s ignoré : %s",
                                slide_num, e)
+                return False
 
         def _process_one_slide(slide_num: int):
             nonlocal done
@@ -712,14 +717,15 @@ def run_pptx_progressive_job(
             with _display_lock:
                 slides_traduites[slide_num] = slide_data
                 pptx_eng.inject_slide(slide_num, tmap)
-                _afficher_slide(slide_num)   # OLE + conversion + greffe + emit
+                apercu_ok = _afficher_slide(slide_num)   # OLE + greffe + emit
 
             with done_lock:
                 done += 1
                 cur_done = done
 
             jobs.emit(job_id, "page", {"page": slide_num, "status": "done",
-                         "done": cur_done, "total": total})
+                         "done": cur_done, "total": total,
+                         "apercu": apercu_ok})
             jobs.sync_progress(job_id, cur_done, total)
 
         # ── SOCLE d'abord : l'original, visible AVANT toute traduction ────
