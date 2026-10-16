@@ -196,15 +196,54 @@ def main() -> int:
         ok(f"CORPS {nom}  erreur lisible au lieu de « NoneType » ({attendu})",
            leve == attendu, leve)
 
+    # ── 4-bis. Limite de débit (modèles :free : 20 requêtes/min) ─────────
+    # Horloge virtuelle : dormir fait avancer le temps, sans attendre.
+    horloge = [1000.0]
+    vrai_time = translation_ai.time
+    translation_ai.time = types.SimpleNamespace(
+        monotonic=lambda: horloge[0],
+        sleep=lambda d: horloge.__setitem__(0, horloge[0] + d))
+    translation_ai._debits.clear()
+    try:
+        orr = _Client(_traduction("x"))
+        tr = _traducteur(_Fournisseur("openrouter", orr, par_minute=2))
+        messages = []
+        for _ in range(3):
+            tr._appel([], None, 100, messages.append)
+        ok("DÉBIT  la 3e requête attend que la fenêtre d'1 min se libère",
+           len(orr.appels) == 3 and horloge[0] == 1060.0, repr(horloge[0]))
+        ok("DÉBIT  l'attente est annoncée à l'utilisateur",
+           any("débit" in m for m in messages), repr(messages))
+        # Un TranslatorAI par page : la limite doit valoir pour TOUTES.
+        autre = TranslatorAI.__new__(TranslatorAI)
+        autre.fournisseurs = [_Fournisseur("openrouter", orr, par_minute=2)]
+        autre.model = "m"
+        avant = horloge[0]
+        autre._appel([], None, 100, None)
+        autre._appel([], None, 100, None)
+        ok("DÉBIT  limiteur partagé entre instances (une par page)",
+           horloge[0] > avant, f"{avant} -> {horloge[0]}")
+        ds = _Client(_traduction("x"))
+        tr = _traducteur(_Fournisseur("deepseek", ds))
+        avant = horloge[0]
+        for _ in range(30):
+            tr._appel([], None, 100, None)
+        ok("DÉBIT  sans réglage, aucune limite (DeepSeek)",
+           horloge[0] == avant, f"{avant} -> {horloge[0]}")
+    finally:
+        translation_ai.time = vrai_time
+
     # ── 5. Construction depuis l'environnement ───────────────────────────
     gardes = {k: os.environ.get(k) for k in
               ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODELS",
-               "TRADUCTION_FOURNISSEURS", "BRAND_NAME", "OPENROUTER_RAISONNEMENT")}
+               "TRADUCTION_FOURNISSEURS", "BRAND_NAME", "OPENROUTER_RAISONNEMENT",
+               "OPENROUTER_REQ_PAR_MIN")}
     try:
         os.environ.update(DEEPSEEK_API_KEY="sk-test", OPENROUTER_API_KEY="or-test",
                           OPENROUTER_MODELS="a:free, b:free", BRAND_NAME="PRÉCIS")
         os.environ.pop("OPENROUTER_RAISONNEMENT", None)
         os.environ.pop("TRADUCTION_FOURNISSEURS", None)
+        os.environ.pop("OPENROUTER_REQ_PAR_MIN", None)
         noms = [f.nom for f in TranslatorAI().fournisseurs]
         ok("ENV  ordre par défaut : DeepSeek puis OpenRouter",
            noms == ["deepseek", "openrouter"], repr(noms))
@@ -230,6 +269,15 @@ def main() -> int:
         ok("ENV  OPENROUTER_RAISONNEMENT=1 le laisse au modèle",
            g.corps_extra == {}, repr(g.corps_extra))
         os.environ.pop("OPENROUTER_RAISONNEMENT")
+        d = TranslatorAI().fournisseurs
+        ok("ENV  OpenRouter limité sous 20/min par défaut, DeepSeek libre",
+           d[1].debit is not None and 0 < d[1].debit.par_minute < 20
+           and d[0].debit is None,
+           repr((d[0].debit, d[1].debit and d[1].debit.par_minute)))
+        os.environ["OPENROUTER_REQ_PAR_MIN"] = "0"
+        ok("ENV  OPENROUTER_REQ_PAR_MIN=0 retire la limite",
+           TranslatorAI().fournisseurs[1].debit is None)
+        os.environ.pop("OPENROUTER_REQ_PAR_MIN")
         # Le corps envoyé porte À LA FOIS les modèles de repli et le réglage.
         envoyes = []
         g.client = types.SimpleNamespace(chat=types.SimpleNamespace(

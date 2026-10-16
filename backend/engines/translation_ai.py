@@ -3,6 +3,7 @@ import json
 import time
 import threading
 import unicodedata
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -48,9 +49,41 @@ class _ErreurDansLeCorps(Exception):
 _hors_service: dict[str, float] = {}
 
 
+class _Debit:
+    """Au plus `par_minute` requêtes sur toute fenêtre glissante de 60 s.
+
+    Les modèles :free d'OpenRouter plafonnent à 20 requêtes/min ; les pages
+    traduites en parallèle dépassaient ce plafond (essai réel : 37 requêtes
+    puis 429, et le secours tombait hors service). Mieux vaut attendre son
+    tour que recevoir une 429. Partagé entre threads, comme `_hors_service`."""
+    def __init__(self, par_minute):
+        self.par_minute = par_minute
+        self._envois = deque()
+        self._verrou = threading.Lock()
+
+    def attendre(self):
+        """Bloque jusqu'à ce qu'un envoi soit permis ; renvoie l'attente (s)."""
+        attendu = 0.0
+        while True:
+            with self._verrou:
+                maintenant = time.monotonic()
+                while self._envois and maintenant - self._envois[0] >= 60:
+                    self._envois.popleft()
+                if len(self._envois) < self.par_minute:
+                    self._envois.append(maintenant)
+                    return attendu
+                pause = 60 - (maintenant - self._envois[0])
+            # Hors du verrou : les autres threads voient la file pendant ce temps.
+            time.sleep(pause)
+            attendu += pause
+
+
+_debits: dict[str, _Debit] = {}
+
+
 class _Fournisseur:
     def __init__(self, nom, client, modele=None, modeles_secours=(),
-                 max_sortie=None, corps_extra=None):
+                 max_sortie=None, corps_extra=None, par_minute=0):
         self.nom = nom
         self.client = client
         # None = le modèle demandé par l'appelant (DeepSeek : rapide/précis).
@@ -60,6 +93,14 @@ class _Fournisseur:
         self.max_sortie = max_sortie
         # Champs ajoutés au corps de chaque requête (propres au fournisseur).
         self.corps_extra = dict(corps_extra or {})
+        # 0 = aucune limite. Sinon, limiteur PARTAGÉ par nom (un TranslatorAI
+        # par page : un limiteur par instance ne limiterait rien).
+        self.debit = None
+        if par_minute > 0:
+            d = _debits.get(nom)
+            if d is None or d.par_minute != par_minute:
+                d = _debits[nom] = _Debit(par_minute)
+            self.debit = d
 
     @property
     def hors_service_jusqua(self):
@@ -111,7 +152,10 @@ def _fournisseurs_depuis_env():
             # 173 s contre 37 s pour la même page). Modèles sans raisonnement :
             # champ ignoré.
             corps_extra=({} if os.getenv("OPENROUTER_RAISONNEMENT", "0") == "1"
-                         else {"reasoning": {"enabled": False}}))
+                         else {"reasoning": {"enabled": False}}),
+            # Plafond des modèles :free : 20/min. Marge pour les requêtes
+            # d'autres outils (banc) sur la même clé. 0 = pas de limite.
+            par_minute=int(os.getenv("OPENROUTER_REQ_PAR_MIN", "16")))
     ordre = [n.strip() for n in os.getenv(
         "TRADUCTION_FOURNISSEURS", "deepseek,openrouter").split(",") if n.strip()]
     return [dispo[n] for n in ordre if n in dispo]
@@ -230,6 +274,11 @@ class TranslatorAI:
                 extra["models"] = [f.modele] + f.modeles_secours
             if extra:
                 kw["extra_body"] = extra
+            if f.debit:
+                attendu = f.debit.attendre()
+                if attendu >= 1 and progress_callback:
+                    progress_callback(f"Limite de débit {f.nom} : "
+                                      f"{attendu:.0f} s d'attente.")
             try:
                 reponse = f.client.chat.completions.create(**kw)
                 if not getattr(reponse, "choices", None):
