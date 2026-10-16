@@ -1,51 +1,49 @@
-# PASSATION — 16/10/2026 (soir)
+# PASSATION — 16/10/2026 (fin de soirée)
 
 ## 1. Objectif en cours
-Moteur de traduction CONTEXTUEL : livré et commité sur `feat/deepseek-seul` (1a0216a, fe7385e). Reste à fusionner vers main puis déployer.
+Tests réels faits (PPTX + CV). Passe de cohérence PDF faite. Reste : déploiement de la 1.1.0 et petites dettes.
 
-## 2. Fait (16/10)
-- DeepSeek seul, surveillance du solde (`app/services/solde_ia.py`, `GET /api/admin/ia`), banc `scripts/banc_deepseek.py [--docs cv,...]`.
-- Moteur contextuel (`engines/translation_ai.py`, `engines/pdf/translate.py`) :
-  - fiche de document : 1 appel flash, jointe au prompt système ;
-  - ordre de lecture XY-cut ;
-  - lots par page ;
-  - fenêtre de page autour du lot ;
-  - défaut « ajout » (parenthèse en trop → redemande).
-  - Couvre le PDF progressif (fiche dans le cache de reprise) et le PPTX (fiche `.fiche` à côté de la reprise). `translate_json` (DOCX/XLSX) écrit sa fiche lui-même.
-- Pannes :
-  - 402/401/403 : la page échoue au lieu d'être cachée avec le texte source.
-  - 429 : une pause, puis le lot est relancé entier ; une seconde 429 compte comme hors service.
-  - Une alerte par série de 402.
-- Tests : `tests/test_contexte_traduction.py` 29/29 (PDF synthétique à extraction renversée), 6/6 mutations tuées. Suites : 43/43 vertes.
-- Banc avec contexte, 3 pages par doc (`scratchpad/banc_ctx.json`) :
-  - défauts CV 21→0, mv21 8→1 ;
-  - flash et flash:high : écart seulement stylistique ; high coûte 1,6× et met 2× plus de temps ;
-  - FAST=flash et PRECISE=flash:high gardés (`app/config.py:182`).
+## 2. Fait
+- Moteur contextuel fusionné dans main : fiche, ordre de lecture, lots par page, cohérence avec la fiche.
+- Test réel PPTX `d3a01a4d40bd` (CFAO, 50 diapos) analysé :
+  - les diapos 23-50 sont VIDES dans la source (seuls le masque et le numéro) : pas un bug ;
+  - 42 reprises « recopie » sur 50 sont des faux positifs (MOBILITY, marques) ;
+  - quelques incohérences « 1° Proposition ».
+- Fusionné dans main (831089f), poussé :
+  - afc3a20 : l'aperçu partiel affichait « 1 » sur chaque diapo convertie seule.
+    - `engines/pptx/engine.py` `_figer_numeros` (après `build_partial_pptx`) remplace `<a:fld type="slidenum">` par le numéro dans le deck complet (ordre `sldIdLst` + `firstSlideNum`).
+    - Ne s'applique que si des slides sont exclues ; le fichier livré garde ses champs.
+    - Vérifié par un rendu LibreOffice réel : la diapo 24 isolée affiche 24.
+  - 350d470 : un fragment répété n'est traduit qu'une fois.
+    - `app/services/translation_runner.py` `_memoriser` (clé = texte source balisé ; le premier rendu gagne ; les fragments sans lettre sont ignorés) + paramètre `par_texte` de `_reprendre_slide`.
+    - Alimenté par la reprise et après chaque slide traduite.
+- Tests : `tests/test_pptx_preview.py` (sections NUMERO et DOUBLON), 37/37, 3 mutations tuées. Toutes les suites backend sont vertes.
 
-## 3. Décisions / constats
-- La fiche avait substitué des diplômes étrangers (BEPC → « GCE O Level »). Règle désormais : garder le NOM OFFICIEL et traduire ses mots communs (« BTS in Organisational Communication », « Probatoire A4 German »).
-- Le compteur « recopie » du banc donne 21 faux positifs sur Data Science (lignes de sommaire à noms propres), sans défaut réel.
-- ENGINE_VERSION n'est pas bumpé : le rendu est inchangé, seule la traduction change.
+## 3. Décisions
+- ENGINE_VERSION n'est pas bumpé : seul le partiel change, le rendu complet est identique (le cache n'est pas concerné).
+- Dédoublonnage par texte BALISÉ : deux paragraphes au découpage de runs différent ne sont pas interchangeables.
+- Après la fin, `/preview` sert le rendu complet (numéros corrects). Le partiel n'est servi que pendant la traduction et 60 s après la fin hors PDF (`app/api/documents.py:~422`).
 
 ## 4. Reste à faire
-- Fait le 16/10 au soir :
-  - fiche passée à `_coherence_document` (51e9c64) ;
-  - ordre de la fiche PPTX lu dans `sldIdLst`, avec repli sur le nom (51e9c64) ;
-  - lint front corrigé : `check-i18n.mjs` ne voyait pas les clés plurielles `_one`/`_other` (b478162) ;
-  - front : lint et build verts, 37 suites backend vertes, test_pptx_preview 37/37.
-1. Optionnel : `runs_recopies` donne des faux positifs sur les lignes « Nom, Titre at Société ».
-2. Restent d'avant :
+1. ~~Cohérence PDF~~ FAIT (16/10, feat/coherence-pdf) : `engines/pdf/translate.py` `coherence_document` (même consigne `runtags.CONSIGNE_COHERENCE`, source unique partagée avec le PPTX, + fiche), branchée en fin de `stream.translate_pdf_progressive`.
+   - Seules les pages touchées sont re-rendues (`delete_page` + `insert_pdf`), le cache est réécrit, le partiel resauvé et les pages ré-annoncées « done » (l'aperçu se recharge).
+   - Jamais sur une pure reprise (`nouvelles == 0`) : un cognat gardé ne coûte pas un appel à chaque ouverture. Reprise aux balises mutilées ou identique : écartée.
+   - ENGINE_VERSION non bumpé : le rendu d'un pages.json donné est inchangé.
+   - `tests/test_coherence_pdf.py` 10/10, 5 mutations tuées ; 44 suites vertes. Pas encore vérifié sur le CV réel `b885219a18f7` (il faut le retraduire, le cache de reprise court-circuite la passe).
+2. ~~Faux positifs `runs_recopies`~~ CLOS sans code (16/10) : depuis 350d470 les 41 cas du deck CFAO = 2 textes distincts (« MOBILITY », « & restrictions »), déjà en langue cible → 2 redemandes par document. Règle « le document disculpe » (mot recopié produit ailleurs par le modèle) testée : réfutée, aucun des deux n'apparaît ailleurs. Le texte ne permet pas de trancher ; le juge reste la redemande.
+3. Restent d'avant :
    - police de repli Times→Liberation Serif (`engines/pdf/engine.py` `_matched_family`) ;
    - clignotement de la carte PPTX ;
-   - doc `d3a01a4d40bd` (original de 0 octet) ;
+   - doc `d3a01a4d40bd` (original de 0 octet, vu précédemment) ;
    - OCR du Code de la Route ;
-   - fusion vers main (en attente de ton accord) ;
    - déploiement 1.1.0.
 
 ## 5. Pièges / contexte
-- Tarifs USD/1M (pleines ; creuses −50 %, pleines = 01-04 h et 06-10 h UTC lun-ven) : flash 0,006 cache / 0,30 / sortie 1,20 ; v4-pro 0,044 / 1,32 / 3,96.
-- Réflexion : `extra_body={"thinking":{"type":"enabled|disabled"}}`, `reasoning_effort` ; temperature sans effet en réflexion.
-- Banc : `cd backend && PYTHONIOENCODING=utf-8 venv/Scripts/python.exe scripts/banc_deepseek.py <sortie.json> [--configs a,b] [--docs a,b] [--pages N]`.
-- Tests : `cd backend && for t in tests/test_*.py; do PYTHONIOENCODING=utf-8 venv/Scripts/python.exe "$t"; done`.
-- Éditer par script Python écrit avec Write (`newline=''`, CRLF/LF mixtes) : les heredocs bash écrasent `\\`.
-- Serveur : `cd backend && PYTHONIOENCODING=utf-8 venv/Scripts/python.exe -m uvicorn main:app --port 8000`.
+- Tests : `cd backend && for t in tests/test_*.py; do PYTHONIOENCODING=utf-8 venv/Scripts/python.exe "$t" </dev/null; done`.
+  - `test_pptx_preview.py --sans-db` saute le test de cache.
+  - Toujours `</dev/null` : une commande qui lit stdin bloque le shell.
+- Éditer par script Python (`newline=''`, CRLF/LF mixtes) ; les heredocs bash écrasent `\\`.
+- Serveur sans rechargement automatique : le relancer après chaque modification du backend.
+  - `cd backend && PYTHONIOENCODING=utf-8 venv/Scripts/python.exe -m uvicorn main:app --port 8000`
+  - front : `cd frontend && npm run dev` (port 3000).
+- Banc : `scripts/banc_deepseek.py <sortie.json> [--configs] [--docs] [--pages N]`.

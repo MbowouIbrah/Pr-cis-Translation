@@ -139,6 +139,8 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
     src = fitz.open(pdf_path)
     out = fitz.open()
     done_pages = []
+    traduites = {}          # page -> page_data : matière de la cohérence
+    nouvelles = 0           # pages traduites PAR CE passage (hors reprise)
     try:
         total = len(src)
         _emit(on_event, {"type": "start", "total": total})
@@ -209,6 +211,7 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
                     translate.translate_extraction(one, target_lang=target_lang,
                                                    doc_memory=doc_memory,
                                                    fiche=fiches[cle_fiche])
+                    nouvelles += 1
                     # Recalcule l'expansion puis retraduction compacte de la page
                     # (paragraphes qui ne tiendraient pas sans compression visible).
                     try:
@@ -222,6 +225,8 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
                     cached_pages[human] = page_data
                     _ecrire_cache()
 
+            if not debug:
+                traduites[human] = page_data
             _emit(on_event, {"type": "page", "page": human,
                              "status": "rendering",
                              "done": human - 1, "total": total})
@@ -231,6 +236,45 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
             done_pages.append(human)
             _emit(on_event, {"type": "page", "page": human, "status": "done",
                              "done": human, "total": total})
+
+        # COHÉRENCE DE DOCUMENT : chaque page est traduite sans voir les
+        # suivantes ; un terme laissé en langue source ici, traduit ailleurs,
+        # ne se voit qu'une fois tout le document lu. Seules les pages
+        # touchées sont reconstruites (et ré-annoncées : l'aperçu se recharge).
+        # Jamais sur une pure reprise : rien de neuf à confronter, et les
+        # cognats légitimes seraient redemandés à chaque ouverture.
+        if nouvelles and not debug:
+            fiche = fiches.get(str(target_lang).lower(), "")
+            try:
+                touchees = translate.coherence_document(
+                    [traduites[h] for h in sorted(traduites)],
+                    target_lang=target_lang, fiche=fiche)
+            except Exception:
+                touchees = set()
+            for human in sorted(touchees):
+                page_data = traduites[human]
+                try:
+                    translate.retranslate_overflows(
+                        {"pages": [page_data], "fonts": {}}, eng,
+                        target_lang=target_lang, fiche=fiche)
+                except Exception:
+                    pass
+                neuve = fitz.open()
+                try:
+                    eng.render_page_into(neuve, page_data, translated=True,
+                                         src_doc=src)
+                    out.delete_page(human - 1)
+                    out.insert_pdf(neuve, start_at=human - 1)
+                finally:
+                    neuve.close()
+            if touchees:
+                if cache_path:
+                    _ecrire_cache()
+                _save_partial(out, partial_path)
+                for human in sorted(touchees):
+                    _emit(on_event, {"type": "page", "page": human,
+                                     "status": "done",
+                                     "done": total, "total": total})
 
         out.save(output_path, garbage=4, deflate=True, clean=True)
     finally:
