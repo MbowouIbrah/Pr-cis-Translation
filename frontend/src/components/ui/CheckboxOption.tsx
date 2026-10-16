@@ -22,17 +22,21 @@ interface CheckboxOptionProps {
   description?: string;
   /** `highlight` : le bloc s'allume quand l'option est active. */
   tone?: 'plain' | 'highlight';
+  /** Une seule ligne : l'explication passe en infobulle (et reste lue par
+   *  les lecteurs d'écran). */
+  compact?: boolean;
 }
 
 export default function CheckboxOption({
-  id, checked, onChange, disabled, icon, label, description, tone = 'plain',
+  id, checked, onChange, disabled, icon, label, description, tone = 'plain', compact,
 }: CheckboxOptionProps) {
   const actif = tone === 'highlight' && checked;
 
   return (
     <label
       htmlFor={id}
-      className={`option${actif ? ' option--allumee' : ''}${disabled ? ' option--inactive' : ''}`}
+      className={`option${actif ? ' option--allumee' : ''}${disabled ? ' option--inactive' : ''}${compact ? ' option--compacte' : ''}`}
+      title={compact ? description : undefined}
     >
       <input
         id={id}
@@ -47,7 +51,9 @@ export default function CheckboxOption({
           {icon}
           {label}
         </span>
-        {description && <span className="option__desc">{description}</span>}
+        {description && (
+          <span className={compact ? 'masque-visuel' : 'option__desc'}>{description}</span>
+        )}
       </span>
     </label>
   );

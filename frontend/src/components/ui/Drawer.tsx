@@ -41,11 +41,17 @@ export default function Drawer({
     if (!open) return;
     const surTouche = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', surTouche);
+    // La barre de défilement qui disparaît est compensée : sinon toute la page
+    // se ré-agence d'un coup au premier instant de l'animation.
     const avant = document.body.style.overflow;
+    const margeAvant = document.body.style.paddingRight;
+    const barre = window.innerWidth - document.documentElement.clientWidth;
     document.body.style.overflow = 'hidden';
+    if (barre > 0) document.body.style.paddingRight = `${barre}px`;
     return () => {
       document.removeEventListener('keydown', surTouche);
       document.body.style.overflow = avant;
+      document.body.style.paddingRight = margeAvant;
     };
   }, [open, onClose]);
 
@@ -55,7 +61,9 @@ export default function Drawer({
     if (!open) return;
     const premier = panneau.current?.querySelector<HTMLElement>(
       'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-    premier?.focus();
+    // preventScroll : sinon le navigateur fait défiler le panneau encore hors
+    // champ pour montrer l'élément, ce qui saccade la glissade.
+    premier?.focus({ preventScroll: true });
   }, [open]);
 
   return (
@@ -65,6 +73,7 @@ export default function Drawer({
           <motion.div
             className="ui-drawer__voile"
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
             onClick={onClose}
             aria-hidden
           />
@@ -78,7 +87,7 @@ export default function Drawer({
             initial={{ x: side === 'right' ? '100%' : '-100%' }}
             animate={{ x: 0 }}
             exit={{ x: side === 'right' ? '100%' : '-100%' }}
-            transition={{ type: 'spring', stiffness: 320, damping: 34 }}
+            transition={{ duration: 0.26, ease: [0.32, 0.72, 0, 1] }}
           >
             {children}
           </motion.aside>

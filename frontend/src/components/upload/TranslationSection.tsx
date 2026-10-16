@@ -284,16 +284,19 @@ export default function TranslationSection({
                     style={{ overflow: 'hidden' }}
                   >
                     <div style={{
-                      display: 'flex', flexDirection: 'column', gap: '16px',
-                      padding: '14px', marginTop: '2px',
+                      display: 'flex', flexDirection: 'column', gap: '6px',
+                      padding: '10px', marginTop: '2px',
                       borderRadius: '12px', border: '1px solid var(--gray-200)',
                       background: 'var(--gray-50)',
                     }}>
                       {/* Plage de pages — PDF et PPTX (les seuls formats dont
                           l'extraction sait sélectionner ses pages). */}
                       {supportsPages && (
-                        <div>
-                          <label htmlFor="pages" style={LABEL_STYLE}>
+                        <div
+                          title={t('story.pages_hint')}
+                          style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '0 8px' }}
+                        >
+                          <label htmlFor="pages" style={{ ...LABEL_STYLE, marginBottom: 0, whiteSpace: 'nowrap' }}>
                             {t('story.pages_label')}
                           </label>
                           <input
@@ -306,17 +309,14 @@ export default function TranslationSection({
                             placeholder={t('story.pages_placeholder')}
                             aria-describedby="pages-hint"
                             style={{
-                              width: '100%', boxSizing: 'border-box',
-                              padding: '10px 12px', borderRadius: '9px',
+                              flex: 1, minWidth: 0, boxSizing: 'border-box',
+                              padding: '7px 10px', borderRadius: '8px',
                               border: '1px solid var(--gray-300)', background: 'var(--white)',
                               fontSize: '13px', fontFamily: 'inherit', color: 'var(--gray-800)',
                               outline: 'none',
                             }}
                           />
-                          <span id="pages-hint" style={{
-                            display: 'block', marginTop: '6px',
-                            fontSize: '11px', color: 'var(--gray-500)', lineHeight: 1.45,
-                          }}>
+                          <span id="pages-hint" className="masque-visuel">
                             {t('story.pages_hint')}
                           </span>
                         </div>
@@ -333,6 +333,7 @@ export default function TranslationSection({
                           icon={<Wand2 size={13} strokeWidth={2.2} />}
                           label={t('story.precise_label')}
                           description={t('story.precise_desc')}
+                          compact
                         />
                       )}
 
@@ -346,6 +347,7 @@ export default function TranslationSection({
                           icon={<ScanSearch size={13} strokeWidth={2.2} />}
                           label={t('story.structure_label')}
                           description={t('story.structure_desc')}
+                          compact
                         />
                       )}
                     </div>

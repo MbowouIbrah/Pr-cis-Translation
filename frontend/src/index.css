@@ -2489,8 +2489,9 @@ html.preview-active .scroll {
 .ui-drawer__voile {
   position: fixed;
   inset: 0;
-  background: rgba(13, 27, 62, .38);
-  backdrop-filter: blur(3px);
+  /* Pas de backdrop-filter : un flou plein écran recalculé à chaque image du
+     fondu faisait saccader l'ouverture du tiroir. */
+  background: rgba(13, 27, 62, .45);
   z-index: 1100;
 }
 .ui-drawer {
@@ -2501,6 +2502,7 @@ html.preview-active .scroll {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  will-change: transform;
   background: var(--white);
 }
 .ui-drawer--right { right: 0; box-shadow: -8px 0 40px rgba(13, 27, 62, .18); }
@@ -3096,6 +3098,18 @@ html.preview-active .scroll {
 }
 .option--allumee { background: #fef9c3; border-color: #facc15; }
 .option--inactive { cursor: not-allowed; opacity: .6; }
+.option--compacte { position: relative; align-items: center; padding: 6px 8px; }
+.option--compacte .option__case { margin-top: 0; }
+
+/* Masqué à l'écran, lu par les lecteurs d'écran. */
+.masque-visuel {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
 .option:has(.option__case:focus-visible) {
   outline: 2px solid var(--blue-bright);
   outline-offset: 2px;
