@@ -28,17 +28,18 @@ Moteur de traduction CONTEXTUEL : livré et commité sur `feat/deepseek-seul` (1
 - ENGINE_VERSION n'est pas bumpé : le rendu est inchangé, seule la traduction change.
 
 ## 4. Reste à faire
-1. Optionnel :
-   - passer `fiche` au `_translate_batch` de `_coherence_document` ;
-   - lire l'ordre des diapositives depuis `presentation.xml` (`sldIdLst`) plutôt que depuis le nom `slideN.xml` (`_textes_diapositives`) ;
-   - `runs_recopies` : faux positifs sur les lignes « Nom, Titre at Société ».
-2. Front : `npm run build` et `npm run lint` (non relancés, aucun fichier front touché).
-3. Restent d'avant :
+- Fait le 16/10 au soir :
+  - fiche passée à `_coherence_document` (51e9c64) ;
+  - ordre de la fiche PPTX lu dans `sldIdLst`, avec repli sur le nom (51e9c64) ;
+  - lint front corrigé : `check-i18n.mjs` ne voyait pas les clés plurielles `_one`/`_other` (b478162) ;
+  - front : lint et build verts, 37 suites backend vertes, test_pptx_preview 37/37.
+1. Optionnel : `runs_recopies` donne des faux positifs sur les lignes « Nom, Titre at Société ».
+2. Restent d'avant :
    - police de repli Times→Liberation Serif (`engines/pdf/engine.py` `_matched_family`) ;
    - clignotement de la carte PPTX ;
    - doc `d3a01a4d40bd` (original de 0 octet) ;
    - OCR du Code de la Route ;
-   - fusion vers main ;
+   - fusion vers main (en attente de ton accord) ;
    - déploiement 1.1.0.
 
 ## 5. Pièges / contexte
