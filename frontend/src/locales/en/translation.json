@@ -134,6 +134,8 @@
     "pages_hint": "Leave empty to translate everything. Unselected pages stay in their original language.",
     "free_plan_title": "Free plan — 1 page / month",
     "free_plan_hint": "Upgrade to Starter to translate whole documents.",
+    "retry_unavailable_title": "Cannot retry this document",
+    "retry_unavailable_hint": "Its original file is missing or empty. Please upload it again.",
     "precise_label": "Precise mode (admin)",
     "precise_desc": "Uses the reasoning model — slower (~2 min/page) but more reliable on complex layouts."
   },

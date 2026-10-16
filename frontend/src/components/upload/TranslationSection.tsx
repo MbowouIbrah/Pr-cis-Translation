@@ -21,6 +21,8 @@ export interface TranslateConfig {
   debug: boolean;
   /** Mode précis : utilise le modèle de raisonnement (admin uniquement). */
   precise: boolean;
+  /** Appelé quand le serveur a accepté le job (le Document existe). */
+  onAccepted?: () => void;
 }
 
 interface TranslationSectionProps {

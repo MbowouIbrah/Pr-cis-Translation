@@ -158,7 +158,7 @@ export default function Home() {
     (config: TranslateConfig) => {
       // Le catalogue ne propose que des codes de base ('en', 'fr'…) : plus de
       // variante régionale à réduire avant l'envoi.
-      const { file, targetLang, pages, debug, precise } = config;
+      const { file, targetLang, pages, debug, precise, onAccepted } = config;
       // Mémorisé pour rejouer À L'IDENTIQUE après un achat de pages (402).
       lastConfigRef.current = config;
       setSelectedFile(file);
@@ -176,7 +176,7 @@ export default function Home() {
       setShowPreview(true);
 
       stream
-        .start(file, targetLang, pages, debug, precise)
+        .start(file, targetLang, pages, debug, precise, onAccepted)
         .then((result) => {
           setTranslatedBlob(result.blob);
           setTranslatedIsPdf(false);   // le RÉSULTAT est au format d'origine
@@ -253,18 +253,27 @@ export default function Home() {
   const handleRetry = useCallback(
     async (doc: import('../hooks/useDocumentLibrary').DocMeta) => {
       const blob = await getOriginalBlob(doc.id);
-      if (!blob) return;
+      // Original illisible ou vide (écrit disque plein) : il n'y a rien à
+      // relancer, le fichier doit être renvoyé.
+      if (!blob || blob.size === 0) {
+        showToast('error', t('story.retry_unavailable_title'), t('story.retry_unavailable_hint'));
+        return;
+      }
       const file = new File([blob], doc.originalName);
-      deleteDocument(doc.id);
+      // L'ancien document n'est supprimé qu'une fois le nouveau ACCEPTÉ : le
+      // supprimer d'abord purgeait le dossier du job, et avec lui les pages
+      // déjà traduites que la relance aurait reprises. Refusée (quota, 402),
+      // la relance laisse l'ancien en place.
       handleStartTranslate({
         file,
         targetLang: doc.targetLang,
         pages: '',
         debug: false,
         precise: false,
+        onAccepted: () => { deleteDocument(doc.id).catch(() => { /* déjà parti */ }); },
       });
     },
-    [getOriginalBlob, deleteDocument, handleStartTranslate],
+    [getOriginalBlob, deleteDocument, handleStartTranslate, t],
   );
 
   // ---- Aperçu bibliothèque : réseau seulement quand on ne SAIT pas ---------

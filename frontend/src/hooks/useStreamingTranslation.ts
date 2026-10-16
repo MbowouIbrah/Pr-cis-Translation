@@ -129,6 +129,7 @@ export function useStreamingTranslation() {
       pages: string = '',
       debug: boolean = false,
       precise: boolean = false,
+      onAccepted?: () => void,
     ): Promise<{ blob: Blob; filename: string }> => {
       return new Promise(async (resolve, reject) => {
         // Fermer TOUT flux encore ouvert avant d'en démarrer un nouveau. Relancer
@@ -188,6 +189,9 @@ export function useStreamingTranslation() {
           }
           const { job_id } = await startRes.json();
           jobIdRef.current = job_id;
+          // Le serveur a enregistré le Document AVANT de répondre : ce qui
+          // dépendait de son existence peut maintenant se faire.
+          onAccepted?.();
 
           // Le JWT passe en query : EventSource ne porte pas de header, et le
           // backend n'accepte plus un flux anonyme (la file d'événements est à
