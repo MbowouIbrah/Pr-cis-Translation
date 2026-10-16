@@ -90,6 +90,13 @@ def _executer(pdf, pages, cible, nom, modele):
     TranslatorAI._translate_batch = _batch
     translation_ai._Fournisseur.__init__ = _init
     messages: list[str] = []
+
+    def _noter(m):
+        # Les erreurs s'affichent au fil de l'eau : un lot qui échoue en
+        # boucle (relances puis scissions) ne doit pas tourner en silence.
+        messages.append(m)
+        if "⚠" in m:
+            print(f"   {m[:200]}", flush=True)
     t0 = time.monotonic()
     try:
         eng = PDFObjectEngine()
@@ -102,7 +109,7 @@ def _executer(pdf, pages, cible, nom, modele):
                                          images_par_reference=True)
             translate.translate_extraction({"pages": [page], "fonts": {}},
                                            target_lang=cible,
-                                           progress=messages.append,
+                                           progress=_noter,
                                            doc_memory=memoire)
     finally:
         TranslatorAI._translate_batch = batch_orig
@@ -132,7 +139,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("pdf")
     ap.add_argument("--pages", help="ex. 1-3,7 (défaut : 3 premières pages avec texte)")
-    ap.add_argument("--cible", default="en")
+    ap.add_argument("--cible", default="fr")
     ap.add_argument("--candidats",
                     default="deepseek,openrouter:google/gemma-4-31b-it:free")
     ap.add_argument("--sortie", help="dossier du rapport JSON (défaut : .)")

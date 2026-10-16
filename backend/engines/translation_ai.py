@@ -2,6 +2,7 @@ import os
 import json
 import time
 import threading
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -38,7 +39,7 @@ _hors_service: dict[str, float] = {}
 
 class _Fournisseur:
     def __init__(self, nom, client, modele=None, modeles_secours=(),
-                 max_sortie=None):
+                 max_sortie=None, corps_extra=None):
         self.nom = nom
         self.client = client
         # None = le modèle demandé par l'appelant (DeepSeek : rapide/précis).
@@ -46,6 +47,8 @@ class _Fournisseur:
         self.modele = modele
         self.modeles_secours = list(modeles_secours)
         self.max_sortie = max_sortie
+        # Champs ajoutés au corps de chaque requête (propres au fournisseur).
+        self.corps_extra = dict(corps_extra or {})
 
     @property
     def hors_service_jusqua(self):
@@ -54,6 +57,13 @@ class _Fournisseur:
     @hors_service_jusqua.setter
     def hors_service_jusqua(self, t):
         _hors_service[self.nom] = t
+
+
+def _entete_ascii(valeur):
+    """Un en-tête HTTP n'accepte que l'ASCII : « PRÉCIS » ferait échouer
+    CHAQUE requête avant l'envoi. On retire les accents."""
+    return (unicodedata.normalize("NFKD", valeur)
+            .encode("ascii", "ignore").decode("ascii"))
 
 
 def _fournisseurs_depuis_env():
@@ -81,9 +91,16 @@ def _fournisseurs_depuis_env():
                    base_url=os.getenv("OPENROUTER_BASE_URL",
                                       "https://openrouter.ai/api/v1"),
                    timeout=180.0,
-                   default_headers={"X-Title": os.getenv("BRAND_NAME", "PRÉCIS")}),
+                   default_headers={"X-Title": _entete_ascii(
+                       os.getenv("BRAND_NAME", "PRÉCIS"))}),
             modele=modeles[0], modeles_secours=modeles[1:],
-            max_sortie=int(os.getenv("OPENROUTER_MAX_TOKENS", "32768")))
+            max_sortie=int(os.getenv("OPENROUTER_MAX_TOKENS", "32768")),
+            # Traduire ne demande aucun raisonnement : actif, il multiplie la
+            # durée par ~5 sur les modèles « qui réfléchissent » (Nemotron :
+            # 173 s contre 37 s pour la même page). Modèles sans raisonnement :
+            # champ ignoré.
+            corps_extra=({} if os.getenv("OPENROUTER_RAISONNEMENT", "0") == "1"
+                         else {"reasoning": {"enabled": False}}))
     ordre = [n.strip() for n in os.getenv(
         "TRADUCTION_FOURNISSEURS", "deepseek,openrouter").split(",") if n.strip()]
     return [dispo[n] for n in ordre if n in dispo]
@@ -197,8 +214,11 @@ class TranslatorAI:
                       response_format={"type": "json_object"})
             if f.max_sortie:
                 kw["max_tokens"] = min(max_tokens, f.max_sortie)
+            extra = dict(f.corps_extra)
             if f.modeles_secours:
-                kw["extra_body"] = {"models": [f.modele] + f.modeles_secours}
+                extra["models"] = [f.modele] + f.modeles_secours
+            if extra:
+                kw["extra_body"] = extra
             try:
                 return f.client.chat.completions.create(**kw)
             except Exception as e:

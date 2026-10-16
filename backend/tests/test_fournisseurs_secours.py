@@ -177,10 +177,11 @@ def main() -> int:
     # ── 5. Construction depuis l'environnement ───────────────────────────
     gardes = {k: os.environ.get(k) for k in
               ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODELS",
-               "TRADUCTION_FOURNISSEURS")}
+               "TRADUCTION_FOURNISSEURS", "BRAND_NAME", "OPENROUTER_RAISONNEMENT")}
     try:
         os.environ.update(DEEPSEEK_API_KEY="sk-test", OPENROUTER_API_KEY="or-test",
-                          OPENROUTER_MODELS="a:free, b:free")
+                          OPENROUTER_MODELS="a:free, b:free", BRAND_NAME="PRÉCIS")
+        os.environ.pop("OPENROUTER_RAISONNEMENT", None)
         os.environ.pop("TRADUCTION_FOURNISSEURS", None)
         noms = [f.nom for f in TranslatorAI().fournisseurs]
         ok("ENV  ordre par défaut : DeepSeek puis OpenRouter",
@@ -189,6 +190,38 @@ def main() -> int:
         ok("ENV  liste de modèles OpenRouter lue",
            (f.modele, f.modeles_secours) == ("a:free", ["b:free"]),
            repr((f.modele, f.modeles_secours)))
+        # Les en-têtes doivent passer l'encodage réel de httpx (ASCII) :
+        # un « É » de la marque faisait échouer chaque requête OpenRouter.
+        try:
+            httpx.Headers({k: v for k, v in f.client.default_headers.items()
+                           if isinstance(v, str)})
+            ascii_ok = True
+        except UnicodeEncodeError as e:
+            ascii_ok = repr(e)
+        ok("ENV  en-têtes OpenRouter encodables malgré une marque accentuée",
+           ascii_ok is True, str(ascii_ok))
+        ok("ENV  raisonnement OpenRouter coupé par défaut (durée ÷5)",
+           f.corps_extra == {"reasoning": {"enabled": False}},
+           repr(f.corps_extra))
+        os.environ["OPENROUTER_RAISONNEMENT"] = "1"
+        g = TranslatorAI().fournisseurs[1]
+        ok("ENV  OPENROUTER_RAISONNEMENT=1 le laisse au modèle",
+           g.corps_extra == {}, repr(g.corps_extra))
+        os.environ.pop("OPENROUTER_RAISONNEMENT")
+        # Le corps envoyé porte À LA FOIS les modèles de repli et le réglage.
+        envoyes = []
+        g.client = types.SimpleNamespace(chat=types.SimpleNamespace(
+            completions=types.SimpleNamespace(
+                create=lambda **k: envoyes.append(k) or _traduction("x"))))
+        f.client = g.client
+        tr = TranslatorAI.__new__(TranslatorAI)
+        tr.fournisseurs = [f]
+        tr._appel([], None, 100, None)
+        ok("ENV  corps : modèles de repli ET raisonnement coupé",
+           envoyes and envoyes[0].get("extra_body") == {
+               "reasoning": {"enabled": False},
+               "models": ["a:free", "b:free"]},
+           repr(envoyes and envoyes[0].get("extra_body")))
         os.environ["TRADUCTION_FOURNISSEURS"] = "openrouter"
         noms = [f.nom for f in TranslatorAI().fournisseurs]
         ok("ENV  TRADUCTION_FOURNISSEURS restreint la chaîne",
