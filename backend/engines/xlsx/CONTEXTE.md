@@ -1,8 +1,8 @@
 # Moteur XLSX — contexte
 
-Version **0.2.0** · `engines/xlsx/` · inscrit au registre sous `xlsx`
+Version **1.0.0** · `engines/xlsx/` · inscrit au registre sous `xlsx`
 
-> ## La couverture du TEXTE est complète — la FIDÉLITÉ ne l'est pas
+> ## Le TEXTE est couvert, sa PRÉSENTATION suit
 >
 > Le **chemin** est complet : un classeur est accepté, décompressé, parcouru,
 > ses chaînes relevées et balisées, la traduction réinjectée, le fichier
@@ -12,14 +12,8 @@ Version **0.2.0** · `engines/xlsx/` · inscrit au registre sous `xlsx`
 > Excel range du texte sont traités (table ci-dessous). `couverture()` ne
 > déclare plus aucun manque.
 >
-> Ce qui reste n'est plus une question de couverture mais de **rendu** :
-> **l'expansion n'est pas gérée**. Une traduction plus longue que sa source
-> déborde de sa colonne ou s'affiche en `#####`. Le texte est juste ; sa
-> présentation ne l'est pas toujours.
->
-> D'où **0.2.0** et non 1.0.0 : la couverture est faite, mais un utilisateur
-> qui lit « 1.0.0 » dans `/health` comprendrait « ce moteur rend un classeur
-> fidèle », ce qui n'est pas encore vrai.
+> L'**expansion** est gérée (`expansion.py`, section « L'expansion » plus
+> bas) : c'était la seule raison de rester en 0.2.0.
 
 > À lire d'abord : [`../CONTEXTE.md`](../CONTEXTE.md) — la règle
 > d'indépendance, l'instance par opération, les balises de runs.
@@ -243,8 +237,40 @@ table, le relevé transporte la liste des manques sous `workbook.non_traite`, et
 vide comprise. Une onzième partie qui apparaîtrait serait donc annoncée sans
 qu'on ait à y penser.
 
-Ce qui reste n'est pas une lacune de couverture mais un défaut de **rendu** :
-voir « Limites au-delà du texte » plus bas — **l'expansion**.
+La présentation suit : voir « L'expansion » ci-dessous.
+
+## L'expansion — préserver ce que la source montrait
+
+Dernière passe des DEUX chemins (`inject_translation` et `injecter_partiel`),
+après les alignements : la place se mesure sur le texte final.
+
+* **Texte sur une ligne** : la place `A` = sa colonne + les voisines VIDES où
+  il s'étale (à droite si aligné à gauche ou standard, à gauche si aligné à
+  droite, des deux côtés si centré — inversé en droite-à-gauche ; le bord de
+  la feuille arrête comme une voisine pleine). Sans voisine pleine du côté où
+  il déborde : place infinie, rien ne bouge. Sinon besoin = `min(t, A·t/s)` :
+  une source qui tenait tient encore, une source déjà coupée l'est dans la
+  même proportion — l'auteur avait accepté la coupe. On élargit la colonne
+  PROPRE (les fusions : réparti au prorata), jamais une voisine.
+* **Retour à la ligne** : la largeur ne bouge pas ; la ligne prend
+  `ht · Lt/Ls` (lignes traduites / lignes source).
+* **Nombre** : l'écart de largeur du littéral traduit (`0" j"` → `0" jours"`)
+  est rendu à la colonne — un nombre ne déborde pas, il passe en `#####`.
+* `shrinkToFit` : rien (Excel réduit déjà la police).
+
+**Sans seuil** : on compare la traduction à SA source dans la même place, on
+ne décide jamais qu'une colonne « est trop étroite ».
+
+**Idempotente** : `_ouvrir` garde l'instantané source (magasin, styles,
+feuilles) ; chaque passe restaure `<cols>` et les hauteurs d'origine puis
+applique. L'aperçu progressif peut réinjecter autant qu'il veut, et un texte
+redevenu court rend sa colonne d'origine.
+
+**Mesure** : en « zéros » (l'unité de largeur d'Excel) avec Helvetica intégrée
+à PyMuPDF comme police témoin — on n'a pas la police réelle ; le rapport
+lettre/zéro varie peu entre sans-empattement. Taille et graisse des runs
+riches prises en compte. Vérifié par un rendu LibreOffice réel : texte coupé
+et `###` sans la passe, texte entier et nombre lisible avec.
 
 ## L'aperçu progressif — feuille par feuille
 
@@ -289,16 +315,19 @@ Le partiel est **non destructif** (fichiers de contrôle calculés en mémoire) 
   en langue source jusqu'au document final. Mieux vaut ne rien greffer que
   poser une traduction en face de la mauvaise page ;
 * l'aperçu passe par LibreOffice, comme tout format non-PDF ;
-* **l'expansion n'est pas gérée** — une traduction plus longue que sa source
-  déborde de sa colonne ou s'affiche en `#####`. Les moteurs PDF et PPTX
-  ajustent ; celui-ci ne le fait pas encore, et c'est le premier vrai chantier
-  de fidélité après la couverture des parties.
+* expansion — fusion sur PLUSIEURS lignes à retour à la ligne : hauteur non
+  ajustée (sur quelles lignes répartir ?) ; police témoin et non police réelle
+  (une police très étroite ou très large décale la mesure de quelques %) ;
+  hauteur plafonnée à 409 pt, largeur à 255 (limites du format) ; une ligne
+  sans hauteur explicite est laissée à l'ajustement automatique d'Excel ; les
+  alignements `fill` et `distributed`/`indent` sont traités comme « standard » ;
+  une partie de classeur illisible est sautée (journalisée), jamais bloquante.
 
 ## Vérifier
 
 ```bash
 for t in squelette branchement partiel apercu_progressif onglets \
-         graphiques annotations tableaux croises formats; do
+         graphiques annotations tableaux croises formats expansion; do
   backend/venv/Scripts/python.exe backend/tests/test_xlsx_$t.py
 done
 ```
@@ -315,6 +344,7 @@ done
 | `tableaux` | 11 | en-têtes alignés, références structurées suivies |
 | `croises` | 15 | table traduite, cache aligné, index intacts |
 | `formats` | 23 | littéraux traduits, **syntaxe intacte**, propriétés |
+| `expansion` | 28 | débordement selon l'alignement, voisine pleine/vide, fusion, hauteur, `#####`, idempotence |
 
 Tout est prouvé sur des classeurs **synthétiques** écrits par la fabrique
 (`tests/fabrique_classeurs.py`), jamais sur un fichier réel : il faut pouvoir

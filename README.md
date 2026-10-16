@@ -6,7 +6,7 @@ Le texte est relevé avec sa géométrie et ses styles, traduit, puis réinject�
 dans le document d'origine — jamais reconstruit. PDF, PPTX, DOCX, XLSX.
 
 Projet **1.1.0** · backend 1.1.0 · frontend 1.0.0 · moteurs PDF 1.0.0, PPTX
-1.0.0, DOCX 1.0.0, XLSX 0.2.0
+1.0.0, DOCX 1.0.0, XLSX 1.0.0
 
 ## Démarrer
 

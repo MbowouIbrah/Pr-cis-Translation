@@ -32,10 +32,9 @@ except ImportError as _e:                       # pragma: no cover
     PPTXTranslatorEngine = None
     INDISPONIBLES["pptx"] = str(_e)
 
-# XLSX (0.2.0). La couverture du TEXTE est complète — les dix endroits où Excel
-# range du texte sont traités. Reste un défaut de RENDU : l'expansion n'est pas
-# gérée (une traduction plus longue déborde ou s'affiche en `#####`). Voir
-# `xlsx/CONTEXTE.md`, section « Limites au-delà du texte ».
+# XLSX (1.0.0). La couverture du TEXTE est complète — les dix endroits où Excel
+# range du texte sont traités — et l'expansion est gérée (colonnes élargies,
+# lignes rehaussées, plus de `#####`). Voir `xlsx/CONTEXTE.md`.
 try:
     from .xlsx.engine import XLSXTranslatorEngine
     _REGISTRE["xlsx"] = XLSXTranslatorEngine

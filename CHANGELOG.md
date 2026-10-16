@@ -8,6 +8,18 @@ leurs propres numéros internes.
 
 Rubriques : `Ajouté`, `Modifié`, `Corrigé`, `Retiré`, `Sécurité`.
 
+## [Non publié]
+
+### Ajouté
+- Excel : gestion de l'expansion. Une traduction plus longue que sa source
+  élargit sa colonne (selon l'alignement et les voisines vides) au lieu d'être
+  coupée, une cellule à retour à la ligne gagne la hauteur de ses lignes en
+  plus, un nombre dont le format porte un littéral traduit ne s'affiche plus
+  en `#####`.
+
+### Modifié
+- Moteur XLSX `0.2.0` → `1.0.0`.
+
 ## [1.1.0] - 2026-10-09 — Comptes, paiement et mise en ligne
 
 ### Ajouté
