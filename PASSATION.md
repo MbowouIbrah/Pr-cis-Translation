@@ -1,5 +1,10 @@
 # PASSATION — 16/10/2026 (fin de soirée)
 
+## 0. Priorités (16/10, décision utilisateur)
+- Travail arrêté ici : main = origin/main, propre, tout poussé ; prêt pour le déploiement 1.1.0.
+- Les branches non fusionnées sont soit déjà dans main (commits d'octobre rebasés), soit anciennes et abandonnées (juillet/août, OCR).
+- PROCHAIN CHANTIER : XLSX mis en suspens = l'**expansion** (traduction plus longue qui déborde de sa colonne ou s'affiche en `#####`) ; voir mémoire xlsx-couverture-complete.
+
 ## 1. Objectif en cours
 Tests réels faits (PPTX + CV). Passe de cohérence PDF faite. Reste : déploiement de la 1.1.0 et petites dettes.
 
