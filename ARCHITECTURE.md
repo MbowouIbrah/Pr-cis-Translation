@@ -75,12 +75,12 @@ directement — ils demandent « qui traite le `.xlsx` ? ».
 document fidèle part en `0.x` : le déclarer `1.0.0` ferait croire le contrat
 stable à quiconque lit `/health`.
 
-C'est le cas du moteur XLSX, en `0.2.0`. Sa couverture du **texte** est
-pourtant complète — les dix endroits où Excel range du texte sont traités — et
-c'est précisément ce que ce numéro sert à ne pas laisser croire : il reste un
-défaut de **rendu**, l'expansion (une traduction plus longue déborde de sa
-colonne ou s'affiche en `#####`). Le passage en `1.0.0` se mérite sur ce que
-l'utilisateur voit, pas sur une table de couverture remplie.
+Le moteur XLSX l'a illustré : resté en `0.2.0` alors que sa couverture du
+**texte** était complète, parce qu'un défaut de **rendu** subsistait —
+l'expansion (une traduction plus longue débordait de sa colonne ou s'affichait
+en `#####`). Il n'est passé en `1.0.0` qu'une fois l'expansion gérée : le
+numéro se mérite sur ce que l'utilisateur voit, pas sur une table de
+couverture remplie.
 
 Le **moteur PDF fait exception** : il ne figure pas au registre. Il n'a pas le
 contrat en deux temps — sa traduction est progressive par construction

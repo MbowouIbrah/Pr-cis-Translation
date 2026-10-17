@@ -9,10 +9,9 @@ Un fichier passe de bout en bout et ressort ouvrable par Excel.
 La COUVERTURE DU TEXTE est complète elle aussi : les dix endroits où Excel
 range du texte sont traités (`_PARTIES`, et `CONTEXTE.md` pour le détail).
 
-Il n'est PAS pour autant un moteur de FIDÉLITÉ. L'expansion n'est pas gérée :
-une traduction plus longue que sa source déborde de sa colonne ou s'affiche en
-`#####`. Le texte est juste, sa présentation pas toujours — c'est le prochain
-chantier, et le taire ferait découvrir le trou chez l'utilisateur.
+L'EXPANSION est gérée en dernière passe (`expansion.py`) : une traduction plus
+longue que sa source élargit sa colonne ou rehausse sa ligne, et un nombre au
+littéral traduit ne s'affiche plus en `#####`.
 
 LA RÈGLE QUI REVIENT PARTOUT DANS CE FICHIER
 --------------------------------------------
@@ -48,6 +47,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from lxml import etree
+from engines.xlsx import expansion
 
 from engines.base import TranslationEngine
 
@@ -352,6 +352,7 @@ class XLSXTranslatorEngine(TranslationEngine):
         #: texte source à sa traduction, et l'ouverture est le seul instant où
         #: le magasin porte encore ses sources.
         self._sources: dict[str, str] = {}
+        self._origine: dict[str, bytes] = {}
 
     # ── Dossier de travail ────────────────────────────────────────────────
     def _dossier(self) -> Path:
@@ -376,6 +377,9 @@ class XLSXTranslatorEngine(TranslationEngine):
         # réécrit. Sert à aligner les caches de croisés (`_aligner_croises`).
         self._sources = {f"ss_{i}": t for i, t in
                          enumerate(self._magasin_courant(dossier))}
+        # Même raison : la passe d'expansion compare chaque cellule traduite
+        # à sa source, largeurs et hauteurs d'origine comprises.
+        self._origine = expansion.instantane(dossier)
         return dossier
 
     def _refermer(self, chemin_sortie: str) -> None:
@@ -508,6 +512,8 @@ class XLSXTranslatorEngine(TranslationEngine):
         # les cellules telles qu'elles viennent d'être traduites.
         self._aligner_tableaux(dossier)
         self._aligner_croises(dossier, traductions)
+        # En DERNIER : la place se mesure sur le texte final.
+        expansion.ajuster_dossier(dossier, self._origine)
 
     def build_partial_xlsx(self, output_path: str,
                            only_sheets: set[int] | None = None) -> None:
@@ -1637,6 +1643,8 @@ class XLSXTranslatorEngine(TranslationEngine):
             # les cellules telles qu'elles viennent d'être traduites.
             self._aligner_tableaux(dossier)
             self._aligner_croises(dossier, traductions)
+            # En DERNIER : la place se mesure sur le texte final.
+            expansion.ajuster_dossier(dossier, self._origine)
 
             self._refermer(output_path)
             return True, "Classeur traduit."

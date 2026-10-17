@@ -38,11 +38,12 @@ sceaux, filets. Rédhibitoire sur un acte d'état civil.
 - [ ] Nom de domaine + HTTPS.
 - [ ] Sauvegarde HORS de l'hébergeur + alerte de disque plein.
 
-## 4. Excel — moteur XLSX 0.2.0
+## 4. Excel — moteur XLSX 1.0.0
 - [x] Couverture du texte complète (branche `feat/xlsx-complet` fusionnée le 15/10) :
       cellules, onglets, graphiques, zones de texte, commentaires, en-têtes de
       tableaux, croisés dynamiques, formats personnalisés, propriétés.
-- [ ] L'expansion du texte traduit (largeurs de colonnes) reste à traiter.
+- [x] Expansion gérée (`expansion.py`, branche `feat/xlsx-expansion`) : colonnes
+      élargies selon l'alignement, lignes rehaussées, plus de `#####`.
 
 ## 5. PDF — défauts à résoudre
 - [x] **22 polices de repli absentes de `main`** (28/07). Ajoutées par `ee1cf67`
