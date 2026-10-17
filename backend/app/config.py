@@ -191,7 +191,7 @@ PRECISE_MODEL = os.getenv("DEEPSEEK_MODEL_PRECISE", "deepseek-flash:high")
 # libellé, ce qui est sans conséquence.
 BRAND_NAME = os.getenv("BRAND_NAME", "PRÉCIS")
 BRAND_TAGLINE = os.getenv("BRAND_TAGLINE", "Professional Translation")
-PUBLIC_SITE = os.getenv("PUBLIC_SITE", "precis-translator.com")
+PUBLIC_SITE = os.getenv("PUBLIC_SITE", "precis-translator.trigenys.com")
 
 
 # ── Journal des erreurs ──────────────────────────────────────────────────────

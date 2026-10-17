@@ -3,5 +3,6 @@ Allow: /
 Disallow: /admin/
 Disallow: /api/
 Disallow: /verify-email
+Disallow: /health
 
-Sitemap: https://precis-translator.com/sitemap.xml
+Sitemap: https://precis-translator.trigenys.com/sitemap.xml
