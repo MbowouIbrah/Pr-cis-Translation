@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /admin/
+Disallow: /api/
+Disallow: /verify-email
+
+Sitemap: https://precis-translator.com/sitemap.xml
