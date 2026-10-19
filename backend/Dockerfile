@@ -33,12 +33,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # `fonts-liberation` n'est pas décoratif : ce sont les substituts aux mesures
 # identiques d'Arial, Times New Roman et Courier New. Sans elles, LibreOffice
 # remplace ces polices par ce qu'il trouve, les largeurs changent, et la mise en
-# page de l'aperçu ne correspond plus au document d'origine.
+# page de l'aperçu ne correspond plus au document d'origine. Carlito et Caladea
+# jouent le même rôle pour Calibri et Cambria, et servent aussi au moteur PDF
+# quand un document n'embarque qu'un sous-ensemble de ces polices.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer \
         libreoffice-impress \
         libreoffice-calc \
         fonts-liberation \
+        fonts-crosextra-carlito \
+        fonts-crosextra-caladea \
         fonts-dejavu-core \
         curl \
     && rm -rf /var/lib/apt/lists/*
@@ -73,6 +77,14 @@ COPY frontend/package.json ./frontend/package.json
 # 22 des 28 polices étaient absentes du dépôt jusqu'au 27/07/2026 — une image
 # construite avant cette date aurait eu exactement ce défaut, sans le dire.
 RUN python backend/scripts/verifier_polices.py
+
+# ── Catalogue de polices — NON bloquant ─────────────────────────────────────
+# Les familles les plus répandues, rangées d'avance dans backend/fonts/catalogue
+# pour qu'un PDF qui n'embarque qu'un sous-ensemble de police soit recomposé
+# dans la police identique sans téléchargement au moment de traduire. Sans
+# réseau au build, l'image se construit quand même : le moteur téléchargera à
+# la demande, ou retombera sur le clone métrique / la police la plus proche.
+RUN python backend/scripts/precharger_polices.py || true
 
 # `--chmod` est indispensable : le dépôt est édité sous Windows, qui ne porte
 # pas le bit d'exécution. Sans lui, le conteneur meurt sur « permission denied »

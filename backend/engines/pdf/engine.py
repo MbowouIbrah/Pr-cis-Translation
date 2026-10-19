@@ -31,6 +31,7 @@ from collections import defaultdict
 import fitz  # PyMuPDF >= 1.23
 
 from . import reflow
+from . import polices
 from .version import ENGINE_VERSION
 
 _log = logging.getLogger(__name__)
@@ -800,7 +801,8 @@ class PDFObjectEngine:
             # Polices embarquées du PDF source (pour un rendu fidèle des glyphes
             # et de la vraie police à la réinjection). Encodées en base64 dans
             # le JSON → fichier autonome.
-            data["fonts"] = self._extract_fonts(doc)
+            data["font_profiles"] = {}
+            data["fonts"] = self._extract_fonts(doc, data["font_profiles"])
             for page_num, page in enumerate(doc):
                 data["pages"].append(self.extract_page_data(
                     doc, page_num, page, embed_images=embed_images,
@@ -869,7 +871,7 @@ class PDFObjectEngine:
         return page_data
 
     # ── Polices embarquées : nom propre -> liste de sous-ensembles (b64) ─────
-    def _extract_fonts(self, doc):
+    def _extract_fonts(self, doc, profiles=None):
         """Collecte les octets de chaque police embarquée du PDF.
 
         Une même police (ex. 'PTSerif-Regular') peut être embarquée en
@@ -878,7 +880,12 @@ class PDFObjectEngine:
         pour chaque texte le sous-ensemble qui couvre réellement ses glyphes.
         Clé = nom SANS préfixe de sous-ensemble ('ABCDEF+') pour matcher le
         champ 'font' des spans.
+
+        `profiles` (dict) reçoit au passage, par nom propre, la chasse MESURÉE
+        de chaque caractère (voir `_font_profiles_from`) : c'est elle qui choisit
+        la police la plus proche quand l'originale est introuvable.
         """
+        mesures = defaultdict(lambda: defaultdict(list))
         # 1) Mapping Unicode -> glyph-id PAR XREF (sous-ensemble). Les polices
         #    CID/Type0 (Identity-H) sont embarquées sans cmap Unicode : on la
         #    reconstruit à partir de get_texttrace() qui expose, pour chaque
@@ -908,6 +915,8 @@ class PDFObjectEngine:
             for span in trace:
                 nm = span.get("font", "")
                 nm = nm.split("+")[-1] if "+" in nm else nm
+                if profiles is not None:
+                    self._measure_span(span, mesures[nm])
                 xrefs = page_name2xref.get(nm)
                 if not xrefs:
                     continue
@@ -921,6 +930,8 @@ class PDFObjectEngine:
         u2g_by_xref = {xr: {u: next(iter(gs)) for u, gs in m.items()
                             if len(gs) == 1}
                        for xr, m in u2g_by_xref.items()}
+        if profiles is not None:
+            profiles.update(self._font_profiles_from(mesures))
 
         # 2) Extraction des octets de chaque sous-ensemble + patch de cmap si
         #    nécessaire. On garde TOUS les sous-ensembles d'un même nom : à la
@@ -940,6 +951,34 @@ class PDFObjectEngine:
                     "b64": base64.b64encode(buf).decode("ascii"),
                 })
         return fonts
+
+    @staticmethod
+    def _measure_span(span, acc, limite=40):
+        """Chasse de chaque caractère du span, en em : distance entre deux
+        origines consécutives projetée sur la direction d'écriture, divisée par
+        le corps. L'espace est écarté (l'espacement des mots s'y ajoute)."""
+        adv = acc
+        size = span.get("size") or 0
+        chars = span.get("chars") or ()
+        if size <= 0 or len(chars) < 2:
+            return
+        dx, dy = span.get("dir") or (1.0, 0.0)
+        for a, b in zip(chars, chars[1:]):
+            try:
+                ch = chr(a[0])
+            except (TypeError, ValueError):
+                continue
+            if ch.isspace() or len(adv[ch]) >= limite:
+                continue
+            w = ((b[2][0] - a[2][0]) * dx + (b[2][1] - a[2][1]) * dy) / size
+            if 0.05 < w < 2.5:                  # saut de ligne, crénage négatif
+                adv[ch].append(w)
+
+    @staticmethod
+    def _font_profiles_from(mesures):
+        """{nom: {"adv": {car: chasse médiane en em}}}."""
+        return {nm: {"adv": {c: sorted(v)[len(v) // 2] for c, v in adv.items() if v}}
+                for nm, adv in mesures.items()}
 
     @staticmethod
     def _span_owners(doc, xrefs, chars, glyph_info):
@@ -3365,6 +3404,7 @@ class PDFObjectEngine:
 
     # ── Polices : b64 -> objets fitz.Font (regroupés par nom propre) ─────────
     def _build_fonts(self, data):
+        self._font_profiles = data.get("font_profiles") or {}
         self._fonts = {}   # clean -> [fitz.Font, ...]
         for clean, variants in data.get("fonts", {}).items():
             objs = []
@@ -4385,16 +4425,39 @@ class PDFObjectEngine:
         police libre ASSORTIE à la famille source (`backend/fonts/` : PT Serif,
         Montserrat, Open Sans, Roboto, Oswald, Merriweather) — bien plus proche du
         typeface embarqué qu'Helvetica (le « z », les accents, le « U » d'un titre
-        géométrique ne détonnent plus). Base-14 seulement en dernier recours."""
+        géométrique ne détonnent plus). Base-14 seulement en dernier recours.
+
+        Quand la police source n'est pas embarquée en entier, `polices` cherche
+        d'abord la MÊME police (disque, catalogue, téléchargement), ou son clone
+        métrique libre (Arial → Arimo…), puis la plus proche par la chasse
+        mesurée dans le document. Le mot-clé de famille et la base-14 restent
+        les secours si aucune n'est trouvée."""
         cache = getattr(self, "_fallback_cache", None)
         if cache is None:
             cache = self._fallback_cache = {}
-        fam = _matched_family(font_raw)
+        clean = (font_raw or "").split("+")[-1]
         weight = _weight_class(font_raw, bold)
-        key = (fam, weight, bool(bold), bool(italic))
+        key = (clean, weight, bool(bold), bool(italic))
         f = cache.get(key)
+        famille, poids, ital = polices.analyser_nom(font_raw)
+        if f is None and polices.cle(famille) in ("helvetica", "times", "courier"):
+            # Base-14 : la police de MuPDF EST l'originale (mêmes chasses).
+            try:
+                f = cache[key] = fitz.Font(_base14_full_name(
+                    font_raw, bold or (poids or 400) >= 600, italic or ital))
+            except Exception:
+                f = None
         if f is None:
-            f = _load_matched_font(fam, bold, italic, weight=weight)
+            fam = _matched_family(font_raw)
+            path, couche = polices.resolveur().resoudre(
+                font_raw, bold, italic,
+                (getattr(self, "_font_profiles", None) or {}).get(clean))
+            if couche == "proche" and not _matched_family_is_default(font_raw):
+                path = None                     # le nom désigne une famille assortie
+            if path:
+                f = self._font_from_file(path)
+            if f is None:
+                f = _load_matched_font(fam, bold, italic, weight=weight)
             if f is None:                       # aucune police assortie : base-14
                 try:
                     f = fitz.Font(_base14_full_name(font_raw, bold, italic))
@@ -4402,6 +4465,18 @@ class PDFObjectEngine:
                     f = fitz.Font("Helvetica")
             cache[key] = f
         return f
+
+    def _font_from_file(self, path):
+        """fitz.Font d'un fichier, une seule fois par processus de rendu."""
+        cache = getattr(self, "_font_file_cache", None)
+        if cache is None:
+            cache = self._font_file_cache = {}
+        if path not in cache:
+            try:
+                cache[path] = fitz.Font(fontfile=path)
+            except Exception:
+                cache[path] = None
+        return cache[path]
 
     def _paint_reflow(self, page, res):
         """Peint les lignes de runs placés produites par `reflow`. Chaque run est
@@ -4529,7 +4604,15 @@ class PDFObjectEngine:
         # remplie + contourée, comme la source.
         rm = 2 if font is not None and run.get("synth_bold") else 0
         shear = (run.get("synth_italic") or 0.0) if font is not None else 0.0
-        # 2) Sinon police base-14 (Helvetica/Times/Courier), comme objet Font
+        # 2) Sinon la police de repli complète (la même téléchargée, ou la plus
+        #    proche), si elle rend tout le texte.
+        if font is None:
+            fb = self._full_fallback_font(run.get("font", ""), run.get("bold"),
+                                          run.get("italic"))
+            if all(self._renders_glyph(fb, c) for c in set(text)
+                   if not c.isspace()):
+                font = fb
+        # 3) Sinon police base-14 (Helvetica/Times/Courier), comme objet Font
         #    pour bénéficier du même rendu mis à l'échelle.
         if font is None:
             fontname = _base14_fontname(run.get("font", ""), run.get("bold"),
@@ -4883,6 +4966,12 @@ def _matched_family(font_raw):
         return "roboto"
     # sans par défaut (helvetica, arial, segoe, calibri, open sans, verdana, DIN…)
     return "opensans"
+
+
+def _matched_family_is_default(font_raw):
+    """`_matched_family` n'a reconnu aucun mot-clé (repli sans empattement)."""
+    return (_matched_family(font_raw) == "opensans"
+            and "open" not in (font_raw or "").lower())
 
 
 def _weight_class(font_raw, bold_flag):

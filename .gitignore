@@ -14,6 +14,8 @@ frontend/dist/
 
 # Données générées à l'exécution
 backend/translations/
+# Polices pré-chargées au build (scripts/precharger_polices.py)
+backend/fonts/catalogue/
 
 # NOTE — `backend/fonts/*.ttf` était ignoré ici. C'était une erreur, et elle
 # était SILENCIEUSE : sur 28 fichiers présents en local, 6 seulement étaient
