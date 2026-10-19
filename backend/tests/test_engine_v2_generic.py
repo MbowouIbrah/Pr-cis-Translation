@@ -1062,6 +1062,69 @@ def _p32_italique_synthetique(eng):
     return res
 
 
+def _p33_images_jumelles(eng):
+    """P33 — deux images aux pixels IDENTIQUES mais objets distincts (logo et
+    filigrane faits du même dessin, masques différents) : la recherche par
+    empreinte (`get_image_rects`) les confond et donne au filigrane la place
+    du logo. Chaque pose doit être rattachée à SON objet, à SA place, et
+    l'opacité de la pose (`ca` d'un ExtGState) reportée au rendu."""
+    doc = fitz.open()
+    pg = doc.new_page(width=300, height=300)
+    px = bytes(16 * 16)                 # gris 0 : noir plein
+
+    def _image(masque):
+        m = doc.get_new_xref()
+        doc.update_object(m, "<</Type/XObject/Subtype/Image/Width 16/Height 16"
+                             "/ColorSpace/DeviceGray/BitsPerComponent 8>>")
+        doc.update_stream(m, bytes([masque]) * 256)
+        x = doc.get_new_xref()
+        doc.update_object(x, "<</Type/XObject/Subtype/Image/Width 16/Height 16"
+                             "/ColorSpace/DeviceGray/BitsPerComponent 8"
+                             f"/SMask {m} 0 R>>")
+        doc.update_stream(x, px)
+        return x
+    logo, filig = _image(255), _image(254)
+    gs = doc.get_new_xref()
+    doc.update_object(gs, "<</Type/ExtGState/ca 0.2>>")
+    doc.xref_set_key(pg.xref, "Resources", f"<</XObject<</Im1 {logo} 0 R"
+                     f"/Im2 {filig} 0 R>>/ExtGState<</G1 {gs} 0 R>>>>")
+    c = doc.get_new_xref()
+    doc.update_object(c, "<<>>")
+    doc.update_stream(c, b"q 60 0 0 40 20 20 cm /Im1 Do Q "
+                         b"q /G1 gs 260 0 0 160 20 120 cm /Im2 Do Q")
+    doc.xref_set_key(pg.xref, "Contents", f"{c} 0 R")
+    doc = fitz.open("pdf", doc.tobytes())
+    pg = doc[0]
+    R_LOGO, R_FIL = fitz.Rect(20, 240, 80, 280), fitz.Rect(20, 20, 280, 180)
+
+    def _proche(a, b):
+        return max(abs(a[i] - b[i]) for i in range(4)) < 0.5
+
+    pd = eng.extract_page_data(doc, 0, pg, embed_images=True)
+    ims = [e for e in pd["elements"] if e.get("type") == "image"]
+    fil = [e for e in ims if _proche(e["bbox"], R_FIL)]
+    lg = [e for e in ims if _proche(e["bbox"], R_LOGO)]
+    out = fitz.open()
+    eng.render_page_into(out, pd, draw_borders=False)
+    rpix = out[0].get_pixmap(colorspace=fitz.csGRAY)
+    centre_f = rpix.pixel(150, 100)[0]
+    centre_l = rpix.pixel(50, 260)[0]
+    return [
+        ("P33  piège armé : l'empreinte confond les deux images",
+         not any(_proche(r, R_FIL) for r in pg.get_image_rects(filig)), ""),
+        ("P33  extraction : une pose au logo, une au filigrane, chacune à sa place",
+         len(lg) == 1 and len(fil) == 1 and len(ims) == 2,
+         str([(e["xref"], e["bbox"]) for e in ims])),
+        ("P33  extraction : opacité du filigrane relevée, logo opaque",
+         bool(fil) and abs((fil[0].get("alpha") or 1.0) - 0.2) < 0.01
+         and bool(lg) and (lg[0].get("alpha") or 1.0) == 1.0,
+         str([(e["xref"], e.get("alpha")) for e in ims])),
+        ("P33  rendu : filigrane présent à 20 % (gris clair), logo plein (noir)",
+         abs(centre_f - 204) < 12 and centre_l < 20,
+         f"filigrane={centre_f} logo={centre_l}"),
+    ]
+
+
 def run():
     scratch = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "_generic_tmp")
@@ -1648,6 +1711,7 @@ def run():
                              + _p29_sous_ensembles_homonymes(eng)
                              + _p30_rectangles_troues(eng)
                              + _p31_gras_synthetique(eng)
+                             + _p33_images_jumelles(eng)
                              + _p32_italique_synthetique(eng)):
         ok(nom, bon, detail)
 

@@ -319,6 +319,34 @@ def _walk_clips(trace):
             pile = pile + [d]
 
 
+def _pixmap_attenuee(stream, alpha):
+    """L'image de `stream` dont le canal alpha est multiplié par `alpha` (pose
+    semi-transparente), ou None si la pose est opaque ou l'image illisible :
+    `insert_image` ne connaît pas l'opacité de l'état graphique."""
+    if alpha is None or alpha >= 0.999:
+        return None
+    try:
+        pix = fitz.Pixmap(stream)
+        if pix.colorspace and pix.colorspace.n > 3:
+            pix = fitz.Pixmap(fitz.csRGB, pix)
+        if not pix.alpha:
+            pix = fitz.Pixmap(pix, 1)
+        table = bytes(round(v * alpha) for v in range(256))
+        pix.set_alpha(bytes(pix.samples)[pix.n - 1::pix.n].translate(table))
+        return pix
+    except Exception as exc:
+        _log.warning("opacité d'image non reportée : %s", exc)
+        return None
+
+
+def _avec_alpha(el, alpha):
+    """Note l'opacité d'une pose d'image (`ca` de l'état graphique) quand elle
+    n'est pas pleine : un filigrane à 20 % rendu opaque masquerait la page."""
+    if alpha < 0.999:
+        el["alpha"] = round(alpha, 3)
+    return el
+
+
 def _image_bytes(doc, xref):
     """Octets d'une image de `doc` et leur extension — (None, "png") si illisible.
 
@@ -452,14 +480,35 @@ if _mu is not None:
 
         def fill_image(self, ctx, image, ctm, alpha, color_params):
             r = _mu.fz_transform_rect(_mu.FzRect(0, 0, 1, 1), _mu.FzMatrix(ctm))
-            self.images.append((fitz.Rect(r.x0, r.y0, r.x1, r.y1), list(self.pile)))
+            im = _mu.FzImage(_mu.ll_fz_keep_image(image))
+            self.images.append((fitz.Rect(r.x0, r.y0, r.x1, r.y1), list(self.pile),
+                                float(alpha), im.m_internal_value()))
 
 
-def _image_clip_stacks(page):
+def _image_clip_stacks(page, xrefs=()):
     """Pour chaque image peinte, dans l'ordre de peinture : (rectangle, pile
-    des découpes actives). Liste vide si le device MuPDF est indisponible."""
+    des découpes actives, opacité de la pose, xref ou None). Liste vide si le
+    device MuPDF est indisponible.
+
+    Le xref est rattaché par IDENTITÉ : MuPDF garde une image chargée en
+    mémoire et la resert telle quelle à chaque pose. Charger d'abord les
+    `xrefs` (références tenues pendant le passage) puis comparer les objets
+    reçus par le device dit quel objet est peint où — là où l'empreinte des
+    pixels (`get_image_rects`) confond deux images de même dessin. Une pose
+    non reconnue reste à None."""
     if _mu is None:
         return []
+    tenues = {}
+    try:
+        pdf = _mu.pdf_document_from_fz_document(page.parent.this)
+        for x in xrefs:
+            try:
+                im = _mu.pdf_load_image(pdf, _mu.pdf_new_indirect(pdf, x, 0))
+                tenues[im.m_internal_value()] = (x, im)
+            except Exception:
+                continue
+    except Exception:
+        tenues = {}
     try:
         dev = _ImageClipDevice()
         # `fz_run_page` peint dans l'espace de la page PIVOTÉE ; le bboxlog et
@@ -467,7 +516,8 @@ def _image_clip_stacks(page):
         # quoi une découpe de page `/Rotate 90` serait rejouée ailleurs.
         _mu.fz_run_page(page.this, dev, _mu.FzMatrix(*page.derotation_matrix),
                         _mu.FzCookie())
-        return dev.images
+        return [(r, pile, alpha, tenues[ptr][0] if ptr in tenues else None)
+                for r, pile, alpha, ptr in dev.images]
     except Exception as exc:
         _log.warning("découpes d'images non relevées (page %s) : %s",
                      getattr(page, "number", "?"), exc)
@@ -791,10 +841,15 @@ class PDFObjectEngine:
         # recouvre en partie doit rester dessous, et inversement.
         trace = self._drawing_trace(page)
         draw_els = self._extract_drawings(page, trace)
+        try:
+            xrefs = [i[0] for i in page.get_images(full=True)]
+        except Exception:
+            xrefs = []
+        piles = _image_clip_stacks(page, xrefs)     # un seul passage device
         img_els = self._extract_images(
             doc, page, page_num, embed_images, assets_dir,
-            images_par_reference)
-        self._attach_image_order(page, img_els)
+            images_par_reference, piles)
+        self._attach_image_order(page, img_els, piles)
         graphiques = draw_els + img_els
         graphiques.sort(key=lambda e: e.get("seqno")
                         if e.get("seqno") is not None else math.inf)
@@ -3066,24 +3121,40 @@ class PDFObjectEngine:
 
     # ── Images : une occurrence = un objet ───────────────────────────────────
     def _extract_images(self, doc, page, page_num, embed_images, assets_dir,
-                        images_par_reference=False):
+                        images_par_reference=False, piles=None):
+        """Une pose = un élément. Les poses viennent du device (`piles`, cf.
+        `_image_clip_stacks`) : chacune rattachée à son objet, avec son
+        opacité. `get_image_rects` (empreinte des pixels) n'est qu'un repli
+        pour un objet que le device n'a pas reconnu : il confond deux images
+        de même dessin (logo et filigrane) et donnerait à l'une la place de
+        l'autre."""
         elements = []
         try:
             infos = page.get_images(full=True)
         except Exception:
             infos = []
+        if piles is None:
+            piles = _image_clip_stacks(page, [i[0] for i in infos])
+        vues = {}
+        for r, _, alpha, x in piles:
+            if x is not None:
+                vues.setdefault(x, []).append((r, alpha))
         for img_index, info in enumerate(infos):
             xref = info[0]
-            try:
-                rects = page.get_image_rects(xref)
-            except Exception:
-                rects = []
-            if not rects:
+            if xref in vues:
+                poses = vues.pop(xref)
+            else:
+                try:
+                    poses = [(r, 1.0) for r in page.get_image_rects(xref)]
+                except Exception:
+                    poses = []
+            if not poses:
                 continue
             if images_par_reference:
-                for rect in rects:
-                    elements.append({"type": "image", "bbox": _rect(rect),
-                                     "xref": xref})
+                for rect, alpha in poses:
+                    elements.append(_avec_alpha({"type": "image",
+                                                 "bbox": _rect(rect),
+                                                 "xref": xref}, alpha))
                 continue
             img_bytes, ext = _image_bytes(doc, xref)
 
@@ -3098,15 +3169,15 @@ class PDFObjectEngine:
                         fh.write(img_bytes)
                     asset_ref = fname
 
-            for rect in rects:
-                elements.append({
+            for rect, alpha in poses:
+                elements.append(_avec_alpha({
                     "type": "image",
                     "bbox": _rect(rect),
                     "xref": xref,
                     "ext": ext,
                     "asset_file": asset_ref,   # si embed_images=False
                     "asset_b64": asset_b64,    # si embed_images=True
-                })
+                }, alpha))
         return elements
 
 
@@ -3143,7 +3214,7 @@ class PDFObjectEngine:
             elements.append(el)
         return elements
 
-    def _attach_image_order(self, page, img_els):
+    def _attach_image_order(self, page, img_els, piles=None):
         """Donne à chaque image son ordre de peinture (`seqno`) et ses découpes.
 
         `get_bboxlog()` liste TOUT ce qui est peint, dans l'ordre : son indice
@@ -3163,7 +3234,8 @@ class PDFObjectEngine:
             log = page.get_bboxlog()
         except Exception:
             return
-        piles = _image_clip_stacks(page)
+        if piles is None:
+            piles = _image_clip_stacks(page)
         poses = [(i, fitz.Rect(r)) for i, (k, r) in enumerate(log)
                  if k == "fill-image"]
         if len(piles) != len(poses):
@@ -3338,14 +3410,16 @@ class PDFObjectEngine:
             stream, _ = _image_bytes(src_doc, el["xref"])
         if stream is None:
             return
+        pix = _pixmap_attenuee(stream, el.get("alpha"))
+        image = {"pixmap": pix} if pix is not None else {"stream": stream}
         clip = _clip_ops(page, el.get("clips"))
         if not clip:
-            page.insert_image(rect, stream=stream)
+            page.insert_image(rect, **image)
             return
         # `insert_image` ajoute son propre flux de contenu à la page : on
         # l'encadre de la découpe (q … W n … Q) une fois posé.
         avant = set(page.get_contents())
-        page.insert_image(rect, stream=stream)
+        page.insert_image(rect, **image)
         # Une page aux q/Q déséquilibrés reçoit aussi des flux d'encadrement
         # (`wrap_contents`) : seul celui qui invoque l'image (« Do ») est le sien.
         doc = page.parent
