@@ -172,11 +172,18 @@ def _lots_de_page(items, taille):
 _MEMO_MAX_LEN = 120
 
 
+def _sans_typo(texte):
+    """Blancs normalisés, sans l'espace que la typographie française met devant
+    « : ; ! ? % » et dans les guillemets : « Tax Structure : » et « Tax
+    Structure: » sont le même texte saisi selon deux usages, pas deux textes
+    (mesuré : un même libellé traduit de deux façons d'une page à l'autre)."""
+    return re.sub(r"\s+(?=[:;!?%»])|(?<=«)\s+", "", " ".join(texte.split()))
+
+
 def _plain_key(tagged):
     """Clé de mémoire : le texte SANS balises, blancs normalisés (sensible à la
     casse — « Part One » et « PART ONE » sont deux choses)."""
-    plain = re.sub(r"\[\[/?\d+\]\]", "", tagged or "")
-    return " ".join(plain.split())
+    return _sans_typo(re.sub(r"\[\[/?\d+\]\]", "", tagged or ""))
 
 
 def reattacher_traductions(nouvelle, ancienne):
@@ -262,7 +269,8 @@ def translate_extraction(data, target_lang="fr", max_pages=None,
             if doc_memory is not None:
                 cle = _plain_key(tagged)
                 memo = doc_memory.get(cle)
-                if (memo and memo[0] == tagged
+                # Mêmes balises aux mêmes mots : le style resservi tombe juste.
+                if (memo and _sans_typo(memo[0]) == _sans_typo(tagged)
                         and len(cle) <= _MEMO_MAX_LEN):
                     el["tr_tagged"] = memo[1]
                     resservis += 1

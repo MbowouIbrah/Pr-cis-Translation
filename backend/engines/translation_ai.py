@@ -688,6 +688,12 @@ class TranslatorAI:
             "« Licence in Law ») — JAMAIS le diplôme ou l'organisme "
             "« équivalent » d'un autre pays, qui changerait le fait rapporté. "
             "Les seuls termes ambigus ou propres ; pas le vocabulaire banal.\n"
+            "- document en PLUSIEURS langues (même contenu en deux versions) : "
+            "chaque notion reçoit UN SEUL terme cible, quelle que soit la "
+            "version où elle apparaît ;\n"
+            "- conventions d'écriture à tenir partout en "
+            f"{self.lang_name(target_lang)} : séparateur des milliers, "
+            "références d'articles et de textes, dates.\n"
             'Réponds en JSON : {"fiche": "..."}.\n\n'
             "TITRES :\n" + "\n".join(titres) +
             "\n\nEXTRAITS (pris sur tout le document) :\n" + "\n".join(corps))
