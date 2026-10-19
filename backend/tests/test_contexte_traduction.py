@@ -98,8 +98,11 @@ class _Client:
                                 "user": user, "items": items})
             out = []
             for it in items:
+                # La casse seule ne suffit pas à « traduire » : _nu y voit une
+                # recopie (défaut `inchange`). Le « · » rend le run distinct.
                 t = re.sub(r"(\]\])([^\[]+)(\[\[)",
-                           lambda m: m[1] + m[2].swapcase() + m[3], it["text"])
+                           lambda m: m[1] + m[2].swapcase() + "·" + m[3],
+                           it["text"])
                 if (GLOSE in it["text"] and not self.glose_servie):
                     self.glose_servie = True
                     t = t.replace(GLOSE.swapcase(), GLOSE.swapcase() + " (AS-levels)")

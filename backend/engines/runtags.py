@@ -154,12 +154,18 @@ def _ouvertures(texte):
 def defauts(source: str, traduit: str) -> list[str]:
     """Ce qui cloche dans une traduction, sans jamais regarder QUEL document.
 
-    Quatre invariants, aucun réglage :
+    Cinq invariants, aucun réglage :
 
       • `balises`  — autant de morceaux rendus que reçus. Un morceau sans
         réponse est un morceau non traduit ; il ne se devine pas.
       • `recopie`  — un morceau identique à sa source à côté d'un morceau
         traduit. Mélange de langues probable.
+      • `inchange` — le fragment ENTIER rendu identique à sa source (à la
+        casse et aux accents près) alors qu'il contient des lettres. Nom propre
+        ou oubli : rien dans le texte ne permet de trancher — la colonne
+        anglaise d'un en-tête bilingue (« REPUBLIC OF CAMEROON ») revenait
+        telle quelle en espagnol sans que personne ne la redemande. Seul le
+        modèle sait : on lui repose la question une fois, sa réponse fait foi.
       • `nombres`  — les suites de chiffres de la source se retrouvent dans la
         traduction. « 6ème jour » rendu « 5.e jour » change une donnée du
         document : c'est une faute d'une autre nature qu'une maladresse de
@@ -183,6 +189,10 @@ def defauts(source: str, traduit: str) -> list[str]:
         rendus = [trouves[i] for i in sorted(attendus)]
         if runs_recopies(parts, rendus):
             maux.append("recopie")
+
+    nu = _nu(sans_balises(source))
+    if any(c.isalpha() for c in nu) and nu == _nu(sans_balises(traduit)):
+        maux.append("inchange")
 
     if sorted(nombres(sans_balises(source))) != \
             sorted(nombres(sans_balises(traduit))):
