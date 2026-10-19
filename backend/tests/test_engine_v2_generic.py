@@ -1125,6 +1125,42 @@ def _p33_images_jumelles(eng):
     ]
 
 
+def _p34_capitales_puis_casse_mixte(eng):
+    """En-tête centré : une ligne en CAPITALES puis une devise en casse mixte,
+    de MÊME largeur par coïncidence. Alignées sur les deux bords, elles
+    passaient pour une colonne justifiée de deux lignes et fusionnaient ; le
+    reflow les recoupait ailleurs (« REPUBLIC OF CAMEROON Peace - » / « Work -
+    Fatherland »). Le passage des capitales à la casse mixte est un
+    changement de composition, comme le passage du gras au maigre."""
+    l1, l2, axe, taille = "REPUBLIC OF CAMEROON", "Peace - Work - Fatherland", 480, 8
+    w1 = fitz.get_text_length(l1, "helv", taille)
+    w2 = fitz.get_text_length(l2, "helv", taille)
+    doc = fitz.open()
+    pg = doc.new_page(width=600, height=200)
+    pg.insert_text((axe - w1 / 2, 40), l1, fontname="helv", fontsize=taille)
+    o2 = fitz.Point(axe - w1 / 2, 51.7)
+    pg.insert_text(o2, l2, fontname="helv", fontsize=taille,
+                   morph=(o2, fitz.Matrix(w1 / w2, 1)))   # même largeur
+    pg.insert_text((50, 150), "Body text of the page, unrelated to the header.",
+                   fontname="helv", fontsize=10)
+    lignes = [l["bbox"] for b in pg.get_text("dict")["blocks"]
+              for l in b.get("lines", ()) if l["bbox"][1] < 60]
+    arme = (len(lignes) == 2 and abs(lignes[0][0] - lignes[1][0]) < 0.5
+            and abs(lignes[0][2] - lignes[1][2]) < 0.5)
+    # Colonne de DROITE : l'espace ouvert à droite (600 − bord) est plus
+    # étroit que la ligne, la coupe « espace restant » ne tranche pas.
+    arme = arme and 600 - lignes[0][2] < lignes[0][2] - lignes[0][0]
+    pd = eng.extract_page_data(doc, 0, doc[0], embed_images=False)
+    textes = [el.get("text") or "" for el in pd["elements"]
+              if el.get("type") == "paragraph"]
+    soudes = [t for t in textes if "CAMEROON" in t and "Peace" in t]
+    return [("P34  piège armé (deux lignes centrées de même largeur)", arme,
+             str(lignes)),
+            ("P34  capitales puis casse mixte : deux paragraphes distincts",
+             not soudes and any("CAMEROON" in t for t in textes)
+             and any("Peace" in t for t in textes), str(textes))]
+
+
 def run():
     scratch = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "_generic_tmp")
@@ -1712,7 +1748,8 @@ def run():
                              + _p30_rectangles_troues(eng)
                              + _p31_gras_synthetique(eng)
                              + _p33_images_jumelles(eng)
-                             + _p32_italique_synthetique(eng)):
+                             + _p32_italique_synthetique(eng)
+                             + _p34_capitales_puis_casse_mixte(eng)):
         ok(nom, bon, detail)
 
     # ── Rapport ─────────────────────────────────────────────────────────────

@@ -2817,6 +2817,14 @@ class PDFObjectEngine:
         continues = (lower_next or measure_next or _starts_coord(it["text"])
                      or parent_continues)
 
+        # Ligne TOUT EN CAPITALES suivie d'une ligne en casse mixte : changement
+        # de composition, comme gras → maigre (« REPUBLIC OF CAMEROON » / « Peace
+        # - Work - Fatherland »). La géométrie ne tranche pas quand les deux
+        # lignes ont, par coïncidence, la même largeur : elles passaient pour
+        # une colonne justifiée, fusionnaient, et le reflow les recoupait.
+        if not continues and _all_caps(last_txt) and _has_lower(it["text"]):
+            return True
+
         # ── A. Coupe « espace restant » (tie-breaker géométrique, togglable) ─
         # Appliquée AVANT le flot continu : elle discrimine un vrai saut de
         # paragraphe d'un simple retour à la ligne, y compris à interligne
@@ -4787,6 +4795,16 @@ def _starts_lower(text):
         if ch.isdigit():
             return False
     return False
+
+
+def _all_caps(text):
+    """Toutes les lettres à casse de la ligne sont des capitales (au moins une)."""
+    cased = [ch for ch in text if ch.isupper() or ch.islower()]
+    return bool(cased) and not any(ch.islower() for ch in cased)
+
+
+def _has_lower(text):
+    return any(ch.islower() for ch in text)
 
 
 def _first_word(text):
