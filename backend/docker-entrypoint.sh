@@ -36,8 +36,8 @@ until alembic upgrade head; do
 done
 echo "[precis] Migrations a jour."
 
-# Compte administrateur (ADMIN_EMAIL) : cree sur une base neuve, sinon remis
-# admin. Idempotent ; un echec ici arrete le demarrage comme une migration.
+# Comptes administrateurs (ADMIN_EMAIL, liste separee par des virgules) : crees
+# sur une base neuve, sinon remis admin. Idempotent ; un echec ici arrete le demarrage comme une migration.
 python seed_admin.py
 
 # ── UN SEUL worker, et ce n'est pas négociable ───────────────────────────────

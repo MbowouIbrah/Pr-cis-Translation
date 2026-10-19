@@ -1,11 +1,13 @@
-r"""Amorcage du compte administrateur : le cree, ou le promeut s'il existe.
+r"""Amorcage des comptes administrateurs : les cree, ou les promeut s'ils existent.
 
 Idempotent : lance a chaque demarrage du conteneur (docker-entrypoint.sh),
 apres les migrations. Une base neuve en production a donc son admin des le
 premier demarrage, sans console ni requete SQL a la main.
 
-L'adresse vient de ADMIN_EMAIL (defaut : mbowouibrah@gmail.com). Le compte n'a
-pas de mot de passe : il se connecte par code envoye par e-mail, ou par Google.
+Les adresses viennent de ADMIN_EMAIL, separees par des virgules (defaut :
+mbowouibrah@gmail.com). Retirer une adresse de la liste ne retire PAS le plan
+admin du compte : cela se fait depuis la vue admin. Les comptes n'ont pas de
+mot de passe : connexion par code envoye par e-mail, ou par Google.
 
 A la main :
     backend\venv\Scripts\python.exe backend\seed_admin.py
@@ -29,18 +31,26 @@ DEFAULT_ADMIN_EMAIL = "mbowouibrah@gmail.com"
 ADMIN_NAME = "Ibrahim Mbowou"
 
 
-def admin_email() -> str:
-    return (os.getenv("ADMIN_EMAIL") or DEFAULT_ADMIN_EMAIL).strip().lower()
+def admin_emails() -> list[str]:
+    """Adresses de ADMIN_EMAIL, normalisees et sans doublon, dans l'ordre."""
+    brut = os.getenv("ADMIN_EMAIL") or DEFAULT_ADMIN_EMAIL
+    emails: list[str] = []
+    for e in brut.split(","):
+        e = e.strip().lower()
+        if e and e not in emails:
+            emails.append(e)
+    return emails or [DEFAULT_ADMIN_EMAIL]
 
 
-async def ensure_admin(email: str | None = None) -> User:
-    email = (email or admin_email()).strip().lower()
+async def ensure_admin(email: str) -> User:
+    email = email.strip().lower()
     async with _asm() as db:
         user = (await db.execute(
             select(User).where(func.lower(User.email) == email))).scalar_one_or_none()
         created = user is None
         if created:
-            user = User(email=email, name=ADMIN_NAME)
+            user = User(email=email,
+                        name=ADMIN_NAME if email == DEFAULT_ADMIN_EMAIL else None)
             db.add(user)
         user.plan = "admin"
         user.email_verified = True
@@ -48,16 +58,19 @@ async def ensure_admin(email: str | None = None) -> User:
         # Plan attribue, pas achete : sans echeance.
         user.plan_expires_at = None
         user.plan_started_at = None
-        user.name = user.name or ADMIN_NAME
         await db.commit()
         await db.refresh(user)
     print(f"OK  Compte admin {'cree' if created else 'a jour'} : {user.email}")
     return user
 
 
+async def ensure_admins() -> list[User]:
+    return [await ensure_admin(e) for e in admin_emails()]
+
+
 async def main() -> None:
     try:
-        await ensure_admin()
+        await ensure_admins()
     finally:
         await engine.dispose()
 

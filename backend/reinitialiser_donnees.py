@@ -21,7 +21,7 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 from sqlalchemy import text
 from app.config import TRANSLATIONS_DIR
 from app.core.database import async_session as _asm, engine
-from seed_admin import ensure_admin
+from seed_admin import ensure_admins
 
 PHRASE = "EFFACER-TOUT"
 KEEP = {"alembic_version"}
@@ -56,7 +56,7 @@ async def main(confirm: str | None) -> None:
             else:
                 os.remove(chemin)
         print("\nOK  Tables et fichiers vides.")
-        await ensure_admin()
+        await ensure_admins()
     finally:
         await engine.dispose()
 

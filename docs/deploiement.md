@@ -106,7 +106,7 @@ python3 -c "import secrets; print(secrets.token_urlsafe(24))"   # POSTGRES_PASSW
 | `FRONTEND_URL` | `https://votre-domaine` |
 | `SMTP_*`, `EMAIL_ENABLED` | ou `EMAIL_ENABLED=false`, et alors aucun compte ne s'active |
 | `ADMIN_ALERT_EMAIL` | destinataire des alertes d'erreurs et des tickets |
-| `ADMIN_EMAIL` | compte administrateur créé au démarrage (`seed_admin.py`, défaut `mbowouibrah@gmail.com`) ; connexion par code e-mail ou Google |
+| `ADMIN_EMAIL` | comptes administrateurs créés au démarrage, adresses séparées par des virgules (`seed_admin.py`, défaut `mbowouibrah@gmail.com`) ; connexion par code e-mail ou Google |
 
 Le service **refuse de démarrer** si l'un de ces réglages trahit un gabarit, et
 le message nomme chaque faute avec la commande qui la corrige. Ce refus est une
