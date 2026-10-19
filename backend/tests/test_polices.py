@@ -350,6 +350,58 @@ def run() -> int:
             req, None, 302, "", {}, "https://fonts.gstatic.com/a.ttf")
         ok("REDIRECTION  hors des hôtes autorisés : refusée ; vers un hôte permis : suivie",
            refus and permis is not None, f"{refus} {permis}")
+
+        # ── 13. Un nom de police maison ne part jamais sur le réseau ──────────
+        urls = []
+        get_reel = polices._get
+        polices._get = lambda url, *a, **k: urls.append(url) or b""
+        try:
+            try:
+                polices.google_fonts("BanqueXYZ Sans", 400, False)
+                absente = False
+            except polices.Absente:
+                absente = True
+            try:
+                polices.google_fonts("PT Serif", 400, False)
+            except polices.Absente:
+                pass
+        finally:
+            polices._get = get_reel
+        ok("LISTE  famille hors catalogue public : Absente sans requête ; "
+           "famille Google : interrogée",
+           absente and len(urls) == 1 and "PT+Serif" in urls[0], str(urls))
+
+        # ── 14. Un rendu fait réseau coupé n'est pas conservé ─────────────────
+        from app.services import render_cache
+        trad = os.path.join(tmp, "doc_TRADUIT.json")
+        open(trad, "w").close()
+        marque = render_cache.marque_polices()
+        polices.Resolveur([loc], os.path.join(tmp, "c14"),
+                          Catalogue(panne=True)).resoudre("Gamma-Regular")
+        render_cache.store_render(b"%PDF-degrade", trad, marque)
+        degrade_absent = render_cache.cache_valid(trad) is None
+        render_cache.store_render(b"%PDF-sain", trad, render_cache.marque_polices())
+        ok("CACHE RENDU  dégradé (panne réseau) : non écrit ; sain : écrit",
+           degrade_absent and render_cache.cache_valid(trad) is not None,
+           f"{degrade_absent}")
+
+        # ── 15. Polices du système ignorées sauf demande explicite ────────────
+        systeme = set(polices._repertoires_systeme())
+        ancien = os.environ.pop("PRECIS_FONT_SYSTEM", None)
+        try:
+            polices.configurer(None)
+            defaut = set(polices.resolveur().repertoires) & systeme
+            os.environ["PRECIS_FONT_SYSTEM"] = "1"
+            polices.configurer(None)
+            active = set(polices.resolveur().repertoires) & systeme
+        finally:
+            if ancien is None:
+                os.environ.pop("PRECIS_FONT_SYSTEM", None)
+            else:
+                os.environ["PRECIS_FONT_SYSTEM"] = ancien
+            polices.configurer(None)
+        ok("SYSTÈME  polices de l'OS : ignorées par défaut, consultées si =1",
+           not defaut and (active or not systeme), f"{defaut} {active}")
     finally:
         if restaurer:
             restaurer()

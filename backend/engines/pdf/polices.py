@@ -183,6 +183,11 @@ def _rend_de_l_encre(path, texte="aAé"):
 # ── Téléchargement ───────────────────────────────────────────────────────────
 
 _HOTES = {"fonts.googleapis.com", "fonts.gstatic.com"}
+# Seuls les noms de ce catalogue public partent sur le réseau : le nom d'une
+# police maison (« BanqueXYZ-Regular ») désigne le client et ne sort jamais.
+# Regénérer depuis https://fonts.google.com/metadata/fonts (familyMetadataList).
+_LISTE_GOOGLE = os.path.join(FONTS_DIR, "google_familles.txt")
+_FAMILLES_GOOGLE = None
 _TAILLE_MAX = 20 * 1024 * 1024
 _BLOC = 64 * 1024
 # Attente maximale d'UNE opération réseau (connexion, lecture d'un bloc).
@@ -238,10 +243,28 @@ class Absente(Exception):
     """Le catalogue répond que la famille ou la variante n'existe pas."""
 
 
+def familles_google():
+    """Clés des familles publiées par Google Fonts (vide si liste illisible :
+    alors rien ne part sur le réseau)."""
+    global _FAMILLES_GOOGLE
+    if _FAMILLES_GOOGLE is None:
+        try:
+            with open(_LISTE_GOOGLE, encoding="utf-8") as f:
+                _FAMILLES_GOOGLE = frozenset(
+                    cle(l) for l in f if l.strip() and not l.startswith("#"))
+        except OSError as e:
+            log.warning("polices : liste Google Fonts illisible (%s)", e)
+            _FAMILLES_GOOGLE = frozenset()
+    return _FAMILLES_GOOGLE
+
+
 def google_fonts(famille, poids, italique, timeout=_DELAI_REQUETE):
     """Octets TTF COMPLETS de la variante demandée, depuis Google Fonts.
     Lève `Absente` si la variante n'existe pas ; toute autre exception est un
-    échec RÉSEAU (à retenter plus tard, jamais mémorisé comme absence)."""
+    échec RÉSEAU (à retenter plus tard, jamais mémorisé comme absence).
+    Une famille hors du catalogue public est `Absente` sans requête."""
+    if cle(famille) not in familles_google():
+        raise Absente(famille)
     echeance = time.monotonic() + _ECHEANCE_TELECHARGEMENT
     spec = f"{famille}:ital,wght@{1 if italique else 0},{poids}"
     url = "https://fonts.googleapis.com/css2?" + urllib.parse.urlencode(
@@ -430,6 +453,7 @@ class Resolveur:
                 del self._echecs_reseau[cle_r]          # oublié : on retente
                 t = None
             if t is not None or maintenant < self._reseau_coupe:
+                _noter_degradation()
                 return True
         return self._absente(famille, poids, italique)
 
@@ -465,6 +489,7 @@ class Resolveur:
                     # Réseau coupé : chaque famille suivante attendrait le
                     # délai d'expiration. On n'essaie plus pendant un moment.
                     self._reseau_coupe = maintenant + _DELAI_RESEAU_COUPE
+                _noter_degradation()
                 return None
             try:
                 path = self._enregistrer(famille, poids, italique, data)
@@ -587,11 +612,30 @@ def _chasse_fixe(adv):
 _RESOLVEUR = None
 _VERROU = threading.Lock()
 
+# Résolutions privées du réseau (échec, ou disjoncteur ouvert) depuis le
+# démarrage. Un rendu pendant lequel ce compteur bouge a pu prendre une police
+# « proche » au lieu de l'identique : il ne doit pas être conservé.
+_DEGRADATIONS = 0
+_VERROU_DEGRADATIONS = threading.Lock()
+
+
+def _noter_degradation():
+    global _DEGRADATIONS
+    with _VERROU_DEGRADATIONS:
+        _DEGRADATIONS += 1
+
+
+def degradations():
+    """Compteur à relever avant un rendu et à comparer après."""
+    return _DEGRADATIONS
+
 
 def resolveur():
     """Résolveur du processus, réglé par l'environnement :
     PRECIS_FONTS_CACHE (dossier du cache), PRECIS_FONT_DOWNLOAD=0 (hors ligne),
-    PRECIS_FONT_SYSTEM=0 (ignorer les polices du système),
+    PRECIS_FONT_SYSTEM=1 (consulter AUSSI les polices du système : désactivé
+    par défaut, le rendu ne doit pas dépendre de la machine ni embarquer des
+    polices sous licence de l'OS),
     PRECIS_FONT_CATALOGUE=0 (ignorer le catalogue pré-chargé)."""
     global _RESOLVEUR
     with _VERROU:
@@ -599,7 +643,7 @@ def resolveur():
             reps = [FONTS_DIR]
             if os.environ.get("PRECIS_FONT_CATALOGUE", "1") != "0":
                 reps.append(CATALOGUE_DIR)
-            if os.environ.get("PRECIS_FONT_SYSTEM", "1") != "0":
+            if os.environ.get("PRECIS_FONT_SYSTEM", "0") == "1":
                 reps += _repertoires_systeme()
             dl = google_fonts if os.environ.get("PRECIS_FONT_DOWNLOAD", "1") != "0" \
                 else None
