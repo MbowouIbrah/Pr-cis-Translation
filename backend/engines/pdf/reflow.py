@@ -84,7 +84,8 @@ def build_tokens(segments):
                 tokens.append({"text": part, "fonts": fonts, "size": size,
                                "color": color, "underline": underline,
                                "space_before": pending_space, "lsp": lsp,
-                               "rise": seg.get("rise", 0.0) or 0.0})
+                               "rise": seg.get("rise", 0.0) or 0.0,
+                               "synth_bold": seg.get("synth_bold")})
                 pending_space = False
     return tokens
 
@@ -303,7 +304,8 @@ def _layout(tokens, container_lines, first_baseline, bottom, size_scale, pitch,
                 head, tail = piece
                 cur.append({"text": head, "x": x + sp, "fonts": t["fonts"],
                             "size": size, "color": t["color"], "sx": sx,
-                            "underline": t.get("underline"), "sb": sp > 0})
+                            "underline": t.get("underline"), "sb": sp > 0,
+                            "synth_bold": t.get("synth_bold")})
                 # Avancer x jusqu'à la fin du préfixe césuré : close_line()
                 # mesure le slack de justification/centrage sur x — sans cette
                 # avance, le slack est surestimé de (espace + préfixe) et la
@@ -327,7 +329,8 @@ def _layout(tokens, container_lines, first_baseline, bottom, size_scale, pitch,
                 head, tail = piece
                 cur.append({"text": head, "x": x, "fonts": t["fonts"],
                             "size": size, "color": t["color"], "sx": sx,
-                            "underline": t.get("underline"), "sb": False})
+                            "underline": t.get("underline"), "sb": False,
+                            "synth_bold": t.get("synth_bold")})
                 x += text_width(head, t["fonts"], size, sx)
                 queue.insert(0, {**t, "text": tail, "space_before": False})
                 close_line()
@@ -337,6 +340,7 @@ def _layout(tokens, container_lines, first_baseline, bottom, size_scale, pitch,
         cur.append({"text": t["text"], "x": x, "fonts": t["fonts"],
                     "size": size, "color": t["color"], "sx": sx,
                     "underline": t.get("underline"), "sb": sp > 0,
+                    "synth_bold": t.get("synth_bold"),
                     "lsp": t.get("lsp") or 0.0,
                     # décalage de baseline (satellite), à l'échelle du rendu
                     "rise": (t.get("rise") or 0.0) * size_scale,

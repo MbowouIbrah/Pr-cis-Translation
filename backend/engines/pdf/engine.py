@@ -37,6 +37,64 @@ _log = logging.getLogger(__name__)
 
 # Caractères de contrôle parasites (hors \t \n \r) à purger du texte extrait.
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+# `char_flags` MuPDF (FZ_STEXT_FILLED | FZ_STEXT_STROKED) : glyphe rempli ET
+# contouré = gras synthétique (mode de rendu 2).
+_STEXT_FILLED_STROKED = 16 | 32
+
+
+def _glyph_key(c):
+    return (c["c"], round(c["origin"][0], 2), round(c["origin"][1], 2))
+
+
+def _synth_bold_keys(page):
+    """Glyphes d'un GRAS SYNTHÉTIQUE : police non grasse peinte remplie ET
+    contourée (mode 2) — seul `char_flags` le dit, ni le nom ni les flags de
+    police. Lu dans une passe À PART : `TEXT_COLLECT_STYLES` fusionne aussi les
+    glyphes identiques superposés (faux gras par surimpression), ce qui
+    mangerait un texte réécrit sur l'ancien au même endroit."""
+    keys = set()
+    raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE
+                        | fitz.TEXT_COLLECT_STYLES)
+    for block in raw.get("blocks", []):
+        for line in block.get("lines", ()):
+            for span in line.get("spans", ()):
+                if (not span.get("flags", 0) & 16
+                        and span.get("char_flags", 0) & _STEXT_FILLED_STROKED
+                        == _STEXT_FILLED_STROKED):
+                    keys.update(_glyph_key(c) for c in span.get("chars", ()))
+    return keys
+
+
+def _split_synth_bold(spans, keys):
+    """Marque `synth_bold` sur chaque span, en le scindant là où le gras
+    synthétique commence ou cesse (sans `TEXT_COLLECT_STYLES`, MuPDF ne coupe
+    pas un span au changement de mode de rendu)."""
+    for span in spans:
+        chars = span.get("chars", ())
+        marks = [_glyph_key(c) in keys for c in chars] if keys else []
+        if not any(marks) or all(marks):
+            yield dict(span, synth_bold=bool(marks) and all(marks))
+            continue
+        i = 0
+        while i < len(chars):
+            j = i
+            while j < len(chars) and marks[j] == marks[i]:
+                j += 1
+            part = chars[i:j]
+            bb = span["bbox"]
+            yield dict(span, chars=part, synth_bold=marks[i],
+                       origin=part[0]["origin"],
+                       bbox=(min(c["bbox"][0] for c in part), bb[1],
+                             max(c["bbox"][2] for c in part), bb[3]))
+            i = j
+
+
+def _render_mode(run, font):
+    """Mode de rendu PDF (`Tr`) d'un run peint avec `font` : 2 (remplissage +
+    contour) pour reproduire un gras synthétique avec la police même qui le
+    portait à la source, 0 sinon (une police de repli a sa vraie graisse)."""
+    synth = run.get("synth_bold")
+    return 2 if synth is not None and synth is font else 0
 
 # Ligne commençant par une puce ou un numéro d'item de liste.
 _LIST_RE = re.compile(
@@ -1037,6 +1095,7 @@ class PDFObjectEngine:
         # Le texte, lui, reste INTACT (les espaces de tête sont un signal pour
         # les titres à lettres espacées), et `origin` aussi (peinture source).
         raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+        synth = _synth_bold_keys(page)
         hidden = _hidden_chars(page, draw_els)
         spans = []
         for block in raw.get("blocks", []):
@@ -1044,7 +1103,7 @@ class PDFObjectEngine:
                 continue
             for line in block.get("lines", []):
                 direction = line.get("dir", (1, 0))
-                for span in line.get("spans", []):
+                for span in _split_synth_bold(line.get("spans", []), synth):
                     # Retire les caractères de CONTRÔLE (BEL \x07, etc.) : sans
                     # sens visuel, souvent superposés au texte (ex. « \x07 » sur
                     # « Note: »), ils créent des spans/lignes parasites qui
@@ -1077,6 +1136,7 @@ class PDFObjectEngine:
                                 ink_x0, ink_x1 = ix0, ix1
                     o = span.get("origin", (bb[0], bb[3]))
                     flags = span.get("flags", 0)
+                    synth_bold = bool(span.get("synth_bold"))
                     nchar = max(1, len(text.strip()))
                     spans.append({
                         "bbox": [bb[0], bb[1], bb[2], bb[3]],
@@ -1086,7 +1146,8 @@ class PDFObjectEngine:
                         "size": span.get("size", 0) or 0,
                         "color": _int_color_to_rgb(span.get("color", 0)),
                         "flags": flags,
-                        "bold": bool(flags & 16),
+                        "bold": bool(flags & 16) or synth_bold,
+                        "synth_bold": synth_bold,
                         "italic": bool(flags & 2),
                         "dir": list(direction),
                         "_gw": (bb[2] - bb[0]) / nchar,   # largeur de glyphe approx.
@@ -1771,6 +1832,7 @@ class PDFObjectEngine:
             "color": s["color"],
             "flags": s["flags"],
             "bold": s["bold"],
+            "synth_bold": s.get("synth_bold", False),
             "italic": s["italic"],
             "dir": s["dir"],
             # Décalage de baseline d'un SATELLITE (exposant/indice) par rapport
@@ -3159,6 +3221,14 @@ class PDFObjectEngine:
         clean = font_raw.split("+")[-1] if "+" in (font_raw or "") else (font_raw or "")
         variants = fonts.get(clean)
         if not variants:
+            # Le nom du span vient du programme de police, la clé du BaseFont
+            # du PDF : ils divergent parfois de la seule ponctuation
+            # (« OpenSans-Regular » / « Open Sans Regular »).
+            key = re.sub(r"[^0-9a-z]", "", clean.lower())
+            variants = next((v for k, v in fonts.items()
+                             if key and re.sub(r"[^0-9a-z]", "", k.lower()) == key),
+                            None)
+        if not variants:
             return None
         chars = [c for c in text if not c.isspace()]
         for f in variants:
@@ -3958,7 +4028,8 @@ class PDFObjectEngine:
                     mat = fitz.Matrix(deg)
                     if abs(sx - 1.0) > 0.001:
                         mat = fitz.Matrix(sx, 1) * mat
-                    tw.write_text(page, morph=(pt, mat))
+                    tw.write_text(page, morph=(pt, mat),
+                                  render_mode=_render_mode(r, gf))
                 except Exception:
                     pass
             x += reflow.text_width(ch, [(gf, None)], size, sx) + lsp
@@ -4060,6 +4131,11 @@ class PDFObjectEngine:
             except Exception:
                 lsp = 0.0
         return {"text": txt, "fonts": fonts,
+                # Gras synthétique reproduit À L'IDENTIQUE : même police
+                # embarquée, peinte remplie + contourée. Une police assortie,
+                # elle, a sa vraie graisse Bold (déjà choisie par `bold`).
+                "synth_bold": (primary if use_embedded and m.get("synth_bold")
+                               else None),
                 "size": size,
                 "color": tuple(m.get("color", (0, 0, 0))),
                 "underline": bool(m.get("underline")),
@@ -4220,9 +4296,10 @@ class PDFObjectEngine:
                     tw = fitz.TextWriter(page.rect, color=color)
                     tw.append(pt, ch, font=gf, fontsize=size)
                     if abs(sx - 1.0) > 0.001:
-                        tw.write_text(page, morph=(pt, fitz.Matrix(sx, 1)))
+                        tw.write_text(page, morph=(pt, fitz.Matrix(sx, 1)),
+                                      render_mode=_render_mode(r, gf))
                     else:
-                        tw.write_text(page)
+                        tw.write_text(page, render_mode=_render_mode(r, gf))
                 except Exception:
                     pass
                 x += reflow.text_width(ch, [(gf, None)], size, sx) + lsp
@@ -4237,9 +4314,10 @@ class PDFObjectEngine:
                 tw = fitz.TextWriter(page.rect, color=color)
                 tw.append(pt, chunk, font=chunk_font, fontsize=size)
                 if abs(sx - 1.0) > 0.001:
-                    tw.write_text(page, morph=(pt, fitz.Matrix(sx, 1)))
+                    tw.write_text(page, morph=(pt, fitz.Matrix(sx, 1)),
+                                  render_mode=_render_mode(r, chunk_font))
                 else:
-                    tw.write_text(page)
+                    tw.write_text(page, render_mode=_render_mode(r, chunk_font))
             except Exception:
                 pass
             return cx + reflow.text_width(chunk, [(chunk_font, None)], size, sx)
@@ -4281,6 +4359,9 @@ class PDFObjectEngine:
 
         # 1) Police source embarquée (fidélité exacte de police + glyphes).
         font = self._pick_font(run.get("font", ""), text)
+        # Gras synthétique : la police embarquée est la Regular → la repeindre
+        # remplie + contourée, comme la source.
+        rm = 2 if font is not None and run.get("synth_bold") else 0
         # 2) Sinon police base-14 (Helvetica/Times/Courier), comme objet Font
         #    pour bénéficier du même rendu mis à l'échelle.
         if font is None:
@@ -4294,7 +4375,7 @@ class PDFObjectEngine:
         if font is not None:
             try:
                 self._write_scaled(page, origin, text, font, size, color,
-                                   target_w, run.get("dir"))
+                                   target_w, run.get("dir"), render_mode=rm)
                 return
             except Exception:
                 pass
@@ -4307,7 +4388,7 @@ class PDFObjectEngine:
             pass
 
     def _write_scaled(self, page, origin, text, font, size, color, target_w,
-                      direction=None):
+                      direction=None, render_mode=0):
         """Écrit `text` à `origin` avec `font`. Texte horizontal : mis à
         l'échelle en x pour occuper exactement `target_w` (anti-dérive). Texte
         incliné/vertical (Étape C, `direction` ≠ (1,0)) : tourné par la matrice
@@ -4315,7 +4396,7 @@ class PDFObjectEngine:
         dx, dy = (direction or (1, 0))
         if abs(dy) > 0.01 or dx < 0:            # direction non horizontale
             self._write_rotated(page, origin, text, font, size, color,
-                                 target_w, dx, dy)
+                                 target_w, dx, dy, render_mode)
             return
 
         core = text.strip()
@@ -4340,7 +4421,7 @@ class PDFObjectEngine:
             pt = fitz.Point(origin[0] + lead_off, origin[1])
             tw = fitz.TextWriter(page.rect, color=color)
             tw.append(pt, core, font=font, fontsize=size)
-            tw.write_text(page)                 # rendu naturel (pas de distorsion)
+            tw.write_text(page, render_mode=render_mode)                 # rendu naturel (pas de distorsion)
             return
 
         pt = fitz.Point(origin)
@@ -4348,12 +4429,13 @@ class PDFObjectEngine:
         tw.append(pt, text, font=font, fontsize=size)
         sx = self._hscale(font, text, size, target_w)   # anti-dérive (ou None)
         if sx is not None:
-            tw.write_text(page, morph=(pt, fitz.Matrix(sx, 1)))
+            tw.write_text(page, morph=(pt, fitz.Matrix(sx, 1)),
+                          render_mode=render_mode)
         else:
-            tw.write_text(page)
+            tw.write_text(page, render_mode=render_mode)
 
     def _write_rotated(self, page, origin, text, font, size, color,
-                       target_w, dx, dy):
+                       target_w, dx, dy, render_mode=0):
         """Rendu du texte INCLINÉ / VERTICAL (Étape C).
 
         Rotation : `dir` de PyMuPDF est en espace page (y vers le BAS) alors que
@@ -4393,7 +4475,7 @@ class PDFObjectEngine:
         mat = fitz.Matrix(deg)
         if sx is not None:
             mat = fitz.Matrix(sx, 1) * mat      # scale (le long de l'axe) puis rotation
-        tw.write_text(page, morph=(pt, mat))
+        tw.write_text(page, morph=(pt, mat), render_mode=render_mode)
 
     @staticmethod
     def _hscale(font, text, size, target_w):

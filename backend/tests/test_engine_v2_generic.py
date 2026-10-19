@@ -891,6 +891,88 @@ def _p30_rectangles_troues(eng):
              f"(trou, cadre) = {rendu}")]
 
 
+def _p31_gras_synthetique(eng):
+    """GRAS SYNTHÉTIQUE : une police Regular peinte en mode 2 (remplissage +
+    contour) — l'éditeur n'avait pas la graisse Bold. La police ne dit rien :
+    seul le mode de rendu porte le gras. Il doit être lu à l'extraction et
+    REPRODUIT au rendu, traduit ou non, avec le même typeface (pas une Bold de
+    repli d'une autre famille)."""
+    ttf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                       "fonts", "opensans-Regular.ttf")
+    doc = fitz.open()
+    pg = doc.new_page(width=320, height=140)
+    pg.insert_font(fontname="FR", fontfile=ttf)
+    pg.insert_text((20, 40), "Titre en gras", fontname="FR", fontsize=13,
+                   render_mode=2, border_width=0.04)
+    pg.insert_text((20, 90), "Corps ordinaire", fontname="FR", fontsize=13)
+    # Même ligne, même police : étiquette grasse puis valeur maigre.
+    pg.insert_text((20, 125), "Nom :", fontname="FR", fontsize=11,
+                   render_mode=2, border_width=0.04)
+    x = 20 + fitz.Font(fontfile=ttf).text_length("Nom : ", fontsize=11)
+    pg.insert_text((x, 125), "Dupont", fontname="FR", fontsize=11)
+    doc = fitz.open("pdf", doc.tobytes())
+    pg = doc[0]
+    pd = eng.extract_page_data(doc, 0, pg, embed_images=False)
+    paras = [e for e in pd["elements"] if e.get("type") == "paragraph"]
+
+    def _gras(frag):
+        runs = [r for p in paras if frag in (p.get("text") or "")
+                for ln in p.get("lines", ()) for r in ln.get("runs", ())]
+        return bool(runs) and all(r.get("bold") for r in runs)
+
+    res = [("P31  piège armé (police Regular, gras par le seul mode 2)",
+            not any(s["flags"] & 16 for b in pg.get_text("dict")["blocks"]
+                    for ln in b.get("lines", ()) for s in ln["spans"]), ""),
+           ("P31  le gras synthétique est LU", _gras("Titre en gras"), ""),
+           ("P31  le corps Regular n'est PAS promu gras",
+            not _gras("Corps ordinaire"), ""),
+           ("P31  même ligne : l'étiquette grasse, la valeur maigre",
+            [(r["text"].strip(), bool(r.get("bold"))) for p in paras
+             if "Dupont" in (p.get("text") or "")
+             for ln in p.get("lines", ()) for r in ln.get("runs", ())
+             if r["text"].strip()] == [("Nom :", True), ("Dupont", False)],
+            str([(r["text"], r.get("bold")) for p in paras
+                 for ln in p.get("lines", ()) for r in ln.get("runs", ())]))]
+
+    def _styles(out):
+        st = {}
+        for b in out[0].get_text("rawdict", flags=fitz.TEXT_COLLECT_STYLES
+                                 )["blocks"]:
+            for ln in b.get("lines", ()):
+                for s in ln["spans"]:
+                    t = "".join(c["c"] for c in s["chars"]).strip()
+                    if t:
+                        st[t] = (s["font"], s.get("char_flags", 0))
+        return st
+
+    eng._build_fonts({"fonts": eng._extract_fonts(doc)})
+    FAUX = {"Titre en gras": "Bold title", "Corps ordinaire": "Plain body"}
+    for traduit in (False, True):
+        for p in paras:
+            tagged, meta = tagging.tag_paragraph(p)
+            p["tr_segments"] = meta
+            cle = (p.get("text") or "").strip()
+            p["tr_tagged"] = (f"[[0]]{FAUX[cle]}[[/0]]"
+                              if traduit and cle in FAUX else tagged)
+        out = fitz.open()
+        eng.render_page_into(out, pd, draw_borders=False, translated=traduit)
+        st = _styles(out)
+        def _de(phrase):
+            # Le rendu peut poser la ligne mot à mot : un style par mot.
+            vus = [v for t, v in st.items() if t in phrase.split() or t == phrase]
+            return vus[0] if vus and len(set(vus)) == 1 else None
+        titre = _de("Bold title" if traduit else "Titre en gras")
+        corps = _de("Plain body" if traduit else "Corps ordinaire")
+        quoi = "traduit" if traduit else "non traduit"
+        res.append((f"P31  rendu {quoi} : le titre reste gras (rempli + "
+                    "contour, même typeface)",
+                    bool(titre) and titre[1] & 48 == 48
+                    and "bold" not in titre[0].lower(), f"{titre} / {st}"))
+        res.append((f"P31  rendu {quoi} : le corps reste maigre",
+                    bool(corps) and not corps[1] & 32, f"{corps}"))
+    return res
+
+
 def run():
     scratch = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "_generic_tmp")
@@ -1475,7 +1557,8 @@ def run():
         ok(nom, bon, detail)
     for nom, bon, detail in (_p28_texte_masque(eng)
                              + _p29_sous_ensembles_homonymes(eng)
-                             + _p30_rectangles_troues(eng)):
+                             + _p30_rectangles_troues(eng)
+                             + _p31_gras_synthetique(eng)):
         ok(nom, bon, detail)
 
     # ── Rapport ─────────────────────────────────────────────────────────────
