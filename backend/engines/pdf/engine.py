@@ -43,7 +43,8 @@ _STEXT_FILLED_STROKED = 16 | 32
 
 
 def _glyph_key(c):
-    return (c["c"], round(c["origin"][0], 2), round(c["origin"][1], 2))
+    """Identité d'un glyphe posé, commune à `rawdict` et au device MuPDF."""
+    return (c["c"], round(c["origin"][0], 1), round(c["origin"][1], 1))
 
 
 def _synth_bold_keys(page):
@@ -65,15 +66,71 @@ def _synth_bold_keys(page):
     return keys
 
 
-def _split_synth_bold(spans, keys):
-    """Marque `synth_bold` sur chaque span, en le scindant là où le gras
-    synthétique commence ou cesse (sans `TEXT_COLLECT_STYLES`, MuPDF ne coupe
-    pas un span au changement de mode de rendu)."""
+def _synth_italic_keys(page):
+    """Glyphe -> pente d'un ITALIQUE SYNTHÉTIQUE : police droite penchée par
+    la matrice de texte (Tm cisaillé). `rawdict` ne garde que la direction de
+    ligne ; seule la matrice de rendu (`trm` × `ctm`, lue au device MuPDF) dit
+    la pente. Pente = tan de l'écart à l'orthogonale entre les axes x et y du
+    glyphe, positive penchée vers l'avant ; nulle pour un texte droit, même
+    tourné ou étiré. Vide si le device est indisponible."""
+    if _mu is None:
+        return {}
+    pentes = {}
+
+    class _Dev(_mu.FzDevice2):
+        def __init__(self):
+            super().__init__()
+            self.use_virtual_fill_text()
+            self.use_virtual_stroke_text()
+
+        def _text(self, text, ctm):
+            m = _mu.FzMatrix(ctm)
+            sp = text.head
+            while sp:
+                t = _mu.fz_concat(_mu.FzMatrix(sp.trm), m)
+                n2 = t.a * t.a + t.b * t.b
+                # Axe y image du glyphe = (c, d) ; sa composante le long de
+                # l'axe x, rapportée à la chasse, est la pente (repère page
+                # y vers le bas : l'avant d'un glyphe droit est en -y).
+                k = (t.a * t.c + t.b * t.d) / n2 if n2 else 0.0
+                if abs(k) > 1e-3:
+                    w = _mu.FzTextSpan(sp)
+                    for i in range(sp.len):
+                        it = w.items(i)
+                        if it.ucs < 0:
+                            continue
+                        q = _mu.fz_transform_point(_mu.FzPoint(it.x, it.y), m)
+                        pentes[_glyph_key({"c": chr(it.ucs),
+                                           "origin": (q.x, q.y)})] = round(k, 3)
+                sp = sp.next
+
+        def fill_text(self, ctx, text, ctm, *args):
+            self._text(text, ctm)
+
+        def stroke_text(self, ctx, text, stroke, ctm, *args):
+            self._text(text, ctm)
+
+    try:
+        _mu.fz_run_page(page.this, _Dev(),
+                        _mu.FzMatrix(*page.derotation_matrix), _mu.FzCookie())
+    except Exception as exc:
+        _log.warning("pente du texte non relevée (page %s) : %s",
+                     getattr(page, "number", "?"), exc)
+        return {}
+    return pentes
+
+
+def _split_synth(spans, bold_keys, italic_pentes):
+    """Marque `synth_bold` / `synth_italic` (pente) sur chaque span, en le
+    scindant là où l'un d'eux change : MuPDF ne coupe pas un span au
+    changement de mode de rendu ni de matrice de texte."""
     for span in spans:
         chars = span.get("chars", ())
-        marks = [_glyph_key(c) in keys for c in chars] if keys else []
-        if not any(marks) or all(marks):
-            yield dict(span, synth_bold=bool(marks) and all(marks))
+        marks = [(_glyph_key(c) in bold_keys,
+                  italic_pentes.get(_glyph_key(c), 0.0)) for c in chars]
+        if len(set(marks)) <= 1:
+            b, k = marks[0] if marks else (False, 0.0)
+            yield dict(span, synth_bold=b, synth_italic=k)
             continue
         i = 0
         while i < len(chars):
@@ -82,8 +139,8 @@ def _split_synth_bold(spans, keys):
                 j += 1
             part = chars[i:j]
             bb = span["bbox"]
-            yield dict(span, chars=part, synth_bold=marks[i],
-                       origin=part[0]["origin"],
+            yield dict(span, chars=part, synth_bold=marks[i][0],
+                       synth_italic=marks[i][1], origin=part[0]["origin"],
                        bbox=(min(c["bbox"][0] for c in part), bb[1],
                              max(c["bbox"][2] for c in part), bb[3]))
             i = j
@@ -95,6 +152,25 @@ def _render_mode(run, font):
     portait à la source, 0 sinon (une police de repli a sa vraie graisse)."""
     synth = run.get("synth_bold")
     return 2 if synth is not None and synth is font else 0
+
+
+def _shear(run, font):
+    """Pente d'un italique synthétique à reproduire en peignant avec `font` :
+    celle de la source si c'est la police même qui la portait, 0 sinon (une
+    police de repli choisie italique a déjà sa vraie forme penchée)."""
+    synth = run.get("synth_italic")
+    return synth[1] if synth and synth[0] is font else 0.0
+
+
+def _morph(pt, shear, mat=None):
+    """`morph` de `write_text` : cisaillement d'italique appliqué AVANT
+    l'échelle et la rotation de `mat` ; None quand il n'y a rien à
+    transformer. `morph` agit dans l'espace PDF (y vers le haut) : la pente
+    lue (positive = vers l'avant) s'y reporte telle quelle."""
+    if shear:
+        cis = fitz.Matrix(1, 0, shear, 1, 0, 0)
+        mat = cis if mat is None else cis * mat
+    return None if mat is None else (pt, mat)
 
 # Ligne commençant par une puce ou un numéro d'item de liste.
 _LIST_RE = re.compile(
@@ -1095,7 +1171,7 @@ class PDFObjectEngine:
         # Le texte, lui, reste INTACT (les espaces de tête sont un signal pour
         # les titres à lettres espacées), et `origin` aussi (peinture source).
         raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
-        synth = _synth_bold_keys(page)
+        synth_b, synth_i = _synth_bold_keys(page), _synth_italic_keys(page)
         hidden = _hidden_chars(page, draw_els)
         spans = []
         for block in raw.get("blocks", []):
@@ -1103,7 +1179,8 @@ class PDFObjectEngine:
                 continue
             for line in block.get("lines", []):
                 direction = line.get("dir", (1, 0))
-                for span in _split_synth_bold(line.get("spans", []), synth):
+                for span in _split_synth(line.get("spans", []), synth_b,
+                                         synth_i):
                     # Retire les caractères de CONTRÔLE (BEL \x07, etc.) : sans
                     # sens visuel, souvent superposés au texte (ex. « \x07 » sur
                     # « Note: »), ils créent des spans/lignes parasites qui
@@ -1137,6 +1214,9 @@ class PDFObjectEngine:
                     o = span.get("origin", (bb[0], bb[3]))
                     flags = span.get("flags", 0)
                     synth_bold = bool(span.get("synth_bold"))
+                    # Une police déjà italique ne se repenche pas.
+                    synth_italic = (0.0 if flags & 2
+                                    else span.get("synth_italic") or 0.0)
                     nchar = max(1, len(text.strip()))
                     spans.append({
                         "bbox": [bb[0], bb[1], bb[2], bb[3]],
@@ -1148,7 +1228,8 @@ class PDFObjectEngine:
                         "flags": flags,
                         "bold": bool(flags & 16) or synth_bold,
                         "synth_bold": synth_bold,
-                        "italic": bool(flags & 2),
+                        "italic": bool(flags & 2) or bool(synth_italic),
+                        "synth_italic": synth_italic,
                         "dir": list(direction),
                         "_gw": (bb[2] - bb[0]) / nchar,   # largeur de glyphe approx.
                         "_base": o[1],
@@ -1834,6 +1915,7 @@ class PDFObjectEngine:
             "bold": s["bold"],
             "synth_bold": s.get("synth_bold", False),
             "italic": s["italic"],
+            "synth_italic": s.get("synth_italic", 0.0),
             "dir": s["dir"],
             # Décalage de baseline d'un SATELLITE (exposant/indice) par rapport
             # à sa ligne hôte — 0 pour un run ordinaire. Voyage jusqu'au rendu.
@@ -4028,7 +4110,7 @@ class PDFObjectEngine:
                     mat = fitz.Matrix(deg)
                     if abs(sx - 1.0) > 0.001:
                         mat = fitz.Matrix(sx, 1) * mat
-                    tw.write_text(page, morph=(pt, mat),
+                    tw.write_text(page, morph=_morph(pt, _shear(r, gf), mat),
                                   render_mode=_render_mode(r, gf))
                 except Exception:
                     pass
@@ -4136,6 +4218,10 @@ class PDFObjectEngine:
                 # elle, a sa vraie graisse Bold (déjà choisie par `bold`).
                 "synth_bold": (primary if use_embedded and m.get("synth_bold")
                                else None),
+                # Italique synthétique : même police, même pente de la source.
+                "synth_italic": ((primary, m["synth_italic"])
+                                 if use_embedded and m.get("synth_italic")
+                                 else None),
                 "size": size,
                 "color": tuple(m.get("color", (0, 0, 0))),
                 "underline": bool(m.get("underline")),
@@ -4295,11 +4381,10 @@ class PDFObjectEngine:
                     pt = fitz.Point(x, base)
                     tw = fitz.TextWriter(page.rect, color=color)
                     tw.append(pt, ch, font=gf, fontsize=size)
-                    if abs(sx - 1.0) > 0.001:
-                        tw.write_text(page, morph=(pt, fitz.Matrix(sx, 1)),
-                                      render_mode=_render_mode(r, gf))
-                    else:
-                        tw.write_text(page, render_mode=_render_mode(r, gf))
+                    tw.write_text(page, morph=_morph(
+                        pt, _shear(r, gf),
+                        fitz.Matrix(sx, 1) if abs(sx - 1.0) > 0.001 else None),
+                        render_mode=_render_mode(r, gf))
                 except Exception:
                     pass
                 x += reflow.text_width(ch, [(gf, None)], size, sx) + lsp
@@ -4313,11 +4398,10 @@ class PDFObjectEngine:
             try:
                 tw = fitz.TextWriter(page.rect, color=color)
                 tw.append(pt, chunk, font=chunk_font, fontsize=size)
-                if abs(sx - 1.0) > 0.001:
-                    tw.write_text(page, morph=(pt, fitz.Matrix(sx, 1)),
-                                  render_mode=_render_mode(r, chunk_font))
-                else:
-                    tw.write_text(page, render_mode=_render_mode(r, chunk_font))
+                tw.write_text(page, morph=_morph(
+                    pt, _shear(r, chunk_font),
+                    fitz.Matrix(sx, 1) if abs(sx - 1.0) > 0.001 else None),
+                    render_mode=_render_mode(r, chunk_font))
             except Exception:
                 pass
             return cx + reflow.text_width(chunk, [(chunk_font, None)], size, sx)
@@ -4362,6 +4446,7 @@ class PDFObjectEngine:
         # Gras synthétique : la police embarquée est la Regular → la repeindre
         # remplie + contourée, comme la source.
         rm = 2 if font is not None and run.get("synth_bold") else 0
+        shear = (run.get("synth_italic") or 0.0) if font is not None else 0.0
         # 2) Sinon police base-14 (Helvetica/Times/Courier), comme objet Font
         #    pour bénéficier du même rendu mis à l'échelle.
         if font is None:
@@ -4375,7 +4460,8 @@ class PDFObjectEngine:
         if font is not None:
             try:
                 self._write_scaled(page, origin, text, font, size, color,
-                                   target_w, run.get("dir"), render_mode=rm)
+                                   target_w, run.get("dir"), render_mode=rm,
+                                   shear=shear)
                 return
             except Exception:
                 pass
@@ -4388,7 +4474,7 @@ class PDFObjectEngine:
             pass
 
     def _write_scaled(self, page, origin, text, font, size, color, target_w,
-                      direction=None, render_mode=0):
+                      direction=None, render_mode=0, shear=0.0):
         """Écrit `text` à `origin` avec `font`. Texte horizontal : mis à
         l'échelle en x pour occuper exactement `target_w` (anti-dérive). Texte
         incliné/vertical (Étape C, `direction` ≠ (1,0)) : tourné par la matrice
@@ -4396,7 +4482,7 @@ class PDFObjectEngine:
         dx, dy = (direction or (1, 0))
         if abs(dy) > 0.01 or dx < 0:            # direction non horizontale
             self._write_rotated(page, origin, text, font, size, color,
-                                 target_w, dx, dy, render_mode)
+                                 target_w, dx, dy, render_mode, shear)
             return
 
         core = text.strip()
@@ -4421,21 +4507,20 @@ class PDFObjectEngine:
             pt = fitz.Point(origin[0] + lead_off, origin[1])
             tw = fitz.TextWriter(page.rect, color=color)
             tw.append(pt, core, font=font, fontsize=size)
-            tw.write_text(page, render_mode=render_mode)                 # rendu naturel (pas de distorsion)
+            tw.write_text(page, morph=_morph(pt, shear),
+                          render_mode=render_mode)                 # rendu naturel (pas de distorsion)
             return
 
         pt = fitz.Point(origin)
         tw = fitz.TextWriter(page.rect, color=color)
         tw.append(pt, text, font=font, fontsize=size)
         sx = self._hscale(font, text, size, target_w)   # anti-dérive (ou None)
-        if sx is not None:
-            tw.write_text(page, morph=(pt, fitz.Matrix(sx, 1)),
-                          render_mode=render_mode)
-        else:
-            tw.write_text(page, render_mode=render_mode)
+        tw.write_text(page, morph=_morph(
+            pt, shear, fitz.Matrix(sx, 1) if sx is not None else None),
+            render_mode=render_mode)
 
     def _write_rotated(self, page, origin, text, font, size, color,
-                       target_w, dx, dy, render_mode=0):
+                       target_w, dx, dy, render_mode=0, shear=0.0):
         """Rendu du texte INCLINÉ / VERTICAL (Étape C).
 
         Rotation : `dir` de PyMuPDF est en espace page (y vers le BAS) alors que
@@ -4475,7 +4560,8 @@ class PDFObjectEngine:
         mat = fitz.Matrix(deg)
         if sx is not None:
             mat = fitz.Matrix(sx, 1) * mat      # scale (le long de l'axe) puis rotation
-        tw.write_text(page, morph=(pt, mat), render_mode=render_mode)
+        tw.write_text(page, morph=_morph(pt, shear, mat),
+                      render_mode=render_mode)
 
     @staticmethod
     def _hscale(font, text, size, target_w):

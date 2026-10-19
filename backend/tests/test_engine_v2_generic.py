@@ -35,6 +35,7 @@ import fitz
 import racine  # noqa: F401
 from engines.pdf.engine import PDFObjectEngine        # noqa: E402
 from engines.pdf import tagging                        # noqa: E402
+from engines.pdf import engine as engine_mod           # noqa: E402
 
 # Volontairement DIFFÉRENT des documents de test : autre police, autres corps,
 # autres couleurs, autres marges.
@@ -973,6 +974,94 @@ def _p31_gras_synthetique(eng):
     return res
 
 
+def _p32_italique_synthetique(eng):
+    """ITALIQUE SYNTHÉTIQUE : une police droite penchée par la matrice de
+    texte (Tm cisaillé) — l'éditeur n'avait pas l'Italic. Seule la matrice
+    porte l'italique ; il doit être lu et REPRODUIT (même pente, même
+    typeface), traduit ou non, sans gagner le voisin droit de la même ligne."""
+    ttf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                       "fonts", "opensans-Regular.ttf")
+    pente = 0.21256
+    # `morph` agit dans l'espace PDF (y vers le haut) : +pente = penché vers
+    # l'avant, comme un vrai italique (Tm « 1 0 0.21 1 » des sources réelles).
+    cis = fitz.Matrix(1, 0, pente, 1, 0, 0)
+    doc = fitz.open()
+    pg = doc.new_page(width=320, height=140)
+    pg.insert_font(fontname="FR", fontfile=ttf)
+    pt = fitz.Point(20, 40)
+    pg.insert_text(pt, "Note en italique", fontname="FR", fontsize=13,
+                   morph=(pt, cis))
+    pg.insert_text((20, 90), "Corps droit", fontname="FR", fontsize=13)
+    pt = fitz.Point(20, 125)
+    pg.insert_text(pt, "Vu :", fontname="FR", fontsize=11, morph=(pt, cis))
+    x = 20 + fitz.Font(fontfile=ttf).text_length("Vu : ", fontsize=11)
+    pg.insert_text((x, 125), "Durand", fontname="FR", fontsize=11)
+    doc = fitz.open("pdf", doc.tobytes())
+    pg = doc[0]
+    pd = eng.extract_page_data(doc, 0, pg, embed_images=False)
+    paras = [e for e in pd["elements"] if e.get("type") == "paragraph"]
+
+    def _runs(frag):
+        return [r for p in paras if frag in (p.get("text") or "")
+                for ln in p.get("lines", ()) for r in ln.get("runs", ())
+                if r["text"].strip()]
+
+    res = [("P32  piège armé (police droite, italique par la seule matrice)",
+            not any(s["flags"] & 2 for b in pg.get_text("dict")["blocks"]
+                    for ln in b.get("lines", ()) for s in ln["spans"]), ""),
+           ("P32  pente lue vers l'AVANT (positive), comme un vrai italique",
+            bool(engine_mod._synth_italic_keys(pg))
+            and all(abs(k - pente) < 0.01
+                    for k in engine_mod._synth_italic_keys(pg).values()),
+            str(sorted(set(engine_mod._synth_italic_keys(pg).values())))),
+           ("P32  l'italique synthétique est LU",
+            bool(_runs("Note en")) and all(r.get("italic")
+                                            for r in _runs("Note en")), ""),
+           ("P32  le corps droit n'est PAS promu italique",
+            not any(r.get("italic") for r in _runs("Corps droit")), ""),
+           ("P32  même ligne : l'étiquette penchée, la valeur droite",
+            [(r["text"].strip(), bool(r.get("italic")))
+             for r in _runs("Durand")] == [("Vu :", True), ("Durand", False)],
+            str([(r["text"], r.get("italic")) for r in _runs("Durand")]))]
+
+    eng._build_fonts({"fonts": eng._extract_fonts(doc)})
+    FAUX = {"Note en italique": "Italic note", "Corps droit": "Upright body"}
+    for traduit in (False, True):
+        for p in paras:
+            tagged, meta = tagging.tag_paragraph(p)
+            p["tr_segments"] = meta
+            cle = (p.get("text") or "").strip()
+            p["tr_tagged"] = (f"[[0]]{FAUX[cle]}[[/0]]"
+                              if traduit and cle in FAUX else tagged)
+        out = fitz.open()
+        eng.render_page_into(out, pd, draw_borders=False, translated=traduit)
+        pentes = engine_mod._synth_italic_keys(out[0])
+        # Glyphe -> (police, baseline) ; une phrase = les glyphes de sa ligne.
+        glyphes, lignes = {}, {}
+        for b in out[0].get_text("rawdict")["blocks"]:
+            for ln in b.get("lines", ()):
+                txt = "".join(c["c"] for sp in ln["spans"]
+                              for c in sp["chars"]).strip()
+                lignes[txt] = [engine_mod._glyph_key(c) for sp in ln["spans"]
+                               for c in sp["chars"] if c["c"].strip()]
+                for sp in ln["spans"]:
+                    for c in sp["chars"]:
+                        glyphes[engine_mod._glyph_key(c)] = sp["font"]
+        titre = lignes.get("Italic note" if traduit else "Note en italique")
+        corps = lignes.get("Upright body" if traduit else "Corps droit")
+        quoi = "traduit" if traduit else "non traduit"
+        res.append((f"P32  rendu {quoi} : le titre reste penché (même pente, "
+                    "même typeface)",
+                    bool(titre) and all(abs(pentes.get(k, 0) - pente) < 0.01
+                                        and "italic" not in glyphes[k].lower()
+                                        for k in titre),
+                    f"{[(k, pentes.get(k), glyphes[k]) for k in (titre or [])[:2]]}"
+                    f" / {list(lignes)}"))
+        res.append((f"P32  rendu {quoi} : le corps reste droit",
+                    bool(corps) and not any(pentes.get(k) for k in corps), ""))
+    return res
+
+
 def run():
     scratch = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "_generic_tmp")
@@ -1558,7 +1647,8 @@ def run():
     for nom, bon, detail in (_p28_texte_masque(eng)
                              + _p29_sous_ensembles_homonymes(eng)
                              + _p30_rectangles_troues(eng)
-                             + _p31_gras_synthetique(eng)):
+                             + _p31_gras_synthetique(eng)
+                             + _p32_italique_synthetique(eng)):
         ok(nom, bon, detail)
 
     # ── Rapport ─────────────────────────────────────────────────────────────

@@ -43,15 +43,17 @@ def style_sig(run):
             round(float(run.get("size", 0) or 0), 1), col,
             bool(run.get("underline")),
             round(float(run.get("rise", 0) or 0), 1),
-            bool(run.get("synth_bold")))
+            bool(run.get("synth_bold")), run.get("synth_italic") or 0.0)
 
 
 def _sig_to_meta(sig):
     """Signature -> dict de style lisible (pour la table `segments`)."""
-    font, bold, italic, size, color, underline, rise, synth_bold = sig
+    (font, bold, italic, size, color, underline, rise, synth_bold,
+     synth_italic) = sig
     return {"font": font, "bold": bold, "italic": italic,
             "size": size, "color": list(color), "underline": underline,
-            "rise": rise, "synth_bold": synth_bold}
+            "rise": rise, "synth_bold": synth_bold,
+            "synth_italic": synth_italic}
 
 
 # ── Reconstruction du texte balisé d'un paragraphe ────────────────────────────
