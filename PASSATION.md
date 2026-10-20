@@ -1,7 +1,7 @@
 # PASSATION
 
 ## 1. Objectif en cours
-Résolution des polices non embarquées dans le moteur PDF (téléchargement à l'identique, sinon clone métrique, sinon police la plus proche), branche `feat/polices-telechargement-substitution`, moteur 1.0.11.
+Résolution des polices non embarquées dans le moteur PDF (téléchargement à l'identique, sinon clone métrique, sinon police la plus proche), branche `feat/polices-telechargement-substitution`, moteur 1.0.12.
 
 ## 2. Fait
 - Ticket CD26052553710 : points 1–7 commités (point 8 laissé de côté à la demande).
@@ -21,8 +21,8 @@ Résolution des polices non embarquées dans le moteur PDF (téléchargement à 
 
 ## 4. Reste à faire
 1. FAIT (1.0.11) : liste blanche `backend/fonts/google_familles.txt` (1950 familles, seules interrogées) ; rendu fait réseau dégradé non conservé (`render_cache.marque_polices()` → `store_render(..., marque)`) ; polices système désactivées par défaut (`PRECIS_FONT_SYSTEM=1` pour les activer). test_polices 23/23.
-2. Mineurs d'audit non traités : licences `OS/2.fsType`, « Arial Black » / « Helvetica-Narrow » mal analysés, `absences.json` sans borne ni plafond de téléchargements par document, chemin `translations/` dupliqué (`polices.py:46` vs `app/config.py:128`).
-3. Améliorer « proche » sur catalogue pauvre (ProximaNova → PT Serif, mauvais : sans→serif).
+2. FAIT (1.0.12) : `fsType=2` exclu de l'index ; « Arial Black », « Helvetica-Narrow » et autres chasses gardés dans la famille ; `absences.json` purgé et borné à 5000, plafond de 60 téléchargements par heure (refus noté comme dégradation) ; `PRECIS_FONTS_CACHE` posé par `app/config.py`.
+3. FAIT (1.0.12) : `categorie()` (catalogue Google `Famille	Catégorie`, puis marques du nom) sert aux fiches locales (panose souvent muet) et à la cible ; un changement de catégorie coûte 5.0 dans « proche ». test_polices 28/28, générique 100/100.
 4. Pousser la branche / PR vers main.
 
 ## 5. Pièges / contexte

@@ -21,6 +21,7 @@ polices, les mesures viennent du PDF traité.
 """
 from __future__ import annotations
 
+import collections
 import io
 import json
 import logging
@@ -43,6 +44,8 @@ FONTS_DIR = os.path.join(_BACKEND, "fonts")
 # Pré-chargé par `scripts/precharger_polices.py` à la construction de l'image.
 CATALOGUE_DIR = os.path.join(FONTS_DIR, "catalogue")
 # Sur le volume persistant : un téléchargement survit à la reconstruction.
+# Défaut des scripts hors application : l'app pose PRECIS_FONTS_CACHE depuis
+# son TRANSLATIONS_DIR (app/config.py), seule source de vérité.
 CACHE_DIR = os.path.join(_BACKEND, "translations", "_polices")
 
 _CATALOGUE_NORM = os.path.normcase(os.path.abspath(CATALOGUE_DIR))
@@ -65,6 +68,8 @@ CLONES = {
     "calibri": ("Carlito",),
     "cambria": ("Caladea",),
     "georgia": ("Gelasio",),
+    "arialnarrow": ("Liberation Sans Narrow",),
+    "helveticanarrow": ("Liberation Sans Narrow", "Arial Narrow"),
 }
 
 # Base-14 et leurs alias de générateurs : le nom porte la famille.
@@ -77,11 +82,53 @@ _POIDS = (("extralight", 200), ("ultralight", 200), ("semibold", 600),
           ("black", 900), ("heavy", 900), ("demi", 600), ("bold", 700),
           ("book", 400), ("regular", 400), ("normal", 400), ("roman", 400))
 _MOTS_STYLE = {m for m, _ in _POIDS} | {"italic", "oblique", "it"}
+# La chasse fait partie de la FAMILLE (« PT Sans Narrow », « Roboto
+# Condensed » sont des familles à part), jamais du style.
+_MOTS_CHASSE = {"narrow", "condensed", "cond", "compressed", "extended",
+                "expanded", "wide"}
+# Familles hors catalogue Google dont le nom finit par un mot de graisse.
+_FAMILLES_A_GRAISSE = {"arialblack", "segoeuiblack", "segoeuisemibold",
+                       "franklingothicmedium", "franklingothicbook",
+                       "franklingothicdemi", "franklingothicheavy"}
 
 
 def cle(famille):
     """Clé de comparaison d'un nom de famille : minuscules, lettres et chiffres."""
     return re.sub(r"[^0-9a-z]", "", (famille or "").lower())
+
+
+def _famille_connue(mots):
+    k = cle(" ".join(mots))
+    return k in CLONES or k in _FAMILLES_A_GRAISSE or k in familles_google()
+
+
+# Marques typographiques du nom, quand ni le fichier ni le catalogue ne disent
+# la catégorie (famille propriétaire non embarquée).
+_MARQUES_SERIF = ("serif", "garamond", "baskerville", "caslon", "bodoni",
+                  "didot", "palatino", "georgia", "times", "cambria", "minion",
+                  "century", "antiqua", "plantin", "sabon", "bembo", "jenson",
+                  "utopia", "charter", "bookman", "goudy", "perpetua",
+                  "constantia", "slab", "mincho", "roman")
+_MARQUES_SANS = ("sans", "grotesk", "grotesque", "gothic", "helvetica",
+                 "arial", "gotham", "avenir", "futura", "frutiger", "myriad",
+                 "verdana", "tahoma", "calibri", "segoe", "univers", "proxima",
+                 "akzidenz", "trebuchet", "corbel", "candara", "gill", "optima",
+                 "din", "brandon", "circular", "neue")
+
+
+def categorie(nom):
+    """True serif, False sans, None inconnu : catalogue Google d'abord, puis
+    les marques du nom (« sans » l'emporte : « PT Sans » n'est pas serif)."""
+    famille = analyser_nom(nom)[0] if nom else ""
+    g = familles_google().get(cle(famille))
+    if g in ("Serif", "Sans Serif"):
+        return g == "Serif"
+    n = cle(famille or nom or "")
+    if any(m in n for m in _MARQUES_SANS):
+        return False
+    if any(m in n for m in _MARQUES_SERIF):
+        return True
+    return None
 
 
 def analyser_nom(font_raw):
@@ -96,10 +143,17 @@ def analyser_nom(font_raw):
     style = re.sub(r"(PSMT|PS|MT)$", "", style)
     mots = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])"
                   r"|(?<=[a-zA-Z])(?=[0-9])|[_\s]+", " ", base).split()
+    # Chasse ou graisse qui appartient au nom (« Helvetica-Narrow »,
+    # « Arial-Black ») : rapatriée dans la famille.
+    jetons = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+", style)
+    while jetons and (jetons[0].lower() in _MOTS_CHASSE
+                      or _famille_connue(mots + [jetons[0]])):
+        mots.append(jetons.pop(0))
+        style = "".join(jetons)
     # Style collé au nom sans séparateur (« Open Sans Bold », « ArialBold »).
-    # « Roman » fait partie du nom de « Times New Roman ».
+    # « Roman » fait partie de « Times New Roman », « Black » d'« Arial Black ».
     while (len(mots) > 1 and mots[-1].lower() in _MOTS_STYLE
-           and cle(" ".join(mots)) not in CLONES):
+           and not _famille_connue(mots)):
         style = mots.pop() + style
     famille = _ALIAS.get(cle(" ".join(mots)), " ".join(mots))
     s = style.lower()
@@ -141,10 +195,11 @@ def _decrire(path):
                 and os2.panose.bFamilyType == 2:
             st = os2.panose.bSerifStyle
             serif = True if 2 <= st <= 10 else (False if 11 <= st <= 13 else None)
-        if serif is None:
-            n = famille.lower()
-            serif = False if "sans" in n else (True if "serif" in n else None)
+        if serif is None:                 # panose muet : catalogue, puis nom
+            serif = categorie(famille)
         xh = getattr(os2, "sxHeight", 0) if os2 is not None else 0
+        # fsType = 2 : « Restricted License », incorporation interdite.
+        fs = int(getattr(os2, "fsType", 0) or 0) if os2 is not None else 0
         return {
             "famille": famille, "cle": cle(famille),
             "poids": int(os2.usWeightClass) if os2 is not None else 400,
@@ -154,6 +209,7 @@ def _decrire(path):
             "xh": round(xh / upm, 4) if xh else None,
             "francais": all(ord(c) in cmap for c in _FRANCAIS),
             "adv": adv,
+            "integrable": (fs & 0x000F) != 0x0002,
         }
     except Exception:
         return None
@@ -200,6 +256,11 @@ _ECHEANCE_TELECHARGEMENT = 30.0
 _DELAI_RESEAU_COUPE = 600
 # Une variante que le catalogue dit ne pas avoir n'est pas redemandée avant.
 _DELAI_ABSENCE = 30 * 86400
+# Absences retenues au plus (les plus anciennes sortent d'abord).
+_ABSENCES_MAX = 5000
+# Téléchargements au plus par heure glissante, tous documents confondus : un
+# PDF qui citerait des centaines de familles ne vide pas le catalogue.
+_PLAFOND_HEURE = 60
 
 
 class _RedirectionSure(urllib.request.HTTPRedirectHandler):
@@ -244,17 +305,19 @@ class Absente(Exception):
 
 
 def familles_google():
-    """Clés des familles publiées par Google Fonts (vide si liste illisible :
-    alors rien ne part sur le réseau)."""
+    """Clé -> catégorie des familles publiées par Google Fonts (vide si liste
+    illisible : alors rien ne part sur le réseau)."""
     global _FAMILLES_GOOGLE
     if _FAMILLES_GOOGLE is None:
         try:
             with open(_LISTE_GOOGLE, encoding="utf-8") as f:
-                _FAMILLES_GOOGLE = frozenset(
-                    cle(l) for l in f if l.strip() and not l.startswith("#"))
+                _FAMILLES_GOOGLE = {
+                    cle(nom): cat.strip() for nom, _, cat in (
+                        l.partition("\t") for l in f
+                        if l.strip() and not l.startswith("#"))}
         except OSError as e:
             log.warning("polices : liste Google Fonts illisible (%s)", e)
-            _FAMILLES_GOOGLE = frozenset()
+            _FAMILLES_GOOGLE = {}
     return _FAMILLES_GOOGLE
 
 
@@ -311,6 +374,7 @@ class Resolveur:
         self._index = None                # chemin -> fiche
         self._echecs_reseau = {}          # (clé, poids, ital) -> date de l'échec
         self._reseau_coupe = 0.0          # pas de nouvel essai avant cette date
+        self._recents = collections.deque()  # dates des téléchargements
         self._absences = None             # persistées : "clé|poids|ital" -> date
 
     # Index ------------------------------------------------------------------
@@ -362,14 +426,17 @@ class Resolveur:
                         continue
                     sig = [st.st_mtime_ns, st.st_size]
                     vieux = ancien.get(path)
-                    if vieux and vieux.get("sig") == sig:
-                        if vieux.get("fiche"):
+                    # Une fiche d'avant le champ « integrable » est relue.
+                    if vieux and vieux.get("sig") == sig and (
+                            not vieux.get("fiche")
+                            or "integrable" in vieux["fiche"]):
+                        if vieux.get("fiche") and vieux["fiche"]["integrable"]:
                             index[path] = vieux["fiche"]
                         continue
                     fiche = _decrire(path)
                     ancien[path] = {"sig": sig, "fiche": fiche}
                     change = True
-                    if fiche:
+                    if fiche and fiche["integrable"]:
                         index[path] = fiche
         if change and fi:
             self._ecrire_json(fi, {p: v for p, v in ancien.items()
@@ -407,8 +474,15 @@ class Resolveur:
 
     def _noter_absente(self, famille, poids, italique):
         with self._verrou:
-            self._absences_connues()[
-                f"{cle(famille)}|{poids}|{int(italique)}"] = time.time()
+            ab = self._absences_connues()
+            maintenant = time.time()
+            ab[f"{cle(famille)}|{poids}|{int(italique)}"] = maintenant
+            for k in [k for k, t in ab.items()
+                      if maintenant - t >= self.delai_absence]:
+                del ab[k]
+            for k, _ in sorted(ab.items(), key=lambda kv: kv[1])[
+                    :max(0, len(ab) - _ABSENCES_MAX)]:
+                del ab[k]
             if self.cache_dir:
                 self._ecrire_json(os.path.join(self.cache_dir, "absences.json"),
                                   self._absences)
@@ -475,6 +549,16 @@ class Resolveur:
             deja = self._exacte(famille, poids, italique)
             if deja:
                 return deja
+            with self._verrou:
+                maintenant = time.time()
+                while self._recents and maintenant - self._recents[0] >= 3600:
+                    self._recents.popleft()
+                if len(self._recents) >= _PLAFOND_HEURE:
+                    log.info("polices : plafond de %d téléchargements/heure "
+                             "atteint", _PLAFOND_HEURE)
+                    _noter_degradation()
+                    return None
+                self._recents.append(maintenant)
             try:
                 data = self.telecharger(famille, poids, italique)
             except Absente:
@@ -554,9 +638,8 @@ class Resolveur:
         fixe = _chasse_fixe(adv)
         # Le drapeau « serif » de MuPDF n'est pas une preuve : une police
         # insérée sans descripteur le reçoit (Open Sans y passe pour serif).
-        # Seul le nom le dit ; les chasses mesurées font le reste.
-        n = (nom or "").lower()
-        serif = False if "sans" in n else (True if "serif" in n else None)
+        # Seul le nom le dit (catalogue Google, sinon marques typographiques).
+        serif = categorie(nom)
 
         def score(f):
             s = 0.0
@@ -571,7 +654,7 @@ class Resolveur:
             s += abs(f["poids"] - poids) / 1000.0
             s += 0.2 if f["italique"] != italique else 0.0
             if serif is not None and f["serif"] is not None and f["serif"] != serif:
-                s += 0.15
+                s += 5.0            # changer de catégorie : seulement à défaut
             return s
 
         return min(cibles, key=lambda pf: (score(pf[1]), pf[0]))[0]

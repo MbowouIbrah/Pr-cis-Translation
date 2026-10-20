@@ -12,6 +12,7 @@ Exécution :  cd backend && venv/Scripts/python.exe tests/test_polices.py
 """
 from __future__ import annotations
 import io
+import json
 import os
 import re
 import shutil
@@ -402,6 +403,66 @@ def run() -> int:
             polices.configurer(None)
         ok("SYSTÈME  polices de l'OS : ignorées par défaut, consultées si =1",
            not defaut and (active or not systeme), f"{defaut} {active}")
+
+        # ── 16. Noms composés : chasse et graisse qui font partie de la famille
+        ok("NOM  « Arial-Black », « Helvetica-NarrowBold », « RobotoCondensed-Bold »",
+           a("Arial-Black")[0] == "Arial Black" and a("ArialBlack")[0] == "Arial Black"
+           and a("Helvetica-NarrowBold") == ("Helvetica Narrow", 700, False)
+           and a("RobotoCondensed-Bold") == ("Roboto Condensed", 700, False),
+           f"{a('Arial-Black')} {a('Helvetica-NarrowBold')} {a('RobotoCondensed-Bold')}")
+
+        # ── 17. « Proche » ne change pas de catégorie quand l'autre existe ──
+        cat_d = os.path.join(tmp, "categories")
+        os.makedirs(cat_d)
+        for f in ("ptserif-Regular.ttf", "montserrat-Regular.ttf"):
+            shutil.copy(os.path.join(FONTS, f), cat_d)
+        r = polices.Resolveur([cat_d], None, None)
+        serif_p = _profil(os.path.join(FONTS, "ptserif-Regular.ttf"))
+        sans_p = _profil(os.path.join(FONTS, "montserrat-Regular.ttf"))
+        sans_pour_serif = r.plus_proche(400, False, serif_p, "Gotham-Book")
+        serif_pour_sans = r.plus_proche(400, False, sans_p, "MinionPro-Regular")
+        ok("PROCHE  catégorie du nom (marques) prioritaire sur les largeurs",
+           "montserrat" in str(sans_pour_serif) and "ptserif" in str(serif_pour_sans),
+           f"{sans_pour_serif} {serif_pour_sans}")
+
+        # ── 18. Licence : fsType « Restricted » jamais incorporée ──────────
+        lic = os.path.join(tmp, "licences")
+        os.makedirs(lic)
+        for nom_f, fs in (("Libre", 0), ("Fermee", 2)):
+            ft = TTFont(io.BytesIO(_renommer("opensans-Regular.ttf", f"Test{nom_f}")))
+            ft["OS/2"].fsType = fs
+            ft.save(os.path.join(lic, f"{nom_f}.ttf"))
+        familles = {f["famille"] for f in polices.Resolveur([lic], None, None)
+                    .index().values()}
+        ok("LICENCE  fsType=2 exclue de l'index, fsType=0 gardée",
+           familles == {"TestLibre"}, str(familles))
+
+        # ── 19. absences.json borné, téléchargements plafonnés par heure ───
+        anciens = (polices._ABSENCES_MAX, polices._PLAFOND_HEURE)
+        appels = []
+
+        def absent(famille, poids, italique):
+            appels.append(famille)
+            raise polices.Absente(famille)
+        try:
+            polices._ABSENCES_MAX, polices._PLAFOND_HEURE = 3, 4
+            r = polices.Resolveur([], os.path.join(tmp, "c19"), absent)
+            r._absences_connues()["perimee|400|0"] = time.time() - 40 * 86400
+            for i in range(5):
+                r._noter_absente(f"Famille{i}", 400, False)
+            ab = json.load(open(os.path.join(tmp, "c19", "absences.json"),
+                                encoding="utf-8"))
+            ok("ABSENCES  périmées purgées, plus anciennes évincées au-delà du maximum",
+               sorted(ab) == ["famille2|400|0", "famille3|400|0", "famille4|400|0"],
+               str(sorted(ab)))
+            marque = polices.degradations()
+            for i in range(6):
+                r.telecharger_variante(f"Autre{i}", 400, False)
+            ok("PLAFOND  au-delà de N téléchargements/heure : refus noté dégradé",
+               len(appels) == 4 and polices.degradations() > marque,
+               f"{len(appels)} appels")
+        finally:
+            polices._ABSENCES_MAX, polices._PLAFOND_HEURE = anciens
     finally:
         if restaurer:
             restaurer()
