@@ -1060,6 +1060,7 @@ def run_pdf_v2_job(
                     "total": ev.get("total"),
                 })
 
+        marque = render_cache.marque_polices()
         pdf_v2_stream.translate_pdf_progressive(
             original_path, output_path, target_lang=target_lang,
             pages=pages_set, partial_path=partial_path, on_event=on_event,
@@ -1083,7 +1084,7 @@ def run_pdf_v2_job(
         # donc son rendu est exactement celui que recalculerait l'aperçu.
         try:
             with open(output_path, "rb") as f:
-                render_cache.store_render(f.read(), translation_path)
+                render_cache.store_render(f.read(), translation_path, marque)
         except OSError as e:
             logger.warning("Rendu du job non conservé : %s", e)
 

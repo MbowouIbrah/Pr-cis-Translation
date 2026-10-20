@@ -306,8 +306,9 @@ async def download_document(
             if cached:
                 with open(cached, "rb") as f:
                     return f.read()
+            marque = render_cache.marque_polices()
             data = _render_or_404(doc, ext)
-            render_cache.store_render(data, doc.translated_path)
+            render_cache.store_render(data, doc.translated_path, marque)
             return data
         # Format natif non-PDF : jamais le cache d'aperçu.
         return _render_or_404(doc, ext)
@@ -501,10 +502,11 @@ async def preview_document(
             if cached:
                 with open(cached, "rb") as f:
                     return f.read()
+            marque = render_cache.marque_polices()
             data = _render_or_404(doc, ext, only_pages=None)
             if ext != "pdf":
                         data = convert_to_pdf_bytes(data, ext)
-            render_cache.store_render(data, doc.translated_path)
+            render_cache.store_render(data, doc.translated_path, marque)
             return data
 
     if fenetre is None:

@@ -119,7 +119,8 @@ async def run():
 
             # 1. On EMPOISONNE délibérément le cache comme le faisait l'aperçu :
             #    un PDF écrit sous la clé du document PPTX.
-            render_cache.store_render(_fake_pdf_bytes(), ctx["trad"])
+            render_cache.store_render(_fake_pdf_bytes(), ctx["trad"],
+                                       render_cache.marque_polices())
             assert render_cache.cache_valid(ctx["trad"]), \
                 "le cache empoisonné devrait être considéré valide (préparation du test)"
 

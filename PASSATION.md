@@ -1,49 +1,33 @@
-# PASSATION — 16/10/2026 (nuit)
+# PASSATION
 
 ## 1. Objectif en cours
-Expansion XLSX fusionnée dans main (0d48e30, 17/10) et poussée ; 45/45 suites vertes après fusion. Prochaine étape : déploiement 1.1.0 (côté utilisateur).
+Résolution des polices non embarquées dans le moteur PDF (téléchargement à l'identique, sinon clone métrique, sinon police la plus proche), branche `feat/polices-telechargement-substitution`, moteur 1.0.12.
 
 ## 2. Fait
-- `backend/engines/xlsx/expansion.py` (nouveau) : dernière passe de `inject_translation` et de `injecter_partiel` (`engine.py`). L'instantané source `self._origine` est pris dans `_ouvrir`.
-  - Texte sur une ligne : la colonne propre est élargie selon l'alignement et les voisines vides. Besoin = `min(t, (A−marge)·t/s) + marge` ; plusieurs paragraphes sont sommés ; une fusion est répartie au prorata de ses colonnes.
-  - Retour à la ligne : `ht · Lt/Ls`, seulement si la ligne source a un `ht` ; `customHeight` est restauré, jamais forcé.
-  - Nombre : on calcule l'écart de largeur des littéraux traduits, sommé dans chaque section `;` puis maximum entre sections. Plus de `#####`.
-  - Tolérance aux défauts : `r` manquant, valeurs illisibles, `<col>` invalide. Une feuille qui fait planter la passe est sautée et journalisée.
-- Moteur XLSX passé en **1.0.0**. Docs mises à jour : `version.py`, `engines/__init__.py`, `CONTEXTE.md`, README, ARCHITECTURE, TODO §4, CHANGELOG `[Non publié]`.
-- Preuves :
-  - `tests/test_xlsx_expansion.py` 28/28 ;
-  - 18 mutations, toutes tuées ;
-  - 45 suites backend vertes ;
-  - rendu LibreOffice réel : texte entier et nombre lisible avec la passe ; texte coupé et `###` sans.
+- Ticket CD26052553710 : points 1–7 commités (point 8 laissé de côté à la demande).
+- `backend/engines/pdf/polices.py` (nouveau) : `Resolveur` (identique locale / Google Fonts css2 validée famille-pente-graisse-encre / clone `CLONES` / plus proche par largeurs), cache `translations/_polices`, absences 30 j, disjoncteur réseau, verrou par variante en vol, redirections hors `_HOTES` refusées, échéance globale.
+- `backend/engines/pdf/engine.py` : profils de largeur (`_measure_span`, `_font_profiles_from`), chaîne `_full_fallback_font`.
+- `backend/engines/pdf/stream.py:149-153` : profils passés à `_extract_fonts` (sans eux, la couche « proche » était aveugle en production).
+- `backend/scripts/precharger_polices.py` : ~90 familles pré-chargées dans `backend/fonts/catalogue` (gitignoré + dockerignoré) ; lancé au build (`Dockerfile`, non bloquant) ; Carlito/Caladea installés.
+- `backend/tests/test_polices.py` : 20/20 ; `racine.py` pose `PRECIS_FONT_DOWNLOAD/SYSTEM/CATALOGUE=0`.
+- `test_rendu_structure.py` : `fiche_document` simulé (appelait réellement DeepSeek).
+- Commits : c6dfe71, a588a76, 2192374. 9 suites moteur en code 0.
 
-## 3. Décisions
-- Aucun seuil : la traduction est comparée à SA source dans la même place. Une source déjà coupée reste coupée dans la même proportion (l'auteur l'avait acceptée).
-- On n'élargit que la colonne propre, jamais une voisine. Sans voisine pleine du côté du débordement, la place est infinie et rien ne bouge.
-- Une ligne sans `ht` est laissée à l'ajustement automatique d'Excel ; lui donner une hauteur la figerait.
-- Mesure en « zéros » avec la police helv de fitz comme police témoin, faute de la police réelle.
-- Idempotence : chaque passe restaure `<cols>` et les hauteurs d'origine avant d'appliquer, donc l'aperçu progressif peut réinjecter à volonté.
+## 3. Décisions prises
+- Serif détecté par le nom seulement : le drapeau MuPDF n'est pas fiable.
+- Largeurs mesurées prioritaires dans le score « proche » (chasse fixe pénalité 10).
+- Base14 (Helvetica/Times/Courier) gardé en raccourci : métriques identiques à Liberation.
+- Pré-chargement laissé après `COPY backend/` : `engines/__init__.py` importe tous les moteurs.
 
 ## 4. Reste à faire
-1. ~~Fusion dans main~~ fait le 17/10. Rappel : un push ne déclenche deploy.yml que si `release/version.txt` change.
-2. **Déploiement 1.1.0** : c'est à l'utilisateur de le faire (console AWS ou push de release).
-3. Dettes :
-   - le chemin réel `_ouvrir` → `injecter_partiel` n'a pas de test dédié de l'expansion ;
-   - fusion sur plusieurs lignes à retour à la ligne : hauteur non ajustée ;
-   - alignements `fill`/`distributed` traités comme « standard » ;
-   - glob `sheet*.xml` sensible à la casse.
-4. Restent d'avant :
-   - police de repli Times→Liberation Serif (`engines/pdf/engine.py` `_matched_family`) ;
-   - clignotement de la carte PPTX ;
-   - OCR du Code de la Route ;
-   - vérifier la cohérence PDF sur le CV `b885219a18f7` (à retraduire).
+1. FAIT (1.0.11) : liste blanche `backend/fonts/google_familles.txt` (1950 familles, seules interrogées) ; rendu fait réseau dégradé non conservé (`render_cache.marque_polices()` → `store_render(..., marque)`) ; polices système désactivées par défaut (`PRECIS_FONT_SYSTEM=1` pour les activer). test_polices 23/23.
+2. FAIT (1.0.12) : `fsType=2` exclu de l'index ; « Arial Black », « Helvetica-Narrow » et autres chasses gardés dans la famille ; `absences.json` purgé et borné à 5000, plafond de 60 téléchargements par heure (refus noté comme dégradation) ; `PRECIS_FONTS_CACHE` posé par `app/config.py`.
+3. FAIT (1.0.12) : `categorie()` (catalogue Google `Famille	Catégorie`, puis marques du nom) sert aux fiches locales (panose souvent muet) et à la cible ; un changement de catégorie coûte 5.0 dans « proche ». test_polices 28/28, générique 100/100.
+4. Pousser la branche / PR vers main.
 
 ## 5. Pièges / contexte
-- Tests :
-  - commande : `cd backend && for t in tests/test_*.py; do PYTHONIOENCODING=utf-8 venv/Scripts/python.exe "$t" </dev/null; done` ;
-  - jamais d'appel API payant (traduction simulée) ;
-  - la trace affichée par la section ILLISIBLE est attendue.
-- Ne pas combiner `python - <<EOF` et `</dev/null` (le shell bloque). Passer par un fichier de script.
-- Éditer par script Python (`newline=''`, CRLF/LF mixtes) ; les heredocs bash écrasent `\\`.
-- Serveur sans rechargement automatique :
-  - backend : `cd backend && PYTHONIOENCODING=utf-8 venv/Scripts/python.exe -m uvicorn main:app --port 8000` ;
-  - front : `cd frontend && npm run dev`.
+- Comparatif identité (sans API) : scripts dans le scratchpad de session (`run_corpus.py`, `comparer.py`) ; résultat 1.0.10 = 1.0.9 avec polices livrées ; sans elles, Inter/Oswald/PT Serif retéléchargées.
+- Python lisant des PDF téléchargés : `venv/Scripts/python.exe -I`.
+- Windows verrouille les fichiers ouverts : lire les polices en bytes.
+- Tout changement de rendu : bump `backend/engines/pdf/version.py`.
+- Tests : `cd backend && PYTHONIOENCODING=utf-8 venv/Scripts/python.exe tests/<fichier>`.

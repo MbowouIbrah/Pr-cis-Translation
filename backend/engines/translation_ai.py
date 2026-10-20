@@ -309,7 +309,10 @@ class TranslatorAI:
         parenthèse, ni équivalent étranger, ni note. Un diplôme, une
         institution, un grade propre à un pays garde son NOM OFFICIEL (sigle
         compris), seuls ses mots communs traduits ; jamais remplacé par celui
-        d'un autre pays, jamais par une glose.
+        d'un autre pays, jamais par une glose. Tout texte qui n'est pas déjà
+        dans la langue cible se traduit, QUELLE QUE SOIT sa langue d'origine :
+        en-têtes, devises, noms d'État et d'administration, et chaque version
+        d'un en-tête bilingue.
         """
 
     def _clean_json_text(self, text):
@@ -560,6 +563,14 @@ class TranslatorAI:
                     "morceau. Si un morceau est un nom propre, un sigle ou une "
                     "date qui ne se traduit pas, laisse-le tel quel — c'est "
                     "légitime — mais vérifie qu'il ne s'agit pas d'un oubli."),
+        "inchange": ("Ta réponse précédente a rendu ce fragment ENTIÈREMENT "
+                     "inchangé. S'il n'est pas déjà dans la langue cible, "
+                     "traduis-le en entier, quelle que soit sa langue "
+                     "d'origine — en-têtes, devises, noms d'État, "
+                     "d'administration et d'institution compris (leurs mots "
+                     "communs se traduisent). Ne laisse tel quel que ce qui ne "
+                     "se traduit pas : nom de personne, sigle, code, adresse, "
+                     "identifiant, ou texte déjà dans la langue cible."),
         "nombres": ("Ta réponse précédente a MODIFIÉ un nombre. Les chiffres "
                     "d'un document sont des données : reporte-les à l'identique, "
                     "y compris dans les ordinaux (« 6ème » → « 6th », jamais "
@@ -677,6 +688,12 @@ class TranslatorAI:
             "« Licence in Law ») — JAMAIS le diplôme ou l'organisme "
             "« équivalent » d'un autre pays, qui changerait le fait rapporté. "
             "Les seuls termes ambigus ou propres ; pas le vocabulaire banal.\n"
+            "- document en PLUSIEURS langues (même contenu en deux versions) : "
+            "chaque notion reçoit UN SEUL terme cible, quelle que soit la "
+            "version où elle apparaît ;\n"
+            "- conventions d'écriture à tenir partout en "
+            f"{self.lang_name(target_lang)} : séparateur des milliers, "
+            "références d'articles et de textes, dates.\n"
             'Réponds en JSON : {"fiche": "..."}.\n\n'
             "TITRES :\n" + "\n".join(titres) +
             "\n\nEXTRAITS (pris sur tout le document) :\n" + "\n".join(corps))

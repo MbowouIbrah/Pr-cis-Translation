@@ -31,12 +31,147 @@ from collections import defaultdict
 import fitz  # PyMuPDF >= 1.23
 
 from . import reflow
+from . import polices
 from .version import ENGINE_VERSION
 
 _log = logging.getLogger(__name__)
 
 # Caractères de contrôle parasites (hors \t \n \r) à purger du texte extrait.
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+# `char_flags` MuPDF (FZ_STEXT_FILLED | FZ_STEXT_STROKED) : glyphe rempli ET
+# contouré = gras synthétique (mode de rendu 2).
+_STEXT_FILLED_STROKED = 16 | 32
+
+
+def _glyph_key(c):
+    """Identité d'un glyphe posé, commune à `rawdict` et au device MuPDF."""
+    return (c["c"], round(c["origin"][0], 1), round(c["origin"][1], 1))
+
+
+def _synth_bold_keys(page):
+    """Glyphes d'un GRAS SYNTHÉTIQUE : police non grasse peinte remplie ET
+    contourée (mode 2) — seul `char_flags` le dit, ni le nom ni les flags de
+    police. Lu dans une passe À PART : `TEXT_COLLECT_STYLES` fusionne aussi les
+    glyphes identiques superposés (faux gras par surimpression), ce qui
+    mangerait un texte réécrit sur l'ancien au même endroit."""
+    keys = set()
+    raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE
+                        | fitz.TEXT_COLLECT_STYLES)
+    for block in raw.get("blocks", []):
+        for line in block.get("lines", ()):
+            for span in line.get("spans", ()):
+                if (not span.get("flags", 0) & 16
+                        and span.get("char_flags", 0) & _STEXT_FILLED_STROKED
+                        == _STEXT_FILLED_STROKED):
+                    keys.update(_glyph_key(c) for c in span.get("chars", ()))
+    return keys
+
+
+def _synth_italic_keys(page):
+    """Glyphe -> pente d'un ITALIQUE SYNTHÉTIQUE : police droite penchée par
+    la matrice de texte (Tm cisaillé). `rawdict` ne garde que la direction de
+    ligne ; seule la matrice de rendu (`trm` × `ctm`, lue au device MuPDF) dit
+    la pente. Pente = tan de l'écart à l'orthogonale entre les axes x et y du
+    glyphe, positive penchée vers l'avant ; nulle pour un texte droit, même
+    tourné ou étiré. Vide si le device est indisponible."""
+    if _mu is None:
+        return {}
+    pentes = {}
+
+    class _Dev(_mu.FzDevice2):
+        def __init__(self):
+            super().__init__()
+            self.use_virtual_fill_text()
+            self.use_virtual_stroke_text()
+
+        def _text(self, text, ctm):
+            m = _mu.FzMatrix(ctm)
+            sp = text.head
+            while sp:
+                t = _mu.fz_concat(_mu.FzMatrix(sp.trm), m)
+                n2 = t.a * t.a + t.b * t.b
+                # Axe y image du glyphe = (c, d) ; sa composante le long de
+                # l'axe x, rapportée à la chasse, est la pente (repère page
+                # y vers le bas : l'avant d'un glyphe droit est en -y).
+                k = (t.a * t.c + t.b * t.d) / n2 if n2 else 0.0
+                if abs(k) > 1e-3:
+                    w = _mu.FzTextSpan(sp)
+                    for i in range(sp.len):
+                        it = w.items(i)
+                        if it.ucs < 0:
+                            continue
+                        q = _mu.fz_transform_point(_mu.FzPoint(it.x, it.y), m)
+                        pentes[_glyph_key({"c": chr(it.ucs),
+                                           "origin": (q.x, q.y)})] = round(k, 3)
+                sp = sp.next
+
+        def fill_text(self, ctx, text, ctm, *args):
+            self._text(text, ctm)
+
+        def stroke_text(self, ctx, text, stroke, ctm, *args):
+            self._text(text, ctm)
+
+    try:
+        _mu.fz_run_page(page.this, _Dev(),
+                        _mu.FzMatrix(*page.derotation_matrix), _mu.FzCookie())
+    except Exception as exc:
+        _log.warning("pente du texte non relevée (page %s) : %s",
+                     getattr(page, "number", "?"), exc)
+        return {}
+    return pentes
+
+
+def _split_synth(spans, bold_keys, italic_pentes):
+    """Marque `synth_bold` / `synth_italic` (pente) sur chaque span, en le
+    scindant là où l'un d'eux change : MuPDF ne coupe pas un span au
+    changement de mode de rendu ni de matrice de texte."""
+    for span in spans:
+        chars = span.get("chars", ())
+        marks = [(_glyph_key(c) in bold_keys,
+                  italic_pentes.get(_glyph_key(c), 0.0)) for c in chars]
+        if len(set(marks)) <= 1:
+            b, k = marks[0] if marks else (False, 0.0)
+            yield dict(span, synth_bold=b, synth_italic=k)
+            continue
+        i = 0
+        while i < len(chars):
+            j = i
+            while j < len(chars) and marks[j] == marks[i]:
+                j += 1
+            part = chars[i:j]
+            bb = span["bbox"]
+            yield dict(span, chars=part, synth_bold=marks[i][0],
+                       synth_italic=marks[i][1], origin=part[0]["origin"],
+                       bbox=(min(c["bbox"][0] for c in part), bb[1],
+                             max(c["bbox"][2] for c in part), bb[3]))
+            i = j
+
+
+def _render_mode(run, font):
+    """Mode de rendu PDF (`Tr`) d'un run peint avec `font` : 2 (remplissage +
+    contour) pour reproduire un gras synthétique avec la police même qui le
+    portait à la source, 0 sinon (une police de repli a sa vraie graisse)."""
+    synth = run.get("synth_bold")
+    return 2 if synth is not None and synth is font else 0
+
+
+def _shear(run, font):
+    """Pente d'un italique synthétique à reproduire en peignant avec `font` :
+    celle de la source si c'est la police même qui la portait, 0 sinon (une
+    police de repli choisie italique a déjà sa vraie forme penchée)."""
+    synth = run.get("synth_italic")
+    return synth[1] if synth and synth[0] is font else 0.0
+
+
+def _morph(pt, shear, mat=None):
+    """`morph` de `write_text` : cisaillement d'italique appliqué AVANT
+    l'échelle et la rotation de `mat` ; None quand il n'y a rien à
+    transformer. `morph` agit dans l'espace PDF (y vers le haut) : la pente
+    lue (positive = vers l'avant) s'y reporte telle quelle."""
+    if shear:
+        cis = fitz.Matrix(1, 0, shear, 1, 0, 0)
+        mat = cis if mat is None else cis * mat
+    return None if mat is None else (pt, mat)
 
 # Ligne commençant par une puce ou un numéro d'item de liste.
 _LIST_RE = re.compile(
@@ -185,6 +320,34 @@ def _walk_clips(trace):
             pile = pile + [d]
 
 
+def _pixmap_attenuee(stream, alpha):
+    """L'image de `stream` dont le canal alpha est multiplié par `alpha` (pose
+    semi-transparente), ou None si la pose est opaque ou l'image illisible :
+    `insert_image` ne connaît pas l'opacité de l'état graphique."""
+    if alpha is None or alpha >= 0.999:
+        return None
+    try:
+        pix = fitz.Pixmap(stream)
+        if pix.colorspace and pix.colorspace.n > 3:
+            pix = fitz.Pixmap(fitz.csRGB, pix)
+        if not pix.alpha:
+            pix = fitz.Pixmap(pix, 1)
+        table = bytes(round(v * alpha) for v in range(256))
+        pix.set_alpha(bytes(pix.samples)[pix.n - 1::pix.n].translate(table))
+        return pix
+    except Exception as exc:
+        _log.warning("opacité d'image non reportée : %s", exc)
+        return None
+
+
+def _avec_alpha(el, alpha):
+    """Note l'opacité d'une pose d'image (`ca` de l'état graphique) quand elle
+    n'est pas pleine : un filigrane à 20 % rendu opaque masquerait la page."""
+    if alpha < 0.999:
+        el["alpha"] = round(alpha, 3)
+    return el
+
+
 def _image_bytes(doc, xref):
     """Octets d'une image de `doc` et leur extension — (None, "png") si illisible.
 
@@ -318,14 +481,35 @@ if _mu is not None:
 
         def fill_image(self, ctx, image, ctm, alpha, color_params):
             r = _mu.fz_transform_rect(_mu.FzRect(0, 0, 1, 1), _mu.FzMatrix(ctm))
-            self.images.append((fitz.Rect(r.x0, r.y0, r.x1, r.y1), list(self.pile)))
+            im = _mu.FzImage(_mu.ll_fz_keep_image(image))
+            self.images.append((fitz.Rect(r.x0, r.y0, r.x1, r.y1), list(self.pile),
+                                float(alpha), im.m_internal_value()))
 
 
-def _image_clip_stacks(page):
+def _image_clip_stacks(page, xrefs=()):
     """Pour chaque image peinte, dans l'ordre de peinture : (rectangle, pile
-    des découpes actives). Liste vide si le device MuPDF est indisponible."""
+    des découpes actives, opacité de la pose, xref ou None). Liste vide si le
+    device MuPDF est indisponible.
+
+    Le xref est rattaché par IDENTITÉ : MuPDF garde une image chargée en
+    mémoire et la resert telle quelle à chaque pose. Charger d'abord les
+    `xrefs` (références tenues pendant le passage) puis comparer les objets
+    reçus par le device dit quel objet est peint où — là où l'empreinte des
+    pixels (`get_image_rects`) confond deux images de même dessin. Une pose
+    non reconnue reste à None."""
     if _mu is None:
         return []
+    tenues = {}
+    try:
+        pdf = _mu.pdf_document_from_fz_document(page.parent.this)
+        for x in xrefs:
+            try:
+                im = _mu.pdf_load_image(pdf, _mu.pdf_new_indirect(pdf, x, 0))
+                tenues[im.m_internal_value()] = (x, im)
+            except Exception:
+                continue
+    except Exception:
+        tenues = {}
     try:
         dev = _ImageClipDevice()
         # `fz_run_page` peint dans l'espace de la page PIVOTÉE ; le bboxlog et
@@ -333,7 +517,8 @@ def _image_clip_stacks(page):
         # quoi une découpe de page `/Rotate 90` serait rejouée ailleurs.
         _mu.fz_run_page(page.this, dev, _mu.FzMatrix(*page.derotation_matrix),
                         _mu.FzCookie())
-        return dev.images
+        return [(r, pile, alpha, tenues[ptr][0] if ptr in tenues else None)
+                for r, pile, alpha, ptr in dev.images]
     except Exception as exc:
         _log.warning("découpes d'images non relevées (page %s) : %s",
                      getattr(page, "number", "?"), exc)
@@ -616,7 +801,8 @@ class PDFObjectEngine:
             # Polices embarquées du PDF source (pour un rendu fidèle des glyphes
             # et de la vraie police à la réinjection). Encodées en base64 dans
             # le JSON → fichier autonome.
-            data["fonts"] = self._extract_fonts(doc)
+            data["font_profiles"] = {}
+            data["fonts"] = self._extract_fonts(doc, data["font_profiles"])
             for page_num, page in enumerate(doc):
                 data["pages"].append(self.extract_page_data(
                     doc, page_num, page, embed_images=embed_images,
@@ -657,10 +843,15 @@ class PDFObjectEngine:
         # recouvre en partie doit rester dessous, et inversement.
         trace = self._drawing_trace(page)
         draw_els = self._extract_drawings(page, trace)
+        try:
+            xrefs = [i[0] for i in page.get_images(full=True)]
+        except Exception:
+            xrefs = []
+        piles = _image_clip_stacks(page, xrefs)     # un seul passage device
         img_els = self._extract_images(
             doc, page, page_num, embed_images, assets_dir,
-            images_par_reference)
-        self._attach_image_order(page, img_els)
+            images_par_reference, piles)
+        self._attach_image_order(page, img_els, piles)
         graphiques = draw_els + img_els
         graphiques.sort(key=lambda e: e.get("seqno")
                         if e.get("seqno") is not None else math.inf)
@@ -680,7 +871,7 @@ class PDFObjectEngine:
         return page_data
 
     # ── Polices embarquées : nom propre -> liste de sous-ensembles (b64) ─────
-    def _extract_fonts(self, doc):
+    def _extract_fonts(self, doc, profiles=None):
         """Collecte les octets de chaque police embarquée du PDF.
 
         Une même police (ex. 'PTSerif-Regular') peut être embarquée en
@@ -689,7 +880,12 @@ class PDFObjectEngine:
         pour chaque texte le sous-ensemble qui couvre réellement ses glyphes.
         Clé = nom SANS préfixe de sous-ensemble ('ABCDEF+') pour matcher le
         champ 'font' des spans.
+
+        `profiles` (dict) reçoit au passage, par nom propre, la chasse MESURÉE
+        de chaque caractère (voir `_font_profiles_from`) : c'est elle qui choisit
+        la police la plus proche quand l'originale est introuvable.
         """
+        mesures = defaultdict(lambda: defaultdict(list))
         # 1) Mapping Unicode -> glyph-id PAR XREF (sous-ensemble). Les polices
         #    CID/Type0 (Identity-H) sont embarquées sans cmap Unicode : on la
         #    reconstruit à partir de get_texttrace() qui expose, pour chaque
@@ -719,6 +915,8 @@ class PDFObjectEngine:
             for span in trace:
                 nm = span.get("font", "")
                 nm = nm.split("+")[-1] if "+" in nm else nm
+                if profiles is not None:
+                    self._measure_span(span, mesures[nm])
                 xrefs = page_name2xref.get(nm)
                 if not xrefs:
                     continue
@@ -732,6 +930,8 @@ class PDFObjectEngine:
         u2g_by_xref = {xr: {u: next(iter(gs)) for u, gs in m.items()
                             if len(gs) == 1}
                        for xr, m in u2g_by_xref.items()}
+        if profiles is not None:
+            profiles.update(self._font_profiles_from(mesures))
 
         # 2) Extraction des octets de chaque sous-ensemble + patch de cmap si
         #    nécessaire. On garde TOUS les sous-ensembles d'un même nom : à la
@@ -751,6 +951,34 @@ class PDFObjectEngine:
                     "b64": base64.b64encode(buf).decode("ascii"),
                 })
         return fonts
+
+    @staticmethod
+    def _measure_span(span, acc, limite=40):
+        """Chasse de chaque caractère du span, en em : distance entre deux
+        origines consécutives projetée sur la direction d'écriture, divisée par
+        le corps. L'espace est écarté (l'espacement des mots s'y ajoute)."""
+        adv = acc
+        size = span.get("size") or 0
+        chars = span.get("chars") or ()
+        if size <= 0 or len(chars) < 2:
+            return
+        dx, dy = span.get("dir") or (1.0, 0.0)
+        for a, b in zip(chars, chars[1:]):
+            try:
+                ch = chr(a[0])
+            except (TypeError, ValueError):
+                continue
+            if ch.isspace() or len(adv[ch]) >= limite:
+                continue
+            w = ((b[2][0] - a[2][0]) * dx + (b[2][1] - a[2][1]) * dy) / size
+            if 0.05 < w < 2.5:                  # saut de ligne, crénage négatif
+                adv[ch].append(w)
+
+    @staticmethod
+    def _font_profiles_from(mesures):
+        """{nom: {"adv": {car: chasse médiane en em}}}."""
+        return {nm: {"adv": {c: sorted(v)[len(v) // 2] for c, v in adv.items() if v}}
+                for nm, adv in mesures.items()}
 
     @staticmethod
     def _span_owners(doc, xrefs, chars, glyph_info):
@@ -1037,6 +1265,7 @@ class PDFObjectEngine:
         # Le texte, lui, reste INTACT (les espaces de tête sont un signal pour
         # les titres à lettres espacées), et `origin` aussi (peinture source).
         raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+        synth_b, synth_i = _synth_bold_keys(page), _synth_italic_keys(page)
         hidden = _hidden_chars(page, draw_els)
         spans = []
         for block in raw.get("blocks", []):
@@ -1044,7 +1273,8 @@ class PDFObjectEngine:
                 continue
             for line in block.get("lines", []):
                 direction = line.get("dir", (1, 0))
-                for span in line.get("spans", []):
+                for span in _split_synth(line.get("spans", []), synth_b,
+                                         synth_i):
                     # Retire les caractères de CONTRÔLE (BEL \x07, etc.) : sans
                     # sens visuel, souvent superposés au texte (ex. « \x07 » sur
                     # « Note: »), ils créent des spans/lignes parasites qui
@@ -1077,6 +1307,10 @@ class PDFObjectEngine:
                                 ink_x0, ink_x1 = ix0, ix1
                     o = span.get("origin", (bb[0], bb[3]))
                     flags = span.get("flags", 0)
+                    synth_bold = bool(span.get("synth_bold"))
+                    # Une police déjà italique ne se repenche pas.
+                    synth_italic = (0.0 if flags & 2
+                                    else span.get("synth_italic") or 0.0)
                     nchar = max(1, len(text.strip()))
                     spans.append({
                         "bbox": [bb[0], bb[1], bb[2], bb[3]],
@@ -1086,8 +1320,10 @@ class PDFObjectEngine:
                         "size": span.get("size", 0) or 0,
                         "color": _int_color_to_rgb(span.get("color", 0)),
                         "flags": flags,
-                        "bold": bool(flags & 16),
-                        "italic": bool(flags & 2),
+                        "bold": bool(flags & 16) or synth_bold,
+                        "synth_bold": synth_bold,
+                        "italic": bool(flags & 2) or bool(synth_italic),
+                        "synth_italic": synth_italic,
                         "dir": list(direction),
                         "_gw": (bb[2] - bb[0]) / nchar,   # largeur de glyphe approx.
                         "_base": o[1],
@@ -1771,7 +2007,9 @@ class PDFObjectEngine:
             "color": s["color"],
             "flags": s["flags"],
             "bold": s["bold"],
+            "synth_bold": s.get("synth_bold", False),
             "italic": s["italic"],
+            "synth_italic": s.get("synth_italic", 0.0),
             "dir": s["dir"],
             # Décalage de baseline d'un SATELLITE (exposant/indice) par rapport
             # à sa ligne hôte — 0 pour un run ordinaire. Voyage jusqu'au rendu.
@@ -2618,6 +2856,14 @@ class PDFObjectEngine:
         continues = (lower_next or measure_next or _starts_coord(it["text"])
                      or parent_continues)
 
+        # Ligne TOUT EN CAPITALES suivie d'une ligne en casse mixte : changement
+        # de composition, comme gras → maigre (« REPUBLIC OF CAMEROON » / « Peace
+        # - Work - Fatherland »). La géométrie ne tranche pas quand les deux
+        # lignes ont, par coïncidence, la même largeur : elles passaient pour
+        # une colonne justifiée, fusionnaient, et le reflow les recoupait.
+        if not continues and _all_caps(last_txt) and _has_lower(it["text"]):
+            return True
+
         # ── A. Coupe « espace restant » (tie-breaker géométrique, togglable) ─
         # Appliquée AVANT le flot continu : elle discrimine un vrai saut de
         # paragraphe d'un simple retour à la ligne, y compris à interligne
@@ -2922,24 +3168,40 @@ class PDFObjectEngine:
 
     # ── Images : une occurrence = un objet ───────────────────────────────────
     def _extract_images(self, doc, page, page_num, embed_images, assets_dir,
-                        images_par_reference=False):
+                        images_par_reference=False, piles=None):
+        """Une pose = un élément. Les poses viennent du device (`piles`, cf.
+        `_image_clip_stacks`) : chacune rattachée à son objet, avec son
+        opacité. `get_image_rects` (empreinte des pixels) n'est qu'un repli
+        pour un objet que le device n'a pas reconnu : il confond deux images
+        de même dessin (logo et filigrane) et donnerait à l'une la place de
+        l'autre."""
         elements = []
         try:
             infos = page.get_images(full=True)
         except Exception:
             infos = []
+        if piles is None:
+            piles = _image_clip_stacks(page, [i[0] for i in infos])
+        vues = {}
+        for r, _, alpha, x in piles:
+            if x is not None:
+                vues.setdefault(x, []).append((r, alpha))
         for img_index, info in enumerate(infos):
             xref = info[0]
-            try:
-                rects = page.get_image_rects(xref)
-            except Exception:
-                rects = []
-            if not rects:
+            if xref in vues:
+                poses = vues.pop(xref)
+            else:
+                try:
+                    poses = [(r, 1.0) for r in page.get_image_rects(xref)]
+                except Exception:
+                    poses = []
+            if not poses:
                 continue
             if images_par_reference:
-                for rect in rects:
-                    elements.append({"type": "image", "bbox": _rect(rect),
-                                     "xref": xref})
+                for rect, alpha in poses:
+                    elements.append(_avec_alpha({"type": "image",
+                                                 "bbox": _rect(rect),
+                                                 "xref": xref}, alpha))
                 continue
             img_bytes, ext = _image_bytes(doc, xref)
 
@@ -2954,15 +3216,15 @@ class PDFObjectEngine:
                         fh.write(img_bytes)
                     asset_ref = fname
 
-            for rect in rects:
-                elements.append({
+            for rect, alpha in poses:
+                elements.append(_avec_alpha({
                     "type": "image",
                     "bbox": _rect(rect),
                     "xref": xref,
                     "ext": ext,
                     "asset_file": asset_ref,   # si embed_images=False
                     "asset_b64": asset_b64,    # si embed_images=True
-                })
+                }, alpha))
         return elements
 
 
@@ -2999,7 +3261,7 @@ class PDFObjectEngine:
             elements.append(el)
         return elements
 
-    def _attach_image_order(self, page, img_els):
+    def _attach_image_order(self, page, img_els, piles=None):
         """Donne à chaque image son ordre de peinture (`seqno`) et ses découpes.
 
         `get_bboxlog()` liste TOUT ce qui est peint, dans l'ordre : son indice
@@ -3019,7 +3281,8 @@ class PDFObjectEngine:
             log = page.get_bboxlog()
         except Exception:
             return
-        piles = _image_clip_stacks(page)
+        if piles is None:
+            piles = _image_clip_stacks(page)
         poses = [(i, fitz.Rect(r)) for i, (k, r) in enumerate(log)
                  if k == "fill-image"]
         if len(piles) != len(poses):
@@ -3141,6 +3404,7 @@ class PDFObjectEngine:
 
     # ── Polices : b64 -> objets fitz.Font (regroupés par nom propre) ─────────
     def _build_fonts(self, data):
+        self._font_profiles = data.get("font_profiles") or {}
         self._fonts = {}   # clean -> [fitz.Font, ...]
         for clean, variants in data.get("fonts", {}).items():
             objs = []
@@ -3158,6 +3422,14 @@ class PDFObjectEngine:
         fonts = getattr(self, "_fonts", {})
         clean = font_raw.split("+")[-1] if "+" in (font_raw or "") else (font_raw or "")
         variants = fonts.get(clean)
+        if not variants:
+            # Le nom du span vient du programme de police, la clé du BaseFont
+            # du PDF : ils divergent parfois de la seule ponctuation
+            # (« OpenSans-Regular » / « Open Sans Regular »).
+            key = re.sub(r"[^0-9a-z]", "", clean.lower())
+            variants = next((v for k, v in fonts.items()
+                             if key and re.sub(r"[^0-9a-z]", "", k.lower()) == key),
+                            None)
         if not variants:
             return None
         chars = [c for c in text if not c.isspace()]
@@ -3186,14 +3458,16 @@ class PDFObjectEngine:
             stream, _ = _image_bytes(src_doc, el["xref"])
         if stream is None:
             return
+        pix = _pixmap_attenuee(stream, el.get("alpha"))
+        image = {"pixmap": pix} if pix is not None else {"stream": stream}
         clip = _clip_ops(page, el.get("clips"))
         if not clip:
-            page.insert_image(rect, stream=stream)
+            page.insert_image(rect, **image)
             return
         # `insert_image` ajoute son propre flux de contenu à la page : on
         # l'encadre de la découpe (q … W n … Q) une fois posé.
         avant = set(page.get_contents())
-        page.insert_image(rect, stream=stream)
+        page.insert_image(rect, **image)
         # Une page aux q/Q déséquilibrés reçoit aussi des flux d'encadrement
         # (`wrap_contents`) : seul celui qui invoque l'image (« Do ») est le sien.
         doc = page.parent
@@ -3958,7 +4232,8 @@ class PDFObjectEngine:
                     mat = fitz.Matrix(deg)
                     if abs(sx - 1.0) > 0.001:
                         mat = fitz.Matrix(sx, 1) * mat
-                    tw.write_text(page, morph=(pt, mat))
+                    tw.write_text(page, morph=_morph(pt, _shear(r, gf), mat),
+                                  render_mode=_render_mode(r, gf))
                 except Exception:
                     pass
             x += reflow.text_width(ch, [(gf, None)], size, sx) + lsp
@@ -4060,6 +4335,15 @@ class PDFObjectEngine:
             except Exception:
                 lsp = 0.0
         return {"text": txt, "fonts": fonts,
+                # Gras synthétique reproduit À L'IDENTIQUE : même police
+                # embarquée, peinte remplie + contourée. Une police assortie,
+                # elle, a sa vraie graisse Bold (déjà choisie par `bold`).
+                "synth_bold": (primary if use_embedded and m.get("synth_bold")
+                               else None),
+                # Italique synthétique : même police, même pente de la source.
+                "synth_italic": ((primary, m["synth_italic"])
+                                 if use_embedded and m.get("synth_italic")
+                                 else None),
                 "size": size,
                 "color": tuple(m.get("color", (0, 0, 0))),
                 "underline": bool(m.get("underline")),
@@ -4141,16 +4425,39 @@ class PDFObjectEngine:
         police libre ASSORTIE à la famille source (`backend/fonts/` : PT Serif,
         Montserrat, Open Sans, Roboto, Oswald, Merriweather) — bien plus proche du
         typeface embarqué qu'Helvetica (le « z », les accents, le « U » d'un titre
-        géométrique ne détonnent plus). Base-14 seulement en dernier recours."""
+        géométrique ne détonnent plus). Base-14 seulement en dernier recours.
+
+        Quand la police source n'est pas embarquée en entier, `polices` cherche
+        d'abord la MÊME police (disque, catalogue, téléchargement), ou son clone
+        métrique libre (Arial → Arimo…), puis la plus proche par la chasse
+        mesurée dans le document. Le mot-clé de famille et la base-14 restent
+        les secours si aucune n'est trouvée."""
         cache = getattr(self, "_fallback_cache", None)
         if cache is None:
             cache = self._fallback_cache = {}
-        fam = _matched_family(font_raw)
+        clean = (font_raw or "").split("+")[-1]
         weight = _weight_class(font_raw, bold)
-        key = (fam, weight, bool(bold), bool(italic))
+        key = (clean, weight, bool(bold), bool(italic))
         f = cache.get(key)
+        famille, poids, ital = polices.analyser_nom(font_raw)
+        if f is None and polices.cle(famille) in ("helvetica", "times", "courier"):
+            # Base-14 : la police de MuPDF EST l'originale (mêmes chasses).
+            try:
+                f = cache[key] = fitz.Font(_base14_full_name(
+                    font_raw, bold or (poids or 400) >= 600, italic or ital))
+            except Exception:
+                f = None
         if f is None:
-            f = _load_matched_font(fam, bold, italic, weight=weight)
+            fam = _matched_family(font_raw)
+            path, couche = polices.resolveur().resoudre(
+                font_raw, bold, italic,
+                (getattr(self, "_font_profiles", None) or {}).get(clean))
+            if couche == "proche" and not _matched_family_is_default(font_raw):
+                path = None                     # le nom désigne une famille assortie
+            if path:
+                f = self._font_from_file(path)
+            if f is None:
+                f = _load_matched_font(fam, bold, italic, weight=weight)
             if f is None:                       # aucune police assortie : base-14
                 try:
                     f = fitz.Font(_base14_full_name(font_raw, bold, italic))
@@ -4158,6 +4465,18 @@ class PDFObjectEngine:
                     f = fitz.Font("Helvetica")
             cache[key] = f
         return f
+
+    def _font_from_file(self, path):
+        """fitz.Font d'un fichier, une seule fois par processus de rendu."""
+        cache = getattr(self, "_font_file_cache", None)
+        if cache is None:
+            cache = self._font_file_cache = {}
+        if path not in cache:
+            try:
+                cache[path] = fitz.Font(fontfile=path)
+            except Exception:
+                cache[path] = None
+        return cache[path]
 
     def _paint_reflow(self, page, res):
         """Peint les lignes de runs placés produites par `reflow`. Chaque run est
@@ -4219,10 +4538,10 @@ class PDFObjectEngine:
                     pt = fitz.Point(x, base)
                     tw = fitz.TextWriter(page.rect, color=color)
                     tw.append(pt, ch, font=gf, fontsize=size)
-                    if abs(sx - 1.0) > 0.001:
-                        tw.write_text(page, morph=(pt, fitz.Matrix(sx, 1)))
-                    else:
-                        tw.write_text(page)
+                    tw.write_text(page, morph=_morph(
+                        pt, _shear(r, gf),
+                        fitz.Matrix(sx, 1) if abs(sx - 1.0) > 0.001 else None),
+                        render_mode=_render_mode(r, gf))
                 except Exception:
                     pass
                 x += reflow.text_width(ch, [(gf, None)], size, sx) + lsp
@@ -4236,10 +4555,10 @@ class PDFObjectEngine:
             try:
                 tw = fitz.TextWriter(page.rect, color=color)
                 tw.append(pt, chunk, font=chunk_font, fontsize=size)
-                if abs(sx - 1.0) > 0.001:
-                    tw.write_text(page, morph=(pt, fitz.Matrix(sx, 1)))
-                else:
-                    tw.write_text(page)
+                tw.write_text(page, morph=_morph(
+                    pt, _shear(r, chunk_font),
+                    fitz.Matrix(sx, 1) if abs(sx - 1.0) > 0.001 else None),
+                    render_mode=_render_mode(r, chunk_font))
             except Exception:
                 pass
             return cx + reflow.text_width(chunk, [(chunk_font, None)], size, sx)
@@ -4281,7 +4600,19 @@ class PDFObjectEngine:
 
         # 1) Police source embarquée (fidélité exacte de police + glyphes).
         font = self._pick_font(run.get("font", ""), text)
-        # 2) Sinon police base-14 (Helvetica/Times/Courier), comme objet Font
+        # Gras synthétique : la police embarquée est la Regular → la repeindre
+        # remplie + contourée, comme la source.
+        rm = 2 if font is not None and run.get("synth_bold") else 0
+        shear = (run.get("synth_italic") or 0.0) if font is not None else 0.0
+        # 2) Sinon la police de repli complète (la même téléchargée, ou la plus
+        #    proche), si elle rend tout le texte.
+        if font is None:
+            fb = self._full_fallback_font(run.get("font", ""), run.get("bold"),
+                                          run.get("italic"))
+            if all(self._renders_glyph(fb, c) for c in set(text)
+                   if not c.isspace()):
+                font = fb
+        # 3) Sinon police base-14 (Helvetica/Times/Courier), comme objet Font
         #    pour bénéficier du même rendu mis à l'échelle.
         if font is None:
             fontname = _base14_fontname(run.get("font", ""), run.get("bold"),
@@ -4294,7 +4625,8 @@ class PDFObjectEngine:
         if font is not None:
             try:
                 self._write_scaled(page, origin, text, font, size, color,
-                                   target_w, run.get("dir"))
+                                   target_w, run.get("dir"), render_mode=rm,
+                                   shear=shear)
                 return
             except Exception:
                 pass
@@ -4307,7 +4639,7 @@ class PDFObjectEngine:
             pass
 
     def _write_scaled(self, page, origin, text, font, size, color, target_w,
-                      direction=None):
+                      direction=None, render_mode=0, shear=0.0):
         """Écrit `text` à `origin` avec `font`. Texte horizontal : mis à
         l'échelle en x pour occuper exactement `target_w` (anti-dérive). Texte
         incliné/vertical (Étape C, `direction` ≠ (1,0)) : tourné par la matrice
@@ -4315,7 +4647,7 @@ class PDFObjectEngine:
         dx, dy = (direction or (1, 0))
         if abs(dy) > 0.01 or dx < 0:            # direction non horizontale
             self._write_rotated(page, origin, text, font, size, color,
-                                 target_w, dx, dy)
+                                 target_w, dx, dy, render_mode, shear)
             return
 
         core = text.strip()
@@ -4340,20 +4672,20 @@ class PDFObjectEngine:
             pt = fitz.Point(origin[0] + lead_off, origin[1])
             tw = fitz.TextWriter(page.rect, color=color)
             tw.append(pt, core, font=font, fontsize=size)
-            tw.write_text(page)                 # rendu naturel (pas de distorsion)
+            tw.write_text(page, morph=_morph(pt, shear),
+                          render_mode=render_mode)                 # rendu naturel (pas de distorsion)
             return
 
         pt = fitz.Point(origin)
         tw = fitz.TextWriter(page.rect, color=color)
         tw.append(pt, text, font=font, fontsize=size)
         sx = self._hscale(font, text, size, target_w)   # anti-dérive (ou None)
-        if sx is not None:
-            tw.write_text(page, morph=(pt, fitz.Matrix(sx, 1)))
-        else:
-            tw.write_text(page)
+        tw.write_text(page, morph=_morph(
+            pt, shear, fitz.Matrix(sx, 1) if sx is not None else None),
+            render_mode=render_mode)
 
     def _write_rotated(self, page, origin, text, font, size, color,
-                       target_w, dx, dy):
+                       target_w, dx, dy, render_mode=0, shear=0.0):
         """Rendu du texte INCLINÉ / VERTICAL (Étape C).
 
         Rotation : `dir` de PyMuPDF est en espace page (y vers le BAS) alors que
@@ -4393,7 +4725,8 @@ class PDFObjectEngine:
         mat = fitz.Matrix(deg)
         if sx is not None:
             mat = fitz.Matrix(sx, 1) * mat      # scale (le long de l'axe) puis rotation
-        tw.write_text(page, morph=(pt, mat))
+        tw.write_text(page, morph=_morph(pt, shear, mat),
+                      render_mode=render_mode)
 
     @staticmethod
     def _hscale(font, text, size, target_w):
@@ -4547,6 +4880,16 @@ def _starts_lower(text):
     return False
 
 
+def _all_caps(text):
+    """Toutes les lettres à casse de la ligne sont des capitales (au moins une)."""
+    cased = [ch for ch in text if ch.isupper() or ch.islower()]
+    return bool(cased) and not any(ch.islower() for ch in cased)
+
+
+def _has_lower(text):
+    return any(ch.islower() for ch in text)
+
+
 def _first_word(text):
     t = text.strip()
     return t.split(" ", 1)[0].strip(".,;:!?)]}»”\"'") if t else ""
@@ -4623,6 +4966,12 @@ def _matched_family(font_raw):
         return "roboto"
     # sans par défaut (helvetica, arial, segoe, calibri, open sans, verdana, DIN…)
     return "opensans"
+
+
+def _matched_family_is_default(font_raw):
+    """`_matched_family` n'a reconnu aucun mot-clé (repli sans empattement)."""
+    return (_matched_family(font_raw) == "opensans"
+            and "open" not in (font_raw or "").lower())
 
 
 def _weight_class(font_raw, bold_flag):

@@ -33,6 +33,9 @@ __pycache__/
 # seraient réinitialisées à chaque reconstruction.
 backend/translations/
 backend/tests/_generic_tmp/
+# Catalogue de polices : pré-chargé DANS l'image à la construction, jamais copié
+# depuis le poste (un dossier local périmé ou partiel fausserait l'image).
+backend/fonts/catalogue/
 
 # ── Corpus de test (volumineux, jamais nécessaire en production) ─────────────
 backend/tests files/

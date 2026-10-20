@@ -42,6 +42,7 @@ DOCS = [  # (nom, chemin, langue cible)
     ("code_route", BACKEND / "tests files/Code_de_la_Route.pdf", "en"),
     ("data_science", BACKEND / "tests files/The Data Science Handbook.pdf", "fr"),
     ("mv21", BACKEND / "tests files/mv21.pdf", "fr"),
+    ("certificat", BACKEND / "tests files/CD26052553710.pdf", "es"),
 ]
 
 # USD par million de jetons, heures pleines : (cache, hors cache, sortie).

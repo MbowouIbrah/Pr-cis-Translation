@@ -146,7 +146,11 @@ def translate_pdf_progressive(pdf_path, output_path, target_lang="fr",
         _emit(on_event, {"type": "start", "total": total})
 
         # Polices embarquées : extraites UNE fois (dictionnaire de document).
-        data = {"pages": [], "fonts": eng._extract_fonts(src)}
+        # Les largeurs mesurées de chaque police choisissent la police la plus
+        # proche quand l'originale est introuvable (voir `engines.pdf.polices`).
+        profils = {}
+        data = {"pages": [], "fonts": eng._extract_fonts(src, profils),
+                "font_profiles": profils}
         eng._build_fonts(data)
 
         for page_num in range(total):

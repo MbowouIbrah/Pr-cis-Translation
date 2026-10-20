@@ -35,6 +35,7 @@ import fitz
 import racine  # noqa: F401
 from engines.pdf.engine import PDFObjectEngine        # noqa: E402
 from engines.pdf import tagging                        # noqa: E402
+from engines.pdf import engine as engine_mod           # noqa: E402
 
 # Volontairement DIFFÉRENT des documents de test : autre police, autres corps,
 # autres couleurs, autres marges.
@@ -891,6 +892,275 @@ def _p30_rectangles_troues(eng):
              f"(trou, cadre) = {rendu}")]
 
 
+def _p31_gras_synthetique(eng):
+    """GRAS SYNTHÉTIQUE : une police Regular peinte en mode 2 (remplissage +
+    contour) — l'éditeur n'avait pas la graisse Bold. La police ne dit rien :
+    seul le mode de rendu porte le gras. Il doit être lu à l'extraction et
+    REPRODUIT au rendu, traduit ou non, avec le même typeface (pas une Bold de
+    repli d'une autre famille)."""
+    ttf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                       "fonts", "opensans-Regular.ttf")
+    doc = fitz.open()
+    pg = doc.new_page(width=320, height=140)
+    pg.insert_font(fontname="FR", fontfile=ttf)
+    pg.insert_text((20, 40), "Titre en gras", fontname="FR", fontsize=13,
+                   render_mode=2, border_width=0.04)
+    pg.insert_text((20, 90), "Corps ordinaire", fontname="FR", fontsize=13)
+    # Même ligne, même police : étiquette grasse puis valeur maigre.
+    pg.insert_text((20, 125), "Nom :", fontname="FR", fontsize=11,
+                   render_mode=2, border_width=0.04)
+    x = 20 + fitz.Font(fontfile=ttf).text_length("Nom : ", fontsize=11)
+    pg.insert_text((x, 125), "Dupont", fontname="FR", fontsize=11)
+    doc = fitz.open("pdf", doc.tobytes())
+    pg = doc[0]
+    pd = eng.extract_page_data(doc, 0, pg, embed_images=False)
+    paras = [e for e in pd["elements"] if e.get("type") == "paragraph"]
+
+    def _gras(frag):
+        runs = [r for p in paras if frag in (p.get("text") or "")
+                for ln in p.get("lines", ()) for r in ln.get("runs", ())]
+        return bool(runs) and all(r.get("bold") for r in runs)
+
+    res = [("P31  piège armé (police Regular, gras par le seul mode 2)",
+            not any(s["flags"] & 16 for b in pg.get_text("dict")["blocks"]
+                    for ln in b.get("lines", ()) for s in ln["spans"]), ""),
+           ("P31  le gras synthétique est LU", _gras("Titre en gras"), ""),
+           ("P31  le corps Regular n'est PAS promu gras",
+            not _gras("Corps ordinaire"), ""),
+           ("P31  même ligne : l'étiquette grasse, la valeur maigre",
+            [(r["text"].strip(), bool(r.get("bold"))) for p in paras
+             if "Dupont" in (p.get("text") or "")
+             for ln in p.get("lines", ()) for r in ln.get("runs", ())
+             if r["text"].strip()] == [("Nom :", True), ("Dupont", False)],
+            str([(r["text"], r.get("bold")) for p in paras
+                 for ln in p.get("lines", ()) for r in ln.get("runs", ())]))]
+
+    def _styles(out):
+        st = {}
+        for b in out[0].get_text("rawdict", flags=fitz.TEXT_COLLECT_STYLES
+                                 )["blocks"]:
+            for ln in b.get("lines", ()):
+                for s in ln["spans"]:
+                    t = "".join(c["c"] for c in s["chars"]).strip()
+                    if t:
+                        st[t] = (s["font"], s.get("char_flags", 0))
+        return st
+
+    eng._build_fonts({"fonts": eng._extract_fonts(doc)})
+    FAUX = {"Titre en gras": "Bold title", "Corps ordinaire": "Plain body"}
+    for traduit in (False, True):
+        for p in paras:
+            tagged, meta = tagging.tag_paragraph(p)
+            p["tr_segments"] = meta
+            cle = (p.get("text") or "").strip()
+            p["tr_tagged"] = (f"[[0]]{FAUX[cle]}[[/0]]"
+                              if traduit and cle in FAUX else tagged)
+        out = fitz.open()
+        eng.render_page_into(out, pd, draw_borders=False, translated=traduit)
+        st = _styles(out)
+        def _de(phrase):
+            # Le rendu peut poser la ligne mot à mot : un style par mot.
+            vus = [v for t, v in st.items() if t in phrase.split() or t == phrase]
+            return vus[0] if vus and len(set(vus)) == 1 else None
+        titre = _de("Bold title" if traduit else "Titre en gras")
+        corps = _de("Plain body" if traduit else "Corps ordinaire")
+        quoi = "traduit" if traduit else "non traduit"
+        res.append((f"P31  rendu {quoi} : le titre reste gras (rempli + "
+                    "contour, même typeface)",
+                    bool(titre) and titre[1] & 48 == 48
+                    and "bold" not in titre[0].lower(), f"{titre} / {st}"))
+        res.append((f"P31  rendu {quoi} : le corps reste maigre",
+                    bool(corps) and not corps[1] & 32, f"{corps}"))
+    return res
+
+
+def _p32_italique_synthetique(eng):
+    """ITALIQUE SYNTHÉTIQUE : une police droite penchée par la matrice de
+    texte (Tm cisaillé) — l'éditeur n'avait pas l'Italic. Seule la matrice
+    porte l'italique ; il doit être lu et REPRODUIT (même pente, même
+    typeface), traduit ou non, sans gagner le voisin droit de la même ligne."""
+    ttf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                       "fonts", "opensans-Regular.ttf")
+    pente = 0.21256
+    # `morph` agit dans l'espace PDF (y vers le haut) : +pente = penché vers
+    # l'avant, comme un vrai italique (Tm « 1 0 0.21 1 » des sources réelles).
+    cis = fitz.Matrix(1, 0, pente, 1, 0, 0)
+    doc = fitz.open()
+    pg = doc.new_page(width=320, height=140)
+    pg.insert_font(fontname="FR", fontfile=ttf)
+    pt = fitz.Point(20, 40)
+    pg.insert_text(pt, "Note en italique", fontname="FR", fontsize=13,
+                   morph=(pt, cis))
+    pg.insert_text((20, 90), "Corps droit", fontname="FR", fontsize=13)
+    pt = fitz.Point(20, 125)
+    pg.insert_text(pt, "Vu :", fontname="FR", fontsize=11, morph=(pt, cis))
+    x = 20 + fitz.Font(fontfile=ttf).text_length("Vu : ", fontsize=11)
+    pg.insert_text((x, 125), "Durand", fontname="FR", fontsize=11)
+    doc = fitz.open("pdf", doc.tobytes())
+    pg = doc[0]
+    pd = eng.extract_page_data(doc, 0, pg, embed_images=False)
+    paras = [e for e in pd["elements"] if e.get("type") == "paragraph"]
+
+    def _runs(frag):
+        return [r for p in paras if frag in (p.get("text") or "")
+                for ln in p.get("lines", ()) for r in ln.get("runs", ())
+                if r["text"].strip()]
+
+    res = [("P32  piège armé (police droite, italique par la seule matrice)",
+            not any(s["flags"] & 2 for b in pg.get_text("dict")["blocks"]
+                    for ln in b.get("lines", ()) for s in ln["spans"]), ""),
+           ("P32  pente lue vers l'AVANT (positive), comme un vrai italique",
+            bool(engine_mod._synth_italic_keys(pg))
+            and all(abs(k - pente) < 0.01
+                    for k in engine_mod._synth_italic_keys(pg).values()),
+            str(sorted(set(engine_mod._synth_italic_keys(pg).values())))),
+           ("P32  l'italique synthétique est LU",
+            bool(_runs("Note en")) and all(r.get("italic")
+                                            for r in _runs("Note en")), ""),
+           ("P32  le corps droit n'est PAS promu italique",
+            not any(r.get("italic") for r in _runs("Corps droit")), ""),
+           ("P32  même ligne : l'étiquette penchée, la valeur droite",
+            [(r["text"].strip(), bool(r.get("italic")))
+             for r in _runs("Durand")] == [("Vu :", True), ("Durand", False)],
+            str([(r["text"], r.get("italic")) for r in _runs("Durand")]))]
+
+    eng._build_fonts({"fonts": eng._extract_fonts(doc)})
+    FAUX = {"Note en italique": "Italic note", "Corps droit": "Upright body"}
+    for traduit in (False, True):
+        for p in paras:
+            tagged, meta = tagging.tag_paragraph(p)
+            p["tr_segments"] = meta
+            cle = (p.get("text") or "").strip()
+            p["tr_tagged"] = (f"[[0]]{FAUX[cle]}[[/0]]"
+                              if traduit and cle in FAUX else tagged)
+        out = fitz.open()
+        eng.render_page_into(out, pd, draw_borders=False, translated=traduit)
+        pentes = engine_mod._synth_italic_keys(out[0])
+        # Glyphe -> (police, baseline) ; une phrase = les glyphes de sa ligne.
+        glyphes, lignes = {}, {}
+        for b in out[0].get_text("rawdict")["blocks"]:
+            for ln in b.get("lines", ()):
+                txt = "".join(c["c"] for sp in ln["spans"]
+                              for c in sp["chars"]).strip()
+                lignes[txt] = [engine_mod._glyph_key(c) for sp in ln["spans"]
+                               for c in sp["chars"] if c["c"].strip()]
+                for sp in ln["spans"]:
+                    for c in sp["chars"]:
+                        glyphes[engine_mod._glyph_key(c)] = sp["font"]
+        titre = lignes.get("Italic note" if traduit else "Note en italique")
+        corps = lignes.get("Upright body" if traduit else "Corps droit")
+        quoi = "traduit" if traduit else "non traduit"
+        res.append((f"P32  rendu {quoi} : le titre reste penché (même pente, "
+                    "même typeface)",
+                    bool(titre) and all(abs(pentes.get(k, 0) - pente) < 0.01
+                                        and "italic" not in glyphes[k].lower()
+                                        for k in titre),
+                    f"{[(k, pentes.get(k), glyphes[k]) for k in (titre or [])[:2]]}"
+                    f" / {list(lignes)}"))
+        res.append((f"P32  rendu {quoi} : le corps reste droit",
+                    bool(corps) and not any(pentes.get(k) for k in corps), ""))
+    return res
+
+
+def _p33_images_jumelles(eng):
+    """P33 — deux images aux pixels IDENTIQUES mais objets distincts (logo et
+    filigrane faits du même dessin, masques différents) : la recherche par
+    empreinte (`get_image_rects`) les confond et donne au filigrane la place
+    du logo. Chaque pose doit être rattachée à SON objet, à SA place, et
+    l'opacité de la pose (`ca` d'un ExtGState) reportée au rendu."""
+    doc = fitz.open()
+    pg = doc.new_page(width=300, height=300)
+    px = bytes(16 * 16)                 # gris 0 : noir plein
+
+    def _image(masque):
+        m = doc.get_new_xref()
+        doc.update_object(m, "<</Type/XObject/Subtype/Image/Width 16/Height 16"
+                             "/ColorSpace/DeviceGray/BitsPerComponent 8>>")
+        doc.update_stream(m, bytes([masque]) * 256)
+        x = doc.get_new_xref()
+        doc.update_object(x, "<</Type/XObject/Subtype/Image/Width 16/Height 16"
+                             "/ColorSpace/DeviceGray/BitsPerComponent 8"
+                             f"/SMask {m} 0 R>>")
+        doc.update_stream(x, px)
+        return x
+    logo, filig = _image(255), _image(254)
+    gs = doc.get_new_xref()
+    doc.update_object(gs, "<</Type/ExtGState/ca 0.2>>")
+    doc.xref_set_key(pg.xref, "Resources", f"<</XObject<</Im1 {logo} 0 R"
+                     f"/Im2 {filig} 0 R>>/ExtGState<</G1 {gs} 0 R>>>>")
+    c = doc.get_new_xref()
+    doc.update_object(c, "<<>>")
+    doc.update_stream(c, b"q 60 0 0 40 20 20 cm /Im1 Do Q "
+                         b"q /G1 gs 260 0 0 160 20 120 cm /Im2 Do Q")
+    doc.xref_set_key(pg.xref, "Contents", f"{c} 0 R")
+    doc = fitz.open("pdf", doc.tobytes())
+    pg = doc[0]
+    R_LOGO, R_FIL = fitz.Rect(20, 240, 80, 280), fitz.Rect(20, 20, 280, 180)
+
+    def _proche(a, b):
+        return max(abs(a[i] - b[i]) for i in range(4)) < 0.5
+
+    pd = eng.extract_page_data(doc, 0, pg, embed_images=True)
+    ims = [e for e in pd["elements"] if e.get("type") == "image"]
+    fil = [e for e in ims if _proche(e["bbox"], R_FIL)]
+    lg = [e for e in ims if _proche(e["bbox"], R_LOGO)]
+    out = fitz.open()
+    eng.render_page_into(out, pd, draw_borders=False)
+    rpix = out[0].get_pixmap(colorspace=fitz.csGRAY)
+    centre_f = rpix.pixel(150, 100)[0]
+    centre_l = rpix.pixel(50, 260)[0]
+    return [
+        ("P33  piège armé : l'empreinte confond les deux images",
+         not any(_proche(r, R_FIL) for r in pg.get_image_rects(filig)), ""),
+        ("P33  extraction : une pose au logo, une au filigrane, chacune à sa place",
+         len(lg) == 1 and len(fil) == 1 and len(ims) == 2,
+         str([(e["xref"], e["bbox"]) for e in ims])),
+        ("P33  extraction : opacité du filigrane relevée, logo opaque",
+         bool(fil) and abs((fil[0].get("alpha") or 1.0) - 0.2) < 0.01
+         and bool(lg) and (lg[0].get("alpha") or 1.0) == 1.0,
+         str([(e["xref"], e.get("alpha")) for e in ims])),
+        ("P33  rendu : filigrane présent à 20 % (gris clair), logo plein (noir)",
+         abs(centre_f - 204) < 12 and centre_l < 20,
+         f"filigrane={centre_f} logo={centre_l}"),
+    ]
+
+
+def _p34_capitales_puis_casse_mixte(eng):
+    """En-tête centré : une ligne en CAPITALES puis une devise en casse mixte,
+    de MÊME largeur par coïncidence. Alignées sur les deux bords, elles
+    passaient pour une colonne justifiée de deux lignes et fusionnaient ; le
+    reflow les recoupait ailleurs (« REPUBLIC OF CAMEROON Peace - » / « Work -
+    Fatherland »). Le passage des capitales à la casse mixte est un
+    changement de composition, comme le passage du gras au maigre."""
+    l1, l2, axe, taille = "REPUBLIC OF CAMEROON", "Peace - Work - Fatherland", 480, 8
+    w1 = fitz.get_text_length(l1, "helv", taille)
+    w2 = fitz.get_text_length(l2, "helv", taille)
+    doc = fitz.open()
+    pg = doc.new_page(width=600, height=200)
+    pg.insert_text((axe - w1 / 2, 40), l1, fontname="helv", fontsize=taille)
+    o2 = fitz.Point(axe - w1 / 2, 51.7)
+    pg.insert_text(o2, l2, fontname="helv", fontsize=taille,
+                   morph=(o2, fitz.Matrix(w1 / w2, 1)))   # même largeur
+    pg.insert_text((50, 150), "Body text of the page, unrelated to the header.",
+                   fontname="helv", fontsize=10)
+    lignes = [l["bbox"] for b in pg.get_text("dict")["blocks"]
+              for l in b.get("lines", ()) if l["bbox"][1] < 60]
+    arme = (len(lignes) == 2 and abs(lignes[0][0] - lignes[1][0]) < 0.5
+            and abs(lignes[0][2] - lignes[1][2]) < 0.5)
+    # Colonne de DROITE : l'espace ouvert à droite (600 − bord) est plus
+    # étroit que la ligne, la coupe « espace restant » ne tranche pas.
+    arme = arme and 600 - lignes[0][2] < lignes[0][2] - lignes[0][0]
+    pd = eng.extract_page_data(doc, 0, doc[0], embed_images=False)
+    textes = [el.get("text") or "" for el in pd["elements"]
+              if el.get("type") == "paragraph"]
+    soudes = [t for t in textes if "CAMEROON" in t and "Peace" in t]
+    return [("P34  piège armé (deux lignes centrées de même largeur)", arme,
+             str(lignes)),
+            ("P34  capitales puis casse mixte : deux paragraphes distincts",
+             not soudes and any("CAMEROON" in t for t in textes)
+             and any("Peace" in t for t in textes), str(textes))]
+
+
 def run():
     scratch = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "_generic_tmp")
@@ -1475,7 +1745,11 @@ def run():
         ok(nom, bon, detail)
     for nom, bon, detail in (_p28_texte_masque(eng)
                              + _p29_sous_ensembles_homonymes(eng)
-                             + _p30_rectangles_troues(eng)):
+                             + _p30_rectangles_troues(eng)
+                             + _p31_gras_synthetique(eng)
+                             + _p33_images_jumelles(eng)
+                             + _p32_italique_synthetique(eng)
+                             + _p34_capitales_puis_casse_mixte(eng)):
         ok(nom, bon, detail)
 
     # ── Rapport ─────────────────────────────────────────────────────────────

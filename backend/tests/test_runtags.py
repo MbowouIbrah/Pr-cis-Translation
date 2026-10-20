@@ -304,6 +304,38 @@ def main() -> int:
     ok("PASSE  une réponse correcte ne coûte AUCUN appel de plus",
        len(appels) == 1, f"appels={len(appels)}")
 
+    # ── 10. Un fragment ENTIER rendu inchangé est redemandé, une fois ────
+    # La colonne anglaise d'un en-tête bilingue revenait telle quelle en
+    # espagnol : aucun run « mélangé », donc aucun défaut, donc jamais
+    # redemandée. Nom propre ou oubli, seul le modèle peut le dire.
+    src = "[[0]]REPUBLIC OF CAMEROON[[/0]]"
+    ok("INCHANGÉ  un fragment entier recopié est signalé",
+       "inchange" in runtags.defauts(src, "[[0]]Republic of Cameroon[[/0]]"),
+       str(runtags.defauts(src, "[[0]]Republic of Cameroon[[/0]]")))
+    ok("INCHANGÉ  un fragment sans lettre recopié ne l'est pas",
+       runtags.defauts("[[0]]2021 – 2023[[/0]]", "[[0]]2021 – 2023[[/0]]") == [],
+       str(runtags.defauts("[[0]]2021 – 2023[[/0]]", "[[0]]2021 – 2023[[/0]]")))
+
+    appels.clear()
+
+    class _ClientRecopie(_FauxClient):
+        """Rend toujours la source : un nom propre que le modèle maintient."""
+        def _create(self, **kw):
+            envoye = json.loads(kw["messages"][1]["content"].split("\n\n", 1)[1])
+            appels.append(envoye)
+            return _Reponse(json.dumps({"translations": [
+                {"id": "e1", "translated_text": "[[0]]Almeida[[/0]]"}]}))
+
+    tr.client = _ClientRecopie()
+    lot = [{"id": "e1", "text": "[[0]]Almeida[[/0]]"}]
+    tr._translate_batch(lot, "es", None, retries=1, passes=1)
+    ok("INCHANGÉ  redemandé avec la consigne qui le dit",
+       len(appels) == 2 and "inchangé" in appels[1][0].get("consigne", ""),
+       str(appels[1][0] if len(appels) > 1 else None))
+    ok("INCHANGÉ  la seconde réponse fait foi : rien n'est supprimé",
+       len(appels) == 2 and lot[0]["translated_text"] == "[[0]]Almeida[[/0]]",
+       f"appels={len(appels)} {lot[0].get('translated_text')!r}")
+
     print()
     n_ok = sum(1 for _, c, _ in checks if c)
     for nom, cond, detail in checks:

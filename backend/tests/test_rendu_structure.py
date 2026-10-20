@@ -106,6 +106,7 @@ def _extraction_comptee(self, *a, **k):
 
 
 TranslatorAI._translate_batch = _ia_factice
+TranslatorAI.fiche_document = lambda self, *a, **k: ""  # aucun appel payant
 PDFObjectEngine.extract_page_data = _extraction_comptee
 
 with tempfile.TemporaryDirectory() as tmp:

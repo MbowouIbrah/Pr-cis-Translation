@@ -47,6 +47,7 @@ import threading
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
+from engines.pdf import polices
 from engines.pdf.version import ENGINE_VERSION
 
 logger = logging.getLogger(__name__)
@@ -68,8 +69,21 @@ def cache_valid(translation_path: str) -> str | None:
     return None
 
 
-def store_render(data: bytes, translation_path: str) -> None:
-    """Écrit le rendu ATOMIQUEMENT — un lecteur ne voit jamais un demi-PDF."""
+def marque_polices() -> int:
+    """À relever AVANT le rendu, puis passer à `store_render`."""
+    return polices.degradations()
+
+
+def store_render(data: bytes, translation_path: str, marque: int) -> None:
+    """Écrit le rendu ATOMIQUEMENT — un lecteur ne voit jamais un demi-PDF.
+
+    Un rendu fait réseau coupé (police « proche » faute d'identique) n'est pas
+    conservé : la clé ne porte que ENGINE_VERSION, il serait servi à vie. Le
+    suivant retentera le téléchargement."""
+    if polices.degradations() != marque:
+        logger.info("Rendu non mis en cache (polices dégradées) : %s",
+                    translation_path)
+        return
     cp = cache_path_for(translation_path)
     tmp = cp + ".tmp"
     try:
@@ -144,11 +158,12 @@ def ensure_background_build(original_path: str, translation_path: str,
             with build_lock(translation_path):
                 if cache_valid(translation_path):
                     return          # une requête l'a construit entre-temps
+                marque = marque_polices()
                 data = _app.render_translation_bytes(
                     original_path, translation_path, ext, target_lang)
                 if ext != "pdf":
                     data = _app.convert_to_pdf_bytes(data, ext)
-                store_render(data, translation_path)
+                store_render(data, translation_path, marque)
             logger.info("Rendu complet mis en cache (PDF) : %s", cp)
         except Exception as e:
             logger.warning("Construction du rendu en cache échouée (%s) : %s",
